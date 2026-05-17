@@ -36,6 +36,12 @@ extern char *SEQ_SCALE_NameGet(u8 scale);
 
 extern s32 SEQ_SCALE_NoteValueGet(u8 note, u8 scale, u8 root);
 extern s32 SEQ_SCALE_NextNoteInScale(u8 current_note, u8 scale, u8 root);
+extern s32 SEQ_SCALE_PrevNoteInScale(u8 current_note, u8 scale, u8 root);
+
+// Walk N scale degrees up/down from any note (snaps to scale first).
+// degree_delta is signed: positive = up, negative = down, 0 = snap-only.
+// Clamps result to 0..127.
+extern s32 SEQ_SCALE_WalkScale(u8 note, u8 scale, u8 root, s8 degree_delta);
 
 extern s32 SEQ_SCALE_Note(mios32_midi_package_t *p, u8 scale, u8 root);
 
