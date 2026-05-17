@@ -71,6 +71,13 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->robotize_loop_start = 0;
     tcc->robotize_loop_rotate = 0;
 
+    // Turing machine generator: off by default
+    tcc->tm_mode = 0;
+    tcc->tm_length = 8;          // 8-bit loop = classic short TM length
+    tcc->tm_probability = 64;    // middle = chaos by default
+    tcc->tm_note_base = 36;      // C2 baseline
+    tcc->tm_note_range = 24;     // 2-octave span
+    tcc->tm_cc_number = 1;       // mod wheel
     {
       u8 i;
       for(i=0; i<16; ++i)
@@ -257,6 +264,15 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	break;
       case SEQ_CC_ROBOTIZE_LOOP_START:  tcc->robotize_loop_start  = value & 0x0f; break;
       case SEQ_CC_ROBOTIZE_LOOP_ROTATE: tcc->robotize_loop_rotate = value & 0x0f; break;
+
+      case SEQ_CC_TM_MODE:        tcc->tm_mode = value & 0x0f; break;
+      case SEQ_CC_TM_LENGTH:
+	tcc->tm_length = (value < 1) ? 1 : (value > 16 ? 16 : value);
+	break;
+      case SEQ_CC_TM_PROBABILITY: tcc->tm_probability = (value > 127) ? 127 : value; break;
+      case SEQ_CC_TM_NOTE_BASE:   tcc->tm_note_base   = (value > 127) ? 127 : value; break;
+      case SEQ_CC_TM_NOTE_RANGE:  tcc->tm_note_range  = (value > 127) ? 127 : value; break;
+      case SEQ_CC_TM_CC_NUMBER:   tcc->tm_cc_number   = (value > 127) ? 127 : value; break;
 
       default:
 	portEXIT_CRITICAL();
@@ -456,6 +472,13 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_ROBOTIZE_PALETTE_LENGTH: return tcc->robotize_palette_length;
     case SEQ_CC_ROBOTIZE_LOOP_START: return tcc->robotize_loop_start;
     case SEQ_CC_ROBOTIZE_LOOP_ROTATE: return tcc->robotize_loop_rotate;
+
+    case SEQ_CC_TM_MODE:        return tcc->tm_mode;
+    case SEQ_CC_TM_LENGTH:      return tcc->tm_length;
+    case SEQ_CC_TM_PROBABILITY: return tcc->tm_probability;
+    case SEQ_CC_TM_NOTE_BASE:   return tcc->tm_note_base;
+    case SEQ_CC_TM_NOTE_RANGE:  return tcc->tm_note_range;
+    case SEQ_CC_TM_CC_NUMBER:   return tcc->tm_cc_number;
   }
 
   return -2; // invalid CC

@@ -119,6 +119,7 @@ typedef struct seq_core_trk_t {
   u32                  robotize_measure_ctr; // monotonic per-track musical-measure counter; increments on each global measure boundary (ref_step==0). Independent of track length, so polymetric/polyrhythmic tracks share the same robotize clock.
   u8                   robotize_loop_phase;  // measures since last anchor restore; wraps to 0 when >= tcc->robotize_loop_cycles
   u8                   robotize_pending_resync; // 1 = on next measure boundary, restore state=bar_anchors[0] and zero phase (quantized freeze OR master-sync)
+  u16                  tm_register;          // turing-machine shift register (16 bits, evolves once per played step when tcc->tm_mode != 0)
 } seq_core_trk_t;
 
 

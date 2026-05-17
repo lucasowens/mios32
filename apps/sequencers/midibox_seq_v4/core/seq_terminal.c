@@ -34,6 +34,7 @@
 #include "seq_core.h"
 #include "seq_cc.h"
 #include "seq_robotize.h"
+#include "seq_turing.h"
 #include "seq_layer.h"
 #include "seq_par.h"
 #include "seq_trg.h"
@@ -582,6 +583,124 @@ s32 SEQ_TERMINAL_ParseLine(char *input, void *_output_function)
 	  }
 	}
       }
+    } else if( strcmp(parameter, "tm") == 0 ) {
+      char *sub = strtok_r(NULL, separators, &brkt);
+      char *arg = strtok_r(NULL, separators, &brkt);
+      if( !sub ) {
+	out("Usage (Euclidean-style one-shot generator - run 'tm generate' to write):");
+	out("  tm mode     <track> <bitmask>   bit0=note out, bit1=vel out, bit2=gate out (0=disabled)");
+	out("  tm length   <track> <1..16>     bits of loop period (shorter = tighter repeats)");
+	out("  tm prob     <track> <0..127>    flip prob (0=lock, 64=chaos, 127=inverse-lock)");
+	out("  tm base     <track> <0..127>    base note for note output");
+	out("  tm range    <track> <0..127>    span of note output above base");
+	out("  tm random   <track>             randomize the seed");
+	out("  tm flip     <track> <0..15>     flip one bit of the seed");
+	out("  tm generate <track>             run the TM simulation and WRITE to track layers");
+	out("  tm status   <track>             print TM state");
+      } else {
+	int track = arg ? get_dec(arg) : 0;
+	if( track < 1 || track > SEQ_CORE_NUM_TRACKS ) {
+	  out("Expected track 1..%d", SEQ_CORE_NUM_TRACKS);
+	} else {
+	  u8 t = track - 1;
+	  char *vstr = strtok_r(NULL, separators, &brkt);
+	  if( strcmp(sub, "mode") == 0 ) {
+	    if( !vstr ) { out("Expected bitmask (0..15)"); }
+	    else { seq_cc_trk[t].tm_mode = (u8)(get_dec(vstr) & 0x0f);
+		   out("Track %d: tm_mode=0x%02x", track, seq_cc_trk[t].tm_mode); }
+	  } else if( strcmp(sub, "length") == 0 ) {
+	    if( !vstr ) { out("Expected length (1..16)"); }
+	    else { int v = get_dec(vstr);
+		   if( v < 1 ) v = 1; if( v > 16 ) v = 16;
+		   seq_cc_trk[t].tm_length = (u8)v;
+		   out("Track %d: tm_length=%d", track, v); }
+	  } else if( strcmp(sub, "prob") == 0 ) {
+	    if( !vstr ) { out("Expected probability (0..127)"); }
+	    else { int v = get_dec(vstr);
+		   if( v < 0 ) v = 0; if( v > 127 ) v = 127;
+		   seq_cc_trk[t].tm_probability = (u8)v;
+		   out("Track %d: tm_probability=%d", track, v); }
+	  } else if( strcmp(sub, "base") == 0 ) {
+	    if( !vstr ) { out("Expected note (0..127)"); }
+	    else { int v = get_dec(vstr);
+		   if( v < 0 ) v = 0; if( v > 127 ) v = 127;
+		   seq_cc_trk[t].tm_note_base = (u8)v;
+		   out("Track %d: tm_note_base=%d", track, v); }
+	  } else if( strcmp(sub, "range") == 0 ) {
+	    if( !vstr ) { out("Expected range (0..127)"); }
+	    else { int v = get_dec(vstr);
+		   if( v < 0 ) v = 0; if( v > 127 ) v = 127;
+		   seq_cc_trk[t].tm_note_range = (u8)v;
+		   out("Track %d: tm_note_range=%d", track, v); }
+	  } else if( strcmp(sub, "ccnum") == 0 ) {
+	    if( !vstr ) { out("Expected CC number (0..127)"); }
+	    else { int v = get_dec(vstr);
+		   if( v < 0 ) v = 0; if( v > 127 ) v = 127;
+		   seq_cc_trk[t].tm_cc_number = (u8)v;
+		   out("Track %d: tm_cc_number=%d", track, v); }
+	  } else if( strcmp(sub, "random") == 0 ) {
+	    SEQ_TURING_RegisterRandomize(t);
+	    out("Track %d: register randomized -> 0x%04x", track, SEQ_TURING_RegisterGet(t));
+	  } else if( strcmp(sub, "flip") == 0 ) {
+	    if( !vstr ) { out("Expected bit index (0..15)"); }
+	    else { int v = get_dec(vstr);
+		   if( v < 0 || v > 15 ) out("bit must be 0..15");
+		   else { SEQ_TURING_BitFlip(t, (u8)v);
+			  out("Track %d: flipped bit %d -> 0x%04x", track, v, SEQ_TURING_RegisterGet(t)); } }
+	  } else if( strcmp(sub, "generate") == 0 ) {
+	    // print pre-call diagnostic so the user can see what's where
+	    out("Track %d: pre-generate diagnostic:", track);
+	    out("  tm_mode=0x%02x  length=%d  prob=%d  base=%d  range=%d",
+		seq_cc_trk[t].tm_mode,
+		seq_cc_trk[t].tm_length,
+		seq_cc_trk[t].tm_probability,
+		seq_cc_trk[t].tm_note_base,
+		seq_cc_trk[t].tm_note_range);
+	    out("  link_par_layer_note=%d  link_par_layer_velocity=%d",
+		seq_cc_trk[t].link_par_layer_note,
+		seq_cc_trk[t].link_par_layer_velocity);
+	    out("  event_mode=%d  num_trg_steps=%d  seed=0x%04x",
+		seq_cc_trk[t].event_mode,
+		SEQ_TRG_NumStepsGet(t),
+		SEQ_TURING_RegisterGet(t));
+
+	    s32 r = SEQ_TURING_Generate(t);
+	    if( r == -2 ) {
+	      out("Track %d: tm_mode is 0 - enable an output first (e.g. 'tm mode %d 7' for note+vel+gate)", track, track);
+	    } else if( r < 0 ) {
+	      out("Track %d: generate failed (%d)", track, r);
+	    } else {
+	      const char *note_dest = (seq_cc_trk[t].link_par_layer_note >= 0) ? "note layer" : "par layer 0 (fallback - no note layer linked)";
+	      out("Track %d: TM written. Note->%s. Reflash if you want to verify with edit page.",
+		  track, note_dest);
+	    }
+	  } else if( strcmp(sub, "status") == 0 ) {
+	    u16 reg = SEQ_TURING_RegisterGet(t);
+	    u8 len = seq_cc_trk[t].tm_length;
+	    char bits[17];
+	    u8 i;
+	    for(i=0; i<16; ++i)
+	      bits[15-i] = ((reg >> i) & 1) ? '1' : '0';
+	    bits[16] = 0;
+	    out("Track %d: tm_mode=0x%02x  length=%d  prob=%d  base=%d range=%d  cc#=%d",
+		track,
+		seq_cc_trk[t].tm_mode,
+		len,
+		seq_cc_trk[t].tm_probability,
+		seq_cc_trk[t].tm_note_base,
+		seq_cc_trk[t].tm_note_range,
+		seq_cc_trk[t].tm_cc_number);
+	    out("  register = 0x%04x  bits = %s%s%s",
+		reg,
+		(seq_cc_trk[t].tm_mode & SEQ_TM_OUT_NOTE) ? "[NOTE]" : "",
+		(seq_cc_trk[t].tm_mode & SEQ_TM_OUT_VEL)  ? "[VEL]"  : "",
+		(seq_cc_trk[t].tm_mode & SEQ_TM_OUT_GATE) ? "[GATE]" : "");
+	    out("  binary   = %s  (lower %d bits loop)", bits, len);
+	  } else {
+	    out("Unknown tm subcommand '%s'", sub);
+	  }
+	}
+      }
     } else if( strcmp(parameter, "mixer") == 0 ) {
       SEQ_TERMINAL_PrintCurrentMixerMap(out);
     } else if( strcmp(parameter, "song") == 0 ) {
@@ -1090,6 +1209,7 @@ s32 SEQ_TERMINAL_PrintHelp(void *_output_function)
   out("  tracks:         print overview of all tracks");
   out("  track <track>:  print info about a specific track");
   out("  robotize reseed|reroll|freeze|freeze-q|loop|status <track> [args]:  per-track PRNG loop control");
+  out("  tm mode|length|prob|base|range|random|flip|generate|status <track> [args]:  Turing-machine generator (Euclidean-style)");
   out("  mixer:          print current mixer map");
   out("  song:           print current song info");
   out("  grooves:        print groove templates");

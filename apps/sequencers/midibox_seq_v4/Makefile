@@ -46,6 +46,7 @@ THUMB_SOURCE    = core/app.c \
 		core/seq_ui_fx_humanize.c \
 		core/seq_ui_fx_robotize.c \
 		core/seq_ui_robomold.c \
+		core/seq_turing.c \
 		core/seq_ui_fx_limit.c \
 		core/seq_ui_fx_lfo.c \
 		core/seq_ui_fx_dupl.c \
