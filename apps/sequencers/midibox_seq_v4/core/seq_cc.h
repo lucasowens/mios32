@@ -199,6 +199,20 @@
 // phase offset within the loop window (0..loop_cycles-1, wraps via formula)
 #define SEQ_CC_ROBOTIZE_LOOP_ROTATE				0x95
 
+// Turing-Machine-style shift register generator (per-track).
+// tm_mode is a bitfield of enabled outputs: bit0=note, bit1=vel, bit2=gate, bit3=cc
+#define SEQ_CC_TM_MODE							0x96
+// length of the looping bit window (1..16)
+#define SEQ_CC_TM_LENGTH						0x97
+// probability of flipping the recycled bit on each shift (0..127, ~64=chaos)
+#define SEQ_CC_TM_PROBABILITY					0x98
+// base note for the note output (0..127)
+#define SEQ_CC_TM_NOTE_BASE						0x99
+// span of the note output above the base (0..127)
+#define SEQ_CC_TM_NOTE_RANGE					0x9a
+// CC number when CC output is enabled (0..127)
+#define SEQ_CC_TM_CC_NUMBER						0x9b
+
 //reserve a few spots here for future additions to Robotize, plz.
 
 
@@ -293,6 +307,13 @@ typedef struct {
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 
+  // Turing-Machine-style shift register generator
+  u8		tm_mode;        // bitfield: bit0=note out, bit1=vel out, bit2=gate out, bit3=cc out (0 = disabled)
+  u8		tm_length;      // 1..16 bits of loop period
+  u8		tm_probability; // 0..127 (~64 = max chaos, 0/127 = locked)
+  u8		tm_note_base;   // base note for note output (0..127)
+  u8		tm_note_range;  // span of note output above the base (0..127)
+  u8		tm_cc_number;   // CC number when CC output is enabled
   // per-measure anchors: state restored at the start of each measure within
   // the loop. Measure N of the loop (phase N) plays from bar_anchors[N].
   // Allows individual measures to be re-rolled independently.

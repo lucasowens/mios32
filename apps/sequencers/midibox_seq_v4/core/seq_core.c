@@ -31,6 +31,7 @@
 #include "seq_groove.h"
 #include "seq_humanize.h"
 #include "seq_robotize.h"
+#include "seq_turing.h"
 #include "seq_morph.h"
 #include "seq_lfo.h"
 #include "seq_midi_port.h"
@@ -214,6 +215,9 @@ s32 SEQ_CORE_Init(u32 mode)
 
   // reset robotizer module
   SEQ_ROBOTIZE_Init(0);
+
+  // reset turing-machine generator
+  SEQ_TURING_Init(0);
 
   // reset LFO module
   SEQ_LFO_Init(0);
