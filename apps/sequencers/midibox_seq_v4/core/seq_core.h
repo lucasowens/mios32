@@ -114,6 +114,11 @@ typedef struct seq_core_trk_t {
   u8                   rec_poly_ctr;     // for recording function
   u8                   play_section;     // selects the section which should be played. If -1, no section selection
   u8                   fx_midi_ctr;      // Fx MIDI channel counter
+  u32                  robotize_seed_state; // xorshift32 state for robotize; restored from tcc->robotize_bar_anchors[phase] at each musical measure boundary inside the loop
+  u32                  robotize_seed_snapshots[16]; // ring of PRNG state at the start of each of the last 16 musical measures (indexed by robotize_measure_ctr & 0x0f); freeze pulls from here
+  u32                  robotize_measure_ctr; // monotonic per-track musical-measure counter; increments on each global measure boundary (ref_step==0). Independent of track length, so polymetric/polyrhythmic tracks share the same robotize clock.
+  u8                   robotize_loop_phase;  // measures since last anchor restore; wraps to 0 when >= tcc->robotize_loop_cycles
+  u8                   robotize_pending_resync; // 1 = on next measure boundary, restore state=bar_anchors[0] and zero phase (quantized freeze OR master-sync)
 } seq_core_trk_t;
 
 

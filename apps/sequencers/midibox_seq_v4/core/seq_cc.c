@@ -63,6 +63,20 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->robotize_mask1 = 0xFF;
     tcc->robotize_mask2 = 0xFF;
 
+    // robotize loop/reseed off by default; xorshift32 substitutes a non-zero
+    // default when state is zero so the actual anchor values don't matter here
+    tcc->robotize_loop_cycles = 0;
+    tcc->robotize_sync_to_master = 0;
+    tcc->robotize_palette_length = 16;
+    tcc->robotize_loop_start = 0;
+    tcc->robotize_loop_rotate = 0;
+
+    {
+      u8 i;
+      for(i=0; i<16; ++i)
+        tcc->robotize_bar_anchors[i] = 0;
+    }
+
 
 #ifndef MBSEQV4L
     // set parameters which are not changed by SEQ_LAYER_CopyPreset() function
@@ -236,6 +250,13 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_ROBOTIZE_ACTIVE: tcc->robotize_active = value; break;
       case SEQ_CC_ROBOTIZE_MASK1: tcc->robotize_mask1 = value; break;
       case SEQ_CC_ROBOTIZE_MASK2: tcc->robotize_mask2 = value; break;
+      case SEQ_CC_ROBOTIZE_LOOP_CYCLES: tcc->robotize_loop_cycles = value; break;
+      case SEQ_CC_ROBOTIZE_SYNC_TO_MASTER: tcc->robotize_sync_to_master = value; break;
+      case SEQ_CC_ROBOTIZE_PALETTE_LENGTH:
+	tcc->robotize_palette_length = (value < 1) ? 1 : (value > 16 ? 16 : value);
+	break;
+      case SEQ_CC_ROBOTIZE_LOOP_START:  tcc->robotize_loop_start  = value & 0x0f; break;
+      case SEQ_CC_ROBOTIZE_LOOP_ROTATE: tcc->robotize_loop_rotate = value & 0x0f; break;
 
       default:
 	portEXIT_CRITICAL();
@@ -430,6 +451,11 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_ROBOTIZE_ACTIVE: return tcc->robotize_active;
     case SEQ_CC_ROBOTIZE_MASK1: return tcc->robotize_mask1;
     case SEQ_CC_ROBOTIZE_MASK2: return tcc->robotize_mask2;
+    case SEQ_CC_ROBOTIZE_LOOP_CYCLES: return tcc->robotize_loop_cycles;
+    case SEQ_CC_ROBOTIZE_SYNC_TO_MASTER: return tcc->robotize_sync_to_master;
+    case SEQ_CC_ROBOTIZE_PALETTE_LENGTH: return tcc->robotize_palette_length;
+    case SEQ_CC_ROBOTIZE_LOOP_START: return tcc->robotize_loop_start;
+    case SEQ_CC_ROBOTIZE_LOOP_ROTATE: return tcc->robotize_loop_rotate;
   }
 
   return -2; // invalid CC

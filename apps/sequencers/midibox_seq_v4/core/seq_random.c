@@ -62,6 +62,35 @@ u32 SEQ_RANDOM_Gen(u32 seed)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// xorshift32 with caller-supplied state.
+// state must never be 0 (it produces an all-zero stream); we treat 0 as
+// "uninitialized" and substitute a non-zero default so callers can leave
+// the field zero-initialized.
+/////////////////////////////////////////////////////////////////////////////
+u32 SEQ_RANDOM_GenXorshift(u32 *state)
+{
+  u32 x = *state;
+  if( !x )
+    x = 0xdeadbabe;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
+}
+
+u32 SEQ_RANDOM_GenRangeXorshift(u32 *state, u32 min, u32 max)
+{
+  if( min == max )
+    return min;
+  if( min > max ) {
+    u32 tmp = min; min = max; max = tmp;
+  }
+  return min + (SEQ_RANDOM_GenXorshift(state) % (max - min + 1));
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // returns random number in a given range
 /////////////////////////////////////////////////////////////////////////////
 u32 SEQ_RANDOM_Gen_Range(u32 min, u32 max)
