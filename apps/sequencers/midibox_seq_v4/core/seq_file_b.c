@@ -42,6 +42,33 @@
 
 
 /////////////////////////////////////////////////////////////////////////////
+// per-track extension block, appended after all tracks within a pattern
+// slot (before zero-fill). lets fields outside the 128-byte CC array
+// persist without bumping the file magic. the in-file cc[128] block covers
+// CC numbers 0x00..0x7f only - anything higher (the robotize feature lives
+// at 0x80..0x95) was never persisted by the original format. this ext block
+// stores those CC values plus the runtime-derived robotize bar anchors.
+//
+// older firmware reading a new file sees the ext bytes as harmless trailing
+// pad; new firmware reading an old file sees a zero byte where the tag
+// would be and leaves the in-RAM values alone.
+//
+// v1 (tag 0x01) used briefly during dev: anchors only, 64 bytes. v2 adds
+// the extended CC block. read path accepts both.
+/////////////////////////////////////////////////////////////////////////////
+#define SEQ_FILE_B_TRK_EXT_TAG_V1       0x01  // anchors only (legacy)
+#define SEQ_FILE_B_TRK_EXT_TAG_V2       0x02  // ext CCs + anchors
+
+#define SEQ_FILE_B_TRK_EXT_CC_FIRST     0x80
+#define SEQ_FILE_B_TRK_EXT_CC_LAST      0x95
+#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)
+#define SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE 64    // sizeof(robotize_bar_anchors)
+#define SEQ_FILE_B_TRK_EXT_V1_SIZE      (1 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
+#define SEQ_FILE_B_TRK_EXT_V2_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
+#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V2_SIZE
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Local types
 /////////////////////////////////////////////////////////////////////////////
 
@@ -276,8 +303,8 @@ s32 SEQ_FILE_B_Create(char *session, u8 bank)
   u16 p_layer_size = 64; // 256 steps if 4 layers
   u16 t_layer_size = 256/8;
 
-  info->header.pattern_size = sizeof(seq_file_b_pattern_t) + 
-    num_tracks * (sizeof(seq_file_b_track_t) + num_p_instruments*num_p_layers*p_layer_size + num_t_instruments*num_t_layers*t_layer_size);
+  info->header.pattern_size = sizeof(seq_file_b_pattern_t) +
+    num_tracks * (sizeof(seq_file_b_track_t) + num_p_instruments*num_p_layers*p_layer_size + num_t_instruments*num_t_layers*t_layer_size + SEQ_FILE_B_TRK_EXT_SIZE);
   status |= FILE_WriteHWord(info->header.pattern_size);
 
   // not required anymore with FatFs (was required with DOSFS)
@@ -572,6 +599,59 @@ DEBUG_MSG("Skipping Track %d\n", track);
     }
   }
 
+  // optional per-track extension blocks. peek the first tag byte to detect
+  // format; if absent (old file -> zero-fill where the tag would be) leave
+  // ext CCs / anchors at whatever the runtime already had.
+  //
+  // tag 0x02 (v2): 22 ext CC bytes (0x80..0x95) + 64 anchor bytes
+  // tag 0x01 (v1): 64 anchor bytes only (brief dev format - ext CCs default)
+  //
+  // all tracks within a pattern share the same tag (we never write a mix);
+  // the per-track skip path uses the same size for every track.
+  if( status >= 0 ) {
+    u8 first_tag = 0;
+    u32 peek_pos = FILE_ReadGetCurrentPosition();
+    if( FILE_ReadByte(&first_tag) >= 0 ) {
+      FILE_ReadSeek(peek_pos); // rewind regardless of what we saw
+
+      u8 per_track_ext_size = 0;
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V2_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V1 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V1_SIZE;
+
+      if( per_track_ext_size ) {
+	track = target_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
+	for(track_i=0; track_i<num_tracks; ++track_i, ++track) {
+	  if( ((1 << track) | remix_map) == remix_map ) {
+	    // skipped track: keep in-RAM ext CCs / anchors, advance past
+	    u32 new_pos = FILE_ReadGetCurrentPosition() + per_track_ext_size;
+	    status |= FILE_ReadSeek(new_pos);
+	  } else {
+	    u8 tag = 0;
+	    status |= FILE_ReadByte(&tag);
+
+	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
+	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];
+	      status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
+	      u8 i;
+	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
+					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	    } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V1 ) {
+	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
+					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	    } else {
+	      // mid-pattern format break - stop to avoid misalignment
+	      break;
+	    }
+	  }
+	}
+      }
+    }
+  }
+
   // close file (so that it can be re-opened)
   FILE_ReadClose((file_t*)&info->file);
 
@@ -611,8 +691,12 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
   // compare layer parameters with given constraints available in following defines/variables:
   u8 num_tracks = SEQ_CORE_NUM_TRACKS_PER_GROUP;
 
-  // ok, we should at least check, if the resulting size is within the given range
-  u16 expected_pattern_size = sizeof(seq_file_b_pattern_t);
+  // ok, we should at least check, if the resulting size is within the given range.
+  // compute base size (everything that has always been written) separately from
+  // the per-track ext blocks, so we can skip ext when the slot was allocated by
+  // older firmware that didn't reserve room for it. degrading skips anchor
+  // persistence for that pattern but avoids overflowing into the next slot.
+  u16 base_pattern_size = sizeof(seq_file_b_pattern_t);
 
   u8 track = source_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
   u8 track_i;
@@ -624,10 +708,14 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
     u8 num_t_layers = SEQ_TRG_NumLayersGet(track);
     u16 t_layer_size = SEQ_TRG_NumStepsGet(track)/8;
 
-    expected_pattern_size += sizeof(seq_file_b_track_t) + 
-      num_p_instruments*num_p_layers*p_layer_size + 
+    base_pattern_size += sizeof(seq_file_b_track_t) +
+      num_p_instruments*num_p_layers*p_layer_size +
       num_t_instruments*num_t_layers*t_layer_size;
   }
+
+  u16 ext_pattern_size = num_tracks * SEQ_FILE_B_TRK_EXT_SIZE;
+  u8 write_ext = (base_pattern_size + ext_pattern_size <= info->header.pattern_size);
+  u16 expected_pattern_size = base_pattern_size + (write_ext ? ext_pattern_size : 0);
 
   if( expected_pattern_size > info->header.pattern_size ) {
 #if DEBUG_VERBOSE_LEVEL >= 1
@@ -742,6 +830,34 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
 
     // write trigger layers
     status |= FILE_WriteBuffer((u8 *)&seq_trg_layer_value[track], num_t_instruments*num_t_layers*t_layer_size);
+  }
+
+  // per-track extension blocks (see SEQ_FILE_B_TRK_EXT_* defines).
+  // appended after all tracks so older firmware reading this file
+  // sees the bytes as part of its trailing zero-fill. skipped when the
+  // existing slot was sized by older firmware and can't fit the extra
+  // bytes - the ext CCs / anchors won't persist for that pattern but no
+  // overflow into the next slot.
+  if( write_ext ) {
+    track = source_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    for(track_i=0; track_i<num_tracks; ++track_i, ++track) {
+      status |= FILE_WriteByte(SEQ_FILE_B_TRK_EXT_TAG_V2);
+
+      // ext CC bytes (0x80..0x95) - robotize feature CCs that fall outside
+      // the original cc[128] block. SEQ_CC_Get returns -1 for unmapped CCs;
+      // clamp to 0 so the slot is well-defined.
+      u8 cc;
+      for(cc=SEQ_FILE_B_TRK_EXT_CC_FIRST; cc<=SEQ_FILE_B_TRK_EXT_CC_LAST; ++cc) {
+	s32 cc_value = SEQ_CC_Get(track, cc);
+	if( cc_value < 0 )
+	  cc_value = 0;
+	status |= FILE_WriteByte(cc_value);
+      }
+
+      // per-bar PRNG anchor seeds
+      status |= FILE_WriteBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
+				 SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+    }
   }
 
   // fill remaining bytes with zero if required

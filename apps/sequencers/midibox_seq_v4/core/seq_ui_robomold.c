@@ -238,8 +238,13 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
     case SEQ_UI_BUTTON_GP13:
     case SEQ_UI_BUTTON_GP14:
     case SEQ_UI_BUTTON_GP15:
-    case SEQ_UI_BUTTON_GP16:
       return 0;
+
+    // GP16: toggle to the FX_ROBOTIZE sibling (CC-state of the Robo page).
+    // SELECT+GP16 is reroll bar 15, handled above.
+    case SEQ_UI_BUTTON_GP16:
+      SEQ_UI_PageSet(SEQ_UI_PAGE_FX_ROBOTIZE);
+      return 1;
 
     case SEQ_UI_BUTTON_Select:
     case SEQ_UI_BUTTON_Right:
@@ -280,7 +285,7 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 //
 //   Cols 0..39 (LCD 1)                       Cols 40..79 (LCD 2)
 //   Row 0: |Trk. Loop Sync      Resd Frz  FrzQ     |Loop Anchors  (* now, # in loop)        |
-//   Row 1: |G1T1   4   on                          |*###############       Phase  0/ 4     |
+//   Row 1: |G1T1   4   on                          |*###############      SPhase  0/ 4     |
 //          GP1   GP2  GP3   GP4   GP5   GP6   GP7  GP8
 //          5ch   5ch  5ch   5ch   5ch   5ch   5ch  5ch  (40 chars exactly)
 /////////////////////////////////////////////////////////////////////////////
@@ -346,7 +351,7 @@ static s32 LCD_Handler(u8 high_prio)
   // LCD 2 - Row 0: anchor grid header (40 chars)
   SEQ_LCD_CursorSet(40, 0);
   //                  "1234512345123451234512345123451234512345"
-  SEQ_LCD_PrintString("Anchors: * play, # loop, + palette      ");
+  SEQ_LCD_PrintString("Anchors: * play, # loop, + palette   CCs");
 
   ///////////////////////////////////////////////////////////////////////////
   // LCD 2 - Row 1: 16-char grid + phase indicator (40 chars)
@@ -380,13 +385,14 @@ static s32 LCD_Handler(u8 high_prio)
     }
     grid[16] = 0;
     SEQ_LCD_PrintString(grid); // 16 chars
-    SEQ_LCD_PrintSpaces(7);    // 7 chars padding
+    SEQ_LCD_PrintSpaces(6);    // 6 chars padding
+    SEQ_LCD_PrintChar(seq_cc_trk[visible_track].robotize_sync_to_master ? 'S' : ' '); // 1 char sync flag
     if( loop )
       SEQ_LCD_PrintFormattedString("Phase %2d/%2d   ", phase, loop); // 14 chars
     else
       SEQ_LCD_PrintString("Phase --/--   ");                         // 14 chars
     SEQ_LCD_PrintSpaces(3);    // 3 chars padding
-    // total: 16 + 7 + 14 + 3 = 40 - good
+    // total: 16 + 6 + 1 + 14 + 3 = 40 - good
   }
 
   return 0;
