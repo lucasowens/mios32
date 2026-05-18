@@ -72,6 +72,7 @@
 
 static s32 SEQ_CORE_ResetTrkPos(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc);
 static s32 SEQ_CORE_NextStep(seq_core_trk_t *t, seq_cc_trk_t *tcc, u8 no_progression, u8 reverse);
+static void SEQ_CORE_RobotizeLoopBarTick(seq_core_trk_t *t, seq_cc_trk_t *tcc);
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -635,6 +636,17 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
     t->layer_muted_from_midi_next = 0;
     t->lfo_cc_muted_from_midi = 0;
     t->lfo_cc_muted_from_midi_next = 0;
+    // ensure robotize replays its anchored variation from the top of the run
+    t->robotize_loop_phase = 0;
+    t->robotize_pending_resync = 0;
+    t->robotize_measure_ctr = 0;
+    if( tcc->robotize_loop_cycles ) {
+      u8 palette = tcc->robotize_palette_length;
+      if( palette == 0 || palette > 16 ) palette = 16;
+      u8 idx = (tcc->robotize_loop_start + tcc->robotize_loop_rotate) % palette;
+      t->robotize_seed_state = tcc->robotize_bar_anchors[idx];
+    }
+    t->robotize_seed_snapshots[0] = t->robotize_seed_state; // seed measure-0 snapshot
 
     // add track offset depending on start position
     if( bpm_start ) {
@@ -755,6 +767,30 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
       } else {
 	if( seq_core_state.ref_step == 0 )
 	  synch_to_measure_req = 1;
+      }
+    }
+
+    // robotize per-musical-measure tick: independent of any track's length,
+    // so polymetric/polyrhythmic tracks share the same robotize clock.
+    // Master-sync (song-mode-only) runs first so any pending_resync it sets
+    // is consumed by the same measure tick below.
+    if( seq_core_state.ref_step == 0 ) {
+      if( synch_to_measure_req && SEQ_SONG_ActiveGet() && seq_song_guide_track ) {
+	seq_core_trk_t *t_ms = &seq_core_trk[0];
+	seq_cc_trk_t *tcc_ms = &seq_cc_trk[0];
+	u8 t_idx;
+	for(t_idx = 0; t_idx < SEQ_CORE_NUM_TRACKS; ++t_idx, ++t_ms, ++tcc_ms) {
+	  if( tcc_ms->robotize_sync_to_master )
+	    t_ms->robotize_pending_resync = 1;
+	}
+      }
+
+      seq_core_trk_t *t_m = &seq_core_trk[0];
+      seq_cc_trk_t *tcc_m = &seq_cc_trk[0];
+      u8 t_idx;
+      for(t_idx = 0; t_idx < SEQ_CORE_NUM_TRACKS; ++t_idx, ++t_m, ++tcc_m) {
+	++t_m->robotize_measure_ctr;
+	SEQ_CORE_RobotizeLoopBarTick(t_m, tcc_m);
       }
     }
   }
@@ -1606,6 +1642,49 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 /////////////////////////////////////////////////////////////////////////////
 // Resets the step position variables of a track
 /////////////////////////////////////////////////////////////////////////////
+// Called once per track at each musical measure boundary (global ref_step==0).
+// Independent of track length, so all tracks share the same robotize clock -
+// enables polymetric / polyrhythmic structures where each track's own length
+// drifts against a measure-locked robotize variation.
+//
+// Anchor lookup formula:
+//   idx = (start + (rotate + phase) % loop_cycles) % palette_length
+// - palette_length: how many anchors are active (1..16)
+// - start: which anchor index begins the playing window (0..15)
+// - loop_cycles: window size in measures (0=off, 1..16)
+// - rotate: phase offset within the window (lets you cycle the slice live)
+//
+// In wandering mode (loop_cycles == 0): state evolves naturally; snapshots
+// capture the live trajectory so freeze can later rewind to it.
+// In loop mode: at every measure boundary inside the loop, state is restored
+// from bar_anchors[idx] - each measure of the loop is independent, which
+// lets individual measures be re-rolled without affecting the others.
+static inline u8 robotize_anchor_index(seq_cc_trk_t *tcc, u8 phase)
+{
+  u8 palette = tcc->robotize_palette_length;
+  if( palette == 0 || palette > 16 ) palette = 16; // safety
+  u8 loop = tcc->robotize_loop_cycles;
+  if( loop == 0 ) loop = 1; // shouldn't be called when not looping, but be defensive
+  return (tcc->robotize_loop_start + ((tcc->robotize_loop_rotate + phase) % loop)) % palette;
+}
+
+static void SEQ_CORE_RobotizeLoopBarTick(seq_core_trk_t *t, seq_cc_trk_t *tcc)
+{
+  if( t->robotize_pending_resync ) {
+    t->robotize_loop_phase = 0;
+    t->robotize_pending_resync = 0;
+    if( tcc->robotize_loop_cycles )
+      t->robotize_seed_state = tcc->robotize_bar_anchors[robotize_anchor_index(tcc, 0)];
+  } else if( tcc->robotize_loop_cycles ) {
+    ++t->robotize_loop_phase;
+    if( t->robotize_loop_phase >= tcc->robotize_loop_cycles )
+      t->robotize_loop_phase = 0;
+    t->robotize_seed_state = tcc->robotize_bar_anchors[robotize_anchor_index(tcc, t->robotize_loop_phase)];
+  }
+  t->robotize_seed_snapshots[t->robotize_measure_ctr & 0x0f] = t->robotize_seed_state;
+}
+
+
 static s32 SEQ_CORE_ResetTrkPos(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc)
 {
   // synch to measure done

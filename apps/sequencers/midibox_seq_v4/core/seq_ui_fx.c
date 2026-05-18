@@ -31,11 +31,11 @@
 static const seq_ui_page_t shortcut_menu_pages[16] = {
   SEQ_UI_PAGE_FX_ECHO,     // GP1
   SEQ_UI_PAGE_FX_HUMANIZE, // GP2
-  SEQ_UI_PAGE_FX_ROBOTIZE, // GP3
+  SEQ_UI_PAGE_FX_ROBOTIZE, // GP3 (Robo - has internal GP16 toggle to ROBOLOOP)
   SEQ_UI_PAGE_FX_LIMIT,    // GP4
   SEQ_UI_PAGE_FX_LFO,      // GP5
   SEQ_UI_PAGE_FX_DUPL,     // GP6
-  SEQ_UI_PAGE_NONE,        // GP6
+  SEQ_UI_PAGE_NONE,        // GP7
   SEQ_UI_PAGE_NONE,        // GP8
   SEQ_UI_PAGE_FX_LOOP,     // GP9
   SEQ_UI_PAGE_FX_SCALE,    // GP10

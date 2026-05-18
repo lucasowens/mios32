@@ -184,6 +184,21 @@
 #define SEQ_CC_ROBOTIZE_ECHO_PROBABILITY		0x8f
 #define SEQ_CC_ROBOTIZE_DUPLICATE_PROBABILITY	0x90
 
+// 0=off (fresh draws every event, original behaviour),
+// N>=1 = loop the PRNG state over N musical measures
+#define SEQ_CC_ROBOTIZE_LOOP_CYCLES				0x91
+// 0=off, non-zero = realign the robotize loop phase to bar 0 whenever the
+// song-level master cycle wraps (only fires in song mode)
+#define SEQ_CC_ROBOTIZE_SYNC_TO_MASTER			0x92
+
+// palette of total anchors (1..16) - reseed fills only this many, growing
+// loop_cycles past this wraps within the palette
+#define SEQ_CC_ROBOTIZE_PALETTE_LENGTH			0x93
+// index of first anchor in the playing window (0..palette_length-1)
+#define SEQ_CC_ROBOTIZE_LOOP_START				0x94
+// phase offset within the loop window (0..loop_cycles-1, wraps via formula)
+#define SEQ_CC_ROBOTIZE_LOOP_ROTATE				0x95
+
 //reserve a few spots here for future additions to Robotize, plz.
 
 
@@ -271,6 +286,17 @@ typedef struct {
   u8		robotize_active; // Is robotize activated?
   u8		robotize_mask1; // robotize step mask...  Applies robotize on selected steps of a measure.  16 bits representing 16 steps, divided into two variables.
   u8		robotize_mask2; // robotize step mask...  Applies robotize on selected steps of a measure.  16 bits representing 16 steps, divided into two variables.
+
+  u8		robotize_loop_cycles;  // 0=off, 1..16 = number of musical measures in the loop window
+  u8		robotize_sync_to_master; // if non-zero, resync the loop phase to bar 0 every time the song-level master cycle wraps (synch_to_measure_req in song mode)
+  u8		robotize_palette_length; // 1..16 - total active anchors in the palette
+  u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
+  u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
+
+  // per-measure anchors: state restored at the start of each measure within
+  // the loop. Measure N of the loop (phase N) plays from bar_anchors[N].
+  // Allows individual measures to be re-rolled independently.
+  u32		robotize_bar_anchors[16];
   
   // temporary variables which will be updated on CC writes
   s8 link_par_layer_note;        // parameter layer which stores the first note value (-1 if not assigned)

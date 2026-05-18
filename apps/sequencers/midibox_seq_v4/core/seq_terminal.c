@@ -33,6 +33,7 @@
 
 #include "seq_core.h"
 #include "seq_cc.h"
+#include "seq_robotize.h"
 #include "seq_layer.h"
 #include "seq_par.h"
 #include "seq_trg.h"
@@ -406,6 +407,180 @@ s32 SEQ_TERMINAL_ParseLine(char *input, void *_output_function)
 	}
       } else {
 	out("Please specify track, e.g. \"track 1\"");
+      }
+    } else if( strcmp(parameter, "robotize") == 0 ) {
+      char *sub = strtok_r(NULL, separators, &brkt);
+      char *arg = strtok_r(NULL, separators, &brkt);
+      if( !sub ) {
+	out("Usage:");
+	out("  robotize reseed      <track>            fresh random anchor across the palette");
+	out("  robotize reroll      <track> <idx>      replace ONE anchor (0..15)");
+	out("  robotize freeze      <track> [K]        tag last K measures as loop (jump now)");
+	out("  robotize freeze-q    <track> [K]        like freeze, but transitions at next measure boundary");
+	out("  robotize length      <track> <1..16>    palette size (total active anchors)");
+	out("  robotize start       <track> <0..15>    first anchor in the loop window");
+	out("  robotize loop        <track> <0..16>    loop window size in measures (0=off)");
+	out("  robotize rotate      <track> <0..15>    phase offset within the loop window");
+	out("  robotize master-sync <track> on|off     realign loop to song-level master cycle (song mode)");
+	out("  robotize status      <track>            print full loop state + anchors");
+      } else {
+	int track = arg ? get_dec(arg) : 0;
+	if( track < 1 || track > SEQ_CORE_NUM_TRACKS ) {
+	  out("Expected track 1..%d", SEQ_CORE_NUM_TRACKS);
+	} else {
+	  u8 t = track - 1;
+	  if( strcmp(sub, "reseed") == 0 ) {
+	    SEQ_ROBOTIZE_Reseed(t);
+	    out("Track %d: reseeded (16 fresh anchors)  bar0=0x%08x  bar1=0x%08x  bar2=0x%08x  ...",
+		track,
+		seq_cc_trk[t].robotize_bar_anchors[0],
+		seq_cc_trk[t].robotize_bar_anchors[1],
+		seq_cc_trk[t].robotize_bar_anchors[2]);
+	  } else if( strcmp(sub, "reroll") == 0 ) {
+	    char *bstr = strtok_r(NULL, separators, &brkt);
+	    if( !bstr ) {
+	      out("Expected bar index 0..15");
+	    } else {
+	      int b = get_dec(bstr);
+	      if( b < 0 || b > 15 ) {
+		out("bar index must be 0..15");
+	      } else {
+		SEQ_ROBOTIZE_RerollBar(t, (u8)b);
+		out("Track %d: rerolled bar %d -> 0x%08x%s",
+		    track, b, seq_cc_trk[t].robotize_bar_anchors[b],
+		    (seq_cc_trk[t].robotize_loop_cycles && seq_core_trk[t].robotize_loop_phase == b)
+		      ? "  (audible now - playing bar)" : "");
+	      }
+	    }
+	  } else if( strcmp(sub, "freeze") == 0 || strcmp(sub, "freeze-q") == 0 ) {
+	    char *kstr = strtok_r(NULL, separators, &brkt);
+	    u8 K = kstr ? (u8)get_dec(kstr) : 0;
+	    s32 ret = (strcmp(sub, "freeze") == 0)
+		? SEQ_ROBOTIZE_Freeze(t, K)
+		: SEQ_ROBOTIZE_FreezeQuantized(t, K);
+	    if( ret == -2 ) {
+	      out("Track %d: no loop length set - try 'robotize loop %d <N>' first, or pass K", track, track);
+	    } else {
+	      out("Track %d: %s  loop_cycles=%d  bar0=0x%08x",
+		  track,
+		  (strcmp(sub, "freeze") == 0) ? "froze (jump-now)" : "froze (quantized)",
+		  seq_cc_trk[t].robotize_loop_cycles,
+		  seq_cc_trk[t].robotize_bar_anchors[0]);
+	    }
+	  } else if( strcmp(sub, "loop") == 0 ) {
+	    char *nstr = strtok_r(NULL, separators, &brkt);
+	    if( !nstr ) {
+	      out("Expected loop_cycles (0=off, 1..16 musical measures)");
+	    } else {
+	      int n = get_dec(nstr);
+	      if( n < 0 || n > 16 ) {
+		out("loop_cycles must be 0..16");
+	      } else {
+		seq_cc_trk[t].robotize_loop_cycles = (u8)n;
+		// clamp phase if new window is smaller than current phase
+		if( seq_cc_trk[t].robotize_loop_cycles
+		    && seq_core_trk[t].robotize_loop_phase >= seq_cc_trk[t].robotize_loop_cycles )
+		  seq_core_trk[t].robotize_loop_phase = 0;
+		out("Track %d: loop_cycles=%d musical measures", track, n);
+	      }
+	    }
+	  } else if( strcmp(sub, "length") == 0 ) {
+	    char *nstr = strtok_r(NULL, separators, &brkt);
+	    if( !nstr ) {
+	      out("Expected palette length (1..16)");
+	    } else {
+	      int n = get_dec(nstr);
+	      if( n < 1 || n > 16 ) {
+		out("length must be 1..16");
+	      } else {
+		seq_cc_trk[t].robotize_palette_length = (u8)n;
+		out("Track %d: palette length=%d", track, n);
+	      }
+	    }
+	  } else if( strcmp(sub, "start") == 0 ) {
+	    char *nstr = strtok_r(NULL, separators, &brkt);
+	    if( !nstr ) {
+	      out("Expected start index (0..15)");
+	    } else {
+	      int n = get_dec(nstr);
+	      if( n < 0 || n > 15 ) {
+		out("start must be 0..15");
+	      } else {
+		seq_cc_trk[t].robotize_loop_start = (u8)n;
+		// snap playback to new window head
+		seq_core_trk[t].robotize_loop_phase = 0;
+		if( seq_cc_trk[t].robotize_loop_cycles ) {
+		  u8 palette = seq_cc_trk[t].robotize_palette_length;
+		  if( palette == 0 || palette > 16 ) palette = 16;
+		  u8 head_idx = (seq_cc_trk[t].robotize_loop_start + seq_cc_trk[t].robotize_loop_rotate) % palette;
+		  seq_core_trk[t].robotize_seed_state = seq_cc_trk[t].robotize_bar_anchors[head_idx];
+		}
+		out("Track %d: loop start=%d (jumped to anchor %d)", track, n,
+		    (seq_cc_trk[t].robotize_loop_start + seq_cc_trk[t].robotize_loop_rotate) %
+		      ((seq_cc_trk[t].robotize_palette_length == 0 || seq_cc_trk[t].robotize_palette_length > 16)
+		       ? 16 : seq_cc_trk[t].robotize_palette_length));
+	      }
+	    }
+	  } else if( strcmp(sub, "rotate") == 0 ) {
+	    char *nstr = strtok_r(NULL, separators, &brkt);
+	    if( !nstr ) {
+	      out("Expected rotate value (0..15)");
+	    } else {
+	      int n = get_dec(nstr);
+	      if( n < 0 || n > 15 ) {
+		out("rotate must be 0..15");
+	      } else {
+		seq_cc_trk[t].robotize_loop_rotate = (u8)n;
+		out("Track %d: loop rotate=%d", track, n);
+	      }
+	    }
+	  } else if( strcmp(sub, "master-sync") == 0 ) {
+	    char *vstr = strtok_r(NULL, separators, &brkt);
+	    if( !vstr ) {
+	      out("Track %d: master-sync is %s", track,
+		  seq_cc_trk[t].robotize_sync_to_master ? "on" : "off");
+	    } else {
+	      u8 v = (strcmp(vstr, "on") == 0 || strcmp(vstr, "1") == 0) ? 1 : 0;
+	      seq_cc_trk[t].robotize_sync_to_master = v;
+	      out("Track %d: master-sync %s", track, v ? "on" : "off");
+	    }
+	  } else if( strcmp(sub, "status") == 0 ) {
+	    u8 palette = seq_cc_trk[t].robotize_palette_length;
+	    if( palette == 0 || palette > 16 ) palette = 16;
+	    u8 loop_n = seq_cc_trk[t].robotize_loop_cycles;
+	    u8 start = seq_cc_trk[t].robotize_loop_start;
+	    u8 rotate = seq_cc_trk[t].robotize_loop_rotate;
+	    u8 phase = seq_core_trk[t].robotize_loop_phase;
+	    out("Track %d: length=%d start=%d loop=%d rotate=%d  phase=%d  master-sync=%s%s",
+		track, palette, start, loop_n, rotate, phase,
+		seq_cc_trk[t].robotize_sync_to_master ? "on" : "off",
+		seq_core_trk[t].robotize_pending_resync ? "  [resync pending]" : "");
+	    out("  state=0x%08x  measure_ctr=%lu  track_bar=%d",
+		seq_core_trk[t].robotize_seed_state,
+		(unsigned long)seq_core_trk[t].robotize_measure_ctr,
+		seq_core_trk[t].bar);
+
+	    // compute which slots are in the loop window
+	    u16 in_window = 0;
+	    u8 j;
+	    for(j=0; j<loop_n; ++j)
+	      in_window |= (1 << ((start + j) % palette));
+	    u8 playing_idx = loop_n ? (start + ((rotate + phase) % loop_n)) % palette : 255;
+
+	    u8 i;
+	    for(i=0; i<16; ++i) {
+	      const char *tag;
+	      if( i == playing_idx )                tag = "  <- playing now";
+	      else if( in_window & (1 << i) )       tag = "  <- in loop";
+	      else if( i < palette )                tag = "  <- in palette";
+	      else                                  tag = "";
+	      out("  anchor[%2d] = 0x%08x%s",
+		  i, seq_cc_trk[t].robotize_bar_anchors[i], tag);
+	    }
+	  } else {
+	    out("Unknown robotize subcommand '%s' - try reseed/reroll/freeze/freeze-q/loop/master-sync/status", sub);
+	  }
+	}
       }
     } else if( strcmp(parameter, "mixer") == 0 ) {
       SEQ_TERMINAL_PrintCurrentMixerMap(out);
@@ -914,6 +1089,7 @@ s32 SEQ_TERMINAL_PrintHelp(void *_output_function)
   out("  config:         print local session configuration");
   out("  tracks:         print overview of all tracks");
   out("  track <track>:  print info about a specific track");
+  out("  robotize reseed|reroll|freeze|freeze-q|loop|status <track> [args]:  per-track PRNG loop control");
   out("  mixer:          print current mixer map");
   out("  song:           print current song info");
   out("  grooves:        print groove templates");

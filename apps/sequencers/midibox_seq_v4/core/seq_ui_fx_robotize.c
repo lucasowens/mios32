@@ -188,6 +188,13 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 {
   if( depressed ) return 0; // ignore when button depressed
 
+  // GP16 (no modifier): toggle to the ROBOLOOP sibling page. The "Robo"
+  // entry on the FX submenu opens this page (CC state); GP16 flips to the
+  // loop/mold state. SELECT+GP16 is still the mask-bit-15 xor below.
+  if( button == SEQ_UI_BUTTON_GP16 && !seq_ui_button_state.SELECT_PRESSED ) {
+    SEQ_UI_PageSet(SEQ_UI_PAGE_ROBOLOOP);
+    return 1;
+  }
 
 	if ( seq_ui_button_state.SELECT_PRESSED ) { //edit robotize mask
 		u8 xormask = 0x00;
@@ -313,7 +320,7 @@ static s32 LCD_Handler(u8 high_prio)
   SEQ_LCD_CursorSet(0, 0);
 
   SEQ_LCD_PrintString("Trk. Robot Prob Skip Octv Note VelCC Len");
-  SEQ_LCD_PrintString("Sust NoFX +Echo +Dup                    ");
+  SEQ_LCD_PrintString("Sust NoFX +Echo +Dup                Loop");
   
   
   ///////////////////////////////////////////////////////////////////////////

@@ -22,6 +22,12 @@
 extern u32 SEQ_RANDOM_Gen(u32 seed);
 extern u32 SEQ_RANDOM_Gen_Range(u32 min, u32 max);
 
+// per-state xorshift32 — caller supplies the PRNG state pointer.
+// cheaper than the global MT and lets independent users (e.g. one per track)
+// keep a deterministic, seekable stream they can restore to an anchor.
+extern u32 SEQ_RANDOM_GenXorshift(u32 *state);
+extern u32 SEQ_RANDOM_GenRangeXorshift(u32 *state, u32 min, u32 max);
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Export global variables

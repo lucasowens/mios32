@@ -2322,7 +2322,14 @@ static s32 SEQ_UI_Button_Fx(s32 depressed)
 {
   if( depressed ) return -1; // ignore when button depressed
 
-  SEQ_UI_PageSet(SEQ_UI_PAGE_FX);
+  // sibling toggle: when already on one of the deep FX-area pages,
+  // flip directly to its sibling instead of re-opening the submenu.
+  if( ui_page == SEQ_UI_PAGE_FX_ROBOTIZE )
+    SEQ_UI_PageSet(SEQ_UI_PAGE_ROBOLOOP);
+  else if( ui_page == SEQ_UI_PAGE_ROBOLOOP )
+    SEQ_UI_PageSet(SEQ_UI_PAGE_FX_ROBOTIZE);
+  else
+    SEQ_UI_PageSet(SEQ_UI_PAGE_FX);
 
   return 0; // no error
 }

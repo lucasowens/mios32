@@ -344,6 +344,64 @@ s32 SEQ_SCALE_NextNoteInScale(u8 current_note, u8 scale, u8 root)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Returns the previous note in scale (symmetric to NextNoteInScale).
+// Walks one semitone at a time and snaps via NoteValueGet; the first
+// snapped value that is strictly less than current_note is the prev degree.
+// At worst ~12 iterations per call.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_SCALE_PrevNoteInScale(u8 current_note, u8 scale, u8 root)
+{
+  if( current_note == 0 )
+    return 0;
+
+  int test = (int)current_note - 1;
+  while( test >= 0 ) {
+    s32 snapped = SEQ_SCALE_NoteValueGet((u8)test, scale, root);
+    if( snapped >= 0 && snapped < (s32)current_note )
+      return snapped;
+    --test;
+  }
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Walk N scale degrees up/down from any note (snaps to scale first).
+// degree_delta > 0 = up, < 0 = down, 0 = snap-only.
+// Clamps result to 0..127.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_SCALE_WalkScale(u8 note, u8 scale, u8 root, s8 degree_delta)
+{
+  s32 current = SEQ_SCALE_NoteValueGet(note, scale, root);
+  if( current < 0 )
+    return note; // pass-through on error
+
+  if( degree_delta > 0 ) {
+    s8 i;
+    for(i=0; i<degree_delta; ++i) {
+      if( current >= 127 ) break;
+      s32 next = SEQ_SCALE_NextNoteInScale((u8)current, scale, root);
+      if( next < 0 || next > 127 ) break;
+      current = next;
+    }
+  } else if( degree_delta < 0 ) {
+    s8 i;
+    s8 steps = -degree_delta;
+    for(i=0; i<steps; ++i) {
+      if( current <= 0 ) break;
+      s32 prev = SEQ_SCALE_PrevNoteInScale((u8)current, scale, root);
+      if( prev < 0 ) break;
+      current = prev;
+    }
+  }
+
+  if( current < 0 ) current = 0;
+  if( current > 127 ) current = 127;
+  return current;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // This function is called if a note value should be forced to the globally
 // selected scale
 // IN: *p: midi note (a mios32_midi_package_t) - will be modified, 

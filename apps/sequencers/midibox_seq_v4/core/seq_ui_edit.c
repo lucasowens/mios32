@@ -1172,6 +1172,10 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
     SEQ_LCD_PrintString(" *LOOPED*");
   } else if( (ui_cursor_flash_overrun_ctr & 1) && seq_core_trk[visible_track].play_section > 0 ) {
     SEQ_LCD_PrintFormattedString(" *Sect.%c*", 'A'+seq_core_trk[visible_track].play_section);
+  } else if( (ui_cursor_flash_overrun_ctr & 1) &&
+	     seq_cc_trk[visible_track].robotize_active &&
+	     seq_cc_trk[visible_track].robotize_loop_cycles > 0 ) {
+    SEQ_LCD_PrintString(" *RbLp*  ");
   } else {
     SEQ_LCD_PrintSpaces(4);
     if( event_mode == SEQ_EVENT_MODE_Drum ) {
