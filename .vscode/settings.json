@@ -1,0 +1,27 @@
+{
+  "files.associations": {
+    "*.h": "c",
+    "*.c": "c",
+    "*.inc": "c",
+    "*.mk": "makefile",
+    "Makefile": "makefile"
+  },
+  "files.exclude": {
+    "**/*_build": true,
+    "**/*.o": true,
+    "**/*.d": true,
+    "**/*.lst": true,
+    "**/*.su": true
+  },
+  "search.exclude": {
+    "**/*_build": true,
+    "mios8": true,
+    "**/*.hex": true,
+    "**/*.bin": true,
+    "**/*.map": true,
+    "**/*.lss": true,
+    "**/*.sym": true
+  },
+  "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools",
+  "C_Cpp.errorSquiggles": "enabled"
+}

@@ -1,0 +1,95 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "SEQ v4 (STM32F4)",
+      "compilerPath": "/opt/homebrew/bin/arm-none-eabi-gcc",
+      "compilerArgs": [
+        "-mcpu=cortex-m4",
+        "-mthumb",
+        "-mlittle-endian"
+      ],
+      "cStandard": "c11",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "linux-gcc-arm",
+      "includePath": [
+        "${workspaceFolder}/mios32/include/mios32",
+        "${workspaceFolder}/mios32/programming_models/traditional",
+        "${workspaceFolder}/mios32/FreeRTOS/Source/include",
+        "${workspaceFolder}/mios32/FreeRTOS/Source/portable/GCC/ARM_CM3",
+        "${workspaceFolder}/mios32/FreeRTOS/Source/portable/MemMang",
+        "${workspaceFolder}/mios32/mios32/STM32F4xx",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/STM32F4xx_StdPeriph_Driver/inc",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/STM32_USB_Device_Library/Core/inc",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/STM32_USB_HOST_Library/Core/inc",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/STM32_USB_OTG_Driver/inc",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/CMSIS/Include",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/CMSIS/ST/STM32F4xx/Include",
+        "${workspaceFolder}/mios32/modules/app_lcd/universal",
+        "${workspaceFolder}/mios32/modules/blm",
+        "${workspaceFolder}/mios32/modules/blm_scalar_master",
+        "${workspaceFolder}/mios32/modules/aout",
+        "${workspaceFolder}/mios32/modules/sequencer",
+        "${workspaceFolder}/mios32/modules/notestack",
+        "${workspaceFolder}/mios32/modules/midifile",
+        "${workspaceFolder}/mios32/modules/fatfs",
+        "${workspaceFolder}/mios32/modules/file",
+        "${workspaceFolder}/mios32/modules/random",
+        "${workspaceFolder}/mios32/modules/freertos_utils",
+        "${workspaceFolder}/mios32/modules/uip",
+        "${workspaceFolder}/mios32/modules/uip_task_standard",
+        "${workspaceFolder}/mios32/apps/sequencers/midibox_seq_v4/core",
+        "${workspaceFolder}/mios32/apps/sequencers/midibox_seq_v4/mios32"
+      ],
+      "defines": [
+        "STM32F4XX",
+        "USE_STDPERIPH_DRIVER",
+        "USB_SUPPORT_USER_STRING_DESC",
+        "MIOS32_FAMILY_STM32F4xx",
+        "MIOS32_FAMILY_STR=\"STM32F4xx\"",
+        "MIOS32_BOARD_MBHP_CORE_STM32F4",
+        "MIOS32_BOARD_STR=\"MBHP_CORE_STM32F4\"",
+        "MIOS32_PROCESSOR_STM32F407VG",
+        "MIOS32_PROCESSOR_STR=\"STM32F407VG\"",
+        "MIOS32_LCD_universal",
+        "GCC_ARMCM3"
+      ]
+    },
+    {
+      "name": "app_skeleton (STM32F4)",
+      "compilerPath": "/opt/homebrew/bin/arm-none-eabi-gcc",
+      "compilerArgs": [
+        "-mcpu=cortex-m4",
+        "-mthumb",
+        "-mlittle-endian"
+      ],
+      "cStandard": "c11",
+      "intelliSenseMode": "linux-gcc-arm",
+      "includePath": [
+        "${workspaceFolder}/mios32/include/mios32",
+        "${workspaceFolder}/mios32/programming_models/traditional",
+        "${workspaceFolder}/mios32/FreeRTOS/Source/include",
+        "${workspaceFolder}/mios32/FreeRTOS/Source/portable/GCC/ARM_CM3",
+        "${workspaceFolder}/mios32/FreeRTOS/Source/portable/MemMang",
+        "${workspaceFolder}/mios32/mios32/STM32F4xx",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/STM32F4xx_StdPeriph_Driver/inc",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/CMSIS/Include",
+        "${workspaceFolder}/mios32/drivers/STM32F4xx/v1.1.0/CMSIS/ST/STM32F4xx/Include",
+        "${workspaceFolder}/mios32/modules/app_lcd/universal",
+        "${workspaceFolder}/mios32/apps/templates/app_skeleton"
+      ],
+      "defines": [
+        "STM32F4XX",
+        "USE_STDPERIPH_DRIVER",
+        "USB_SUPPORT_USER_STRING_DESC",
+        "MIOS32_FAMILY_STM32F4xx",
+        "MIOS32_FAMILY_STR=\"STM32F4xx\"",
+        "MIOS32_BOARD_MBHP_CORE_STM32F4",
+        "MIOS32_BOARD_STR=\"MBHP_CORE_STM32F4\"",
+        "MIOS32_PROCESSOR_STM32F407VG",
+        "MIOS32_LCD_universal",
+        "GCC_ARMCM3"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build SEQ v4",
+      "type": "shell",
+      "command": "make",
+      "args": ["seq"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "clean SEQ v4",
+      "type": "shell",
+      "command": "make",
+      "args": ["seq-clean"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "build skeleton",
+      "type": "shell",
+      "command": "make",
+      "args": ["skeleton"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "smoke (clean + build skeleton + SEQ v4)",
+      "type": "shell",
+      "command": "make",
+      "args": ["smoke"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "upload SEQ v4 (MIOS Studio)",
+      "type": "shell",
+      "command": "make",
+      "args": ["upload"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "toolchain check",
+      "type": "shell",
+      "command": "make",
+      "args": ["toolchain-check"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}
