@@ -16,12 +16,19 @@ import rtmidi
 
 from .sysex import (
     BUTTON_STATUS_DISPATCHED,
+    CMD_BOUNCE,
     CMD_BUTTON,
+    CMD_CC_GET,
+    CMD_CC_SET,
     CMD_ENCODER,
     CMD_LCD_SNAPSHOT,
     CMD_PAGE_SET,
+    CMD_PATTERN_LOAD,
     CMD_PING,
+    CMD_PLAY_SECTION_GET,
+    CMD_PLAY_SECTION_SET,
     CMD_RESET_STATE,
+    CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
     ENCODER_STATUS_DISPATCHED,
@@ -415,6 +422,148 @@ class Board:
             "bpm_tick": bpm_tick,
             "trk0_step": payload[21],
         }
+
+    def cc_get(self, track: int, cc: int, timeout: float = 1.0) -> int:
+        """Read a track CC value. cc supports 0..255 (covers both the main
+        128-byte block and the 0x80..0x95 extension CCs).
+
+        Raises ValueError if the firmware reports invalid track / unmapped CC.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= cc <= 255:
+            raise ValueError(f"cc out of range: {cc}")
+        cc_hi = (cc >> 7) & 0x01
+        cc_lo = cc & 0x7F
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CC_GET, bytes([track, cc_hi, cc_lo])))
+        payload = self.wait_for_sysex(CMD_CC_GET, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short CC_GET reply: {payload!r}")
+        status = payload[5]
+        if status != CMD_STATUS_OK:
+            raise ValueError(
+                f"CC_GET track={track} cc=0x{cc:02x} returned status {status:#04x}"
+            )
+        return (payload[3] << 7) | payload[4]
+
+    def cc_set(self, track: int, cc: int, value: int, timeout: float = 1.0) -> None:
+        """Write a track CC value via SEQ_CC_Set. cc range 0..255, value 0..255."""
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= cc <= 255:
+            raise ValueError(f"cc out of range: {cc}")
+        if not 0 <= value <= 255:
+            raise ValueError(f"value out of range: {value}")
+        cc_hi = (cc >> 7) & 0x01
+        cc_lo = cc & 0x7F
+        v_hi = (value >> 7) & 0x01
+        v_lo = value & 0x7F
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CC_SET, bytes([track, cc_hi, cc_lo, v_hi, v_lo])))
+        payload = self.wait_for_sysex(CMD_CC_SET, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short CC_SET reply: {payload!r}")
+        status = payload[5]
+        if status != CMD_STATUS_OK:
+            raise ValueError(
+                f"CC_SET track={track} cc=0x{cc:02x} value={value} returned status {status:#04x}"
+            )
+
+    def play_section_get(self, track: int, timeout: float = 1.0) -> int:
+        """Read runtime play_section (subsection A-H, 0..7) for a track."""
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PLAY_SECTION_GET, bytes([track])))
+        payload = self.wait_for_sysex(CMD_PLAY_SECTION_GET, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short PLAY_SECTION_GET reply: {payload!r}")
+        if payload[2] != CMD_STATUS_OK:
+            raise ValueError(f"PLAY_SECTION_GET status {payload[2]:#04x}")
+        return payload[1]
+
+    def play_section_set(self, track: int, value: int, timeout: float = 1.0) -> None:
+        """Write runtime play_section for a track. value 0..7 selects sections A-H."""
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= value <= 127:
+            raise ValueError(f"play_section out of range: {value}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PLAY_SECTION_SET, bytes([track, value])))
+        payload = self.wait_for_sysex(CMD_PLAY_SECTION_SET, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short PLAY_SECTION_SET reply: {payload!r}")
+        if payload[2] != CMD_STATUS_OK:
+            raise ValueError(f"PLAY_SECTION_SET status {payload[2]:#04x}")
+
+    def bounce(
+        self,
+        src_track: int,
+        dst_bank: int,
+        dst_pattern: int,
+        num_measures: int = 1,
+        dst_group: int = 0,
+        timeout: float = 4.0,
+    ) -> bool:
+        """Trigger SEQ_CAPTURE_CommitToSlot on the firmware.
+
+        The captured tape is whatever's currently in the per-track ring buffer
+        (filled by recent live playback). The destination slot at
+        (dst_bank, dst_pattern) is overwritten with the sanitized source CC +
+        captured layers. Source state is restored from an in-RAM snapshot.
+
+        Returns True if the firmware committed successfully (SEQ_CAPTURE
+        returned >=0). Note: an empty ring (no recent playback) returns False.
+        The 4s default timeout accommodates SD write latency.
+        """
+        if not 0 <= src_track <= 15:
+            raise ValueError(f"src_track out of range: {src_track}")
+        if not 0 <= dst_bank <= 7:
+            raise ValueError(f"dst_bank out of range: {dst_bank}")
+        if not 0 <= dst_pattern <= 127:
+            raise ValueError(f"dst_pattern out of range: {dst_pattern}")
+        if not 1 <= num_measures <= 16:
+            raise ValueError(f"num_measures out of range: {num_measures}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(
+                CMD_BOUNCE,
+                bytes([src_track, dst_group, dst_bank, dst_pattern, num_measures]),
+            )
+        )
+        payload = self.wait_for_sysex(CMD_BOUNCE, timeout=timeout, since=since)
+        if len(payload) < 5:
+            raise RuntimeError(f"short BOUNCE reply: {payload!r}")
+        if payload[4] != CMD_STATUS_OK:
+            raise RuntimeError(f"BOUNCE dispatch status {payload[4]:#04x}")
+        return payload[3] == CMD_STATUS_OK
+
+    def pattern_load(
+        self,
+        group: int,
+        bank: int,
+        pattern: int,
+        timeout: float = 4.0,
+    ) -> bool:
+        """Load (bank, pattern) into group via SEQ_PATTERN_Load.
+
+        Synchronous SD read. Returns True if the read succeeded.
+        """
+        if not 0 <= group <= 3:
+            raise ValueError(f"group out of range: {group}")
+        if not 0 <= bank <= 7:
+            raise ValueError(f"bank out of range: {bank}")
+        if not 0 <= pattern <= 127:
+            raise ValueError(f"pattern out of range: {pattern}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PATTERN_LOAD, bytes([group, bank, pattern])))
+        payload = self.wait_for_sysex(CMD_PATTERN_LOAD, timeout=timeout, since=since)
+        if len(payload) < 5:
+            raise RuntimeError(f"short PATTERN_LOAD reply: {payload!r}")
+        if payload[4] != CMD_STATUS_OK:
+            raise RuntimeError(f"PATTERN_LOAD dispatch status {payload[4]:#04x}")
+        return payload[3] == CMD_STATUS_OK
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:
         """Read the current 2x80 LCD buffer from the firmware."""

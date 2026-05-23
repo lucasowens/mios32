@@ -111,6 +111,168 @@ s32 SEQ_CC_Init(u32 mode)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Reset every generative CC on a track to its neutral default (matching
+// SEQ_CC_Init). Called by the bounce-in-place capture (seq_capture.c) on the
+// in-RAM source CC right before writing the destination pattern slot — so the
+// bounced pattern plays the frozen captured tape without re-applying
+// robotize / echo / direction / bus / groove / par-layer modulation on top.
+//
+// Preserved (identity + structural + step-data carriers):
+//   - MIDI port/channel, event_mode, MIDI bank/PC, name
+//   - length, loop, clock divider (incl. TRIPLETS + MANUAL bits)
+//   - lay_const slots holding Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl
+//   - par_assignment_drum slots holding Velocity/Length
+//
+// When you add a new generative SEQ_CC_* (FX, direction-shaper, bus-style,
+// per-step conditional, etc.) extend this function in the same review.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return -1;
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  portENTER_CRITICAL();
+
+  // Track mode -> Normal; clears Off / Transpose / Arpeggiator. Bounced tape
+  // is just notes, no live transposer/arp input wanted.
+  tcc->playmode = SEQ_CORE_TRKMODE_Normal;
+  // Mode flags: clears FORCE_SCALE + SUSTAIN + UNSORTED/HOLD/RESTART/FIRST_NOTE/STEP_TRG.
+  tcc->trkmode_flags.ALL = 0;
+  // Bus assignment -> bus 0.
+  tcc->busasg.ALL = 0;
+  // Clock-divider flags: clear synch-to-measure only. TRIPLETS + MANUAL are
+  // clock-shape (structural), not generative — leave them alone.
+  tcc->clkdiv.SYNCH_TO_MEASURE = 0;
+
+  // Note-value limits off.
+  tcc->limit_lower = 0;
+  tcc->limit_upper = 0;
+
+  // Direction & step traversal -> linear forward.
+  tcc->dir_mode = SEQ_CORE_TRKDIR_Forward;
+  tcc->steps_replay = 0;
+  tcc->steps_forward = 0;
+  tcc->steps_jump_back = 0;
+  tcc->steps_repeat = 0;
+  tcc->steps_skip = 0;
+  tcc->steps_rs_interval = 0;
+
+  // Transpose / morph / groove / humanize.
+  tcc->transpose_semi = 0;
+  tcc->transpose_oct = 0;
+  tcc->morph_mode = 0;
+  tcc->morph_dst = 0;
+  tcc->groove_style.ALL = 0;
+  tcc->groove_value = 0;
+  tcc->humanize_value = 0;
+  tcc->humanize_mode = 0;
+
+  // Trigger assignments: gate/accent/glide/roll/skip/random*/no_fx/roll_gate all unassigned.
+  tcc->trg_assignments.ALL = 0;
+
+  // Echo off.
+  tcc->echo_repeats = 0;
+  tcc->echo_delay = 0;
+  tcc->echo_velocity = 0;
+  tcc->echo_fb_velocity = 0;
+  tcc->echo_fb_note = 0;
+  tcc->echo_fb_gatelength = 0;
+  tcc->echo_fb_ticks = 0;
+
+  // LFO off.
+  tcc->lfo_waveform = 0;
+  tcc->lfo_amplitude = 0;
+  tcc->lfo_phase = 0;
+  tcc->lfo_steps = 0;
+  tcc->lfo_steps_rst = 0;
+  tcc->lfo_enable_flags.ALL = 0;
+  tcc->lfo_cc = 0;
+  tcc->lfo_cc_offset = 0;
+  tcc->lfo_cc_ppqn = 0;
+
+  // Robotize neutral — mirrors SEQ_CC_Init. *_probability defaults are 31
+  // (full range) so a later re-enable behaves like a fresh track; ACTIVE=0
+  // keeps the engine idle on the destination.
+  tcc->robotize_active = 0;
+  tcc->robotize_probability = 0;
+  tcc->robotize_note = 0;
+  tcc->robotize_oct = 0;
+  tcc->robotize_vel = 0;
+  tcc->robotize_len = 0;
+  tcc->robotize_skip_probability = 0;
+  tcc->robotize_note_probability = 31;
+  tcc->robotize_oct_probability = 31;
+  tcc->robotize_vel_probability = 31;
+  tcc->robotize_len_probability = 31;
+  tcc->robotize_sustain_probability = 0;
+  tcc->robotize_nofx_probability = 0;
+  tcc->robotize_echo_probability = 0;
+  tcc->robotize_duplicate_probability = 0;
+  tcc->robotize_mask1 = 0xFF;
+  tcc->robotize_mask2 = 0xFF;
+  tcc->robotize_loop_cycles = 0;
+  tcc->robotize_sync_to_master = 0;
+  tcc->robotize_palette_length = 16;
+  tcc->robotize_loop_start = 0;
+  tcc->robotize_loop_rotate = 0;
+  {
+    u8 i;
+    for(i=0; i<16; ++i)
+      tcc->robotize_bar_anchors[i] = 0;
+  }
+
+  // FX MIDI duplicate off.
+  tcc->fx_midi_mode.ALL = 0;
+  tcc->fx_midi_port = DEFAULT;
+  tcc->fx_midi_chn = 0;
+  tcc->fx_midi_num_chn = 0;
+
+  // Parameter-layer assignments: change generative types (Probability, Delay,
+  // Roll, Roll2, Nth1, Nth2, Root, Scale) to None so they don't transform the
+  // captured tape. Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl are preserved
+  // since they carry step data. Non-drum stores types in lay_const[0..15];
+  // drum stores them in par_assignment_drum[0..3].
+  {
+    u8 *par_asg;
+    u8 num_layers;
+    if( tcc->event_mode == SEQ_EVENT_MODE_Drum ) {
+      par_asg = &tcc->par_assignment_drum[0];
+      num_layers = 4;
+    } else {
+      par_asg = &tcc->lay_const[0];
+      num_layers = 16;
+    }
+    u8 i;
+    for(i=0; i<num_layers; ++i) {
+      switch( (seq_par_layer_type_t)par_asg[i] ) {
+        case SEQ_PAR_Type_Probability:
+        case SEQ_PAR_Type_Delay:
+        case SEQ_PAR_Type_Roll:
+        case SEQ_PAR_Type_Roll2:
+        case SEQ_PAR_Type_Nth1:
+        case SEQ_PAR_Type_Nth2:
+        case SEQ_PAR_Type_Root:
+        case SEQ_PAR_Type_Scale:
+          par_asg[i] = SEQ_PAR_Type_None;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  portEXIT_CRITICAL();
+
+  // Re-derive link_par_layer_* now that some assignments may have changed.
+  SEQ_CC_LinkUpdate(track);
+
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Set CCs
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)

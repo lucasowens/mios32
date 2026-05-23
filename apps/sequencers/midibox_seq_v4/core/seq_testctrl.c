@@ -19,6 +19,8 @@
 #include "seq_cc.h"
 #include "seq_core.h"
 #include "seq_midi_port.h"
+#include "seq_capture.h"
+#include "seq_pattern.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -27,14 +29,20 @@
 
 static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 
-#define CMD_PING          0x01
-#define CMD_BUTTON        0x10
-#define CMD_ENCODER       0x11
-#define CMD_LCD_SNAPSHOT  0x20
-#define CMD_RESET_STATE   0x30
-#define CMD_PAGE_SET      0x31
-#define CMD_TRACK_CONFIG  0x32
-#define CMD_TICK_QUERY    0x40
+#define CMD_PING              0x01
+#define CMD_BUTTON            0x10
+#define CMD_ENCODER           0x11
+#define CMD_LCD_SNAPSHOT      0x20
+#define CMD_RESET_STATE       0x30
+#define CMD_PAGE_SET          0x31
+#define CMD_TRACK_CONFIG      0x32
+#define CMD_TICK_QUERY        0x40
+#define CMD_CC_GET            0x50
+#define CMD_CC_SET            0x51
+#define CMD_PLAY_SECTION_GET  0x52
+#define CMD_PLAY_SECTION_SET  0x53
+#define CMD_BOUNCE            0x54
+#define CMD_PATTERN_LOAD      0x55
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -408,6 +416,192 @@ static void cmd_tick_query(mios32_midi_port_t port)
 }
 
 
+// CMD_CC_GET payload: [track, cc_hi, cc_lo]
+//   cc value range 0..255 = (cc_hi << 7) | cc_lo. cc_hi must be 0 or 1.
+// Reply payload: [track, cc_hi, cc_lo, value_hi, value_lo, status]
+//   status 0x01 = ok, 0x02 = bad payload, 0x03 = invalid track, 0x04 = unmapped CC.
+static void cmd_cc_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 3 ) {
+    send_reply(port, CMD_CC_GET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0];
+  u8 cc_hi = payload[1] & 0x01;
+  u8 cc_lo = payload[2] & 0x7f;
+  u16 cc = ((u16)cc_hi << 7) | cc_lo;
+
+  reply[0] = track;
+  reply[1] = cc_hi;
+  reply[2] = cc_lo;
+
+  if( track >= SEQ_CORE_NUM_TRACKS ) {
+    reply[5] = 0x03;
+  } else {
+    s32 v = SEQ_CC_Get(track, (u8)cc);
+    if( v < 0 ) {
+      reply[5] = 0x04;
+    } else {
+      reply[3] = ((u8)v >> 7) & 0x01;
+      reply[4] = (u8)v & 0x7f;
+      reply[5] = 0x01;
+    }
+  }
+  send_reply(port, CMD_CC_GET, reply, sizeof(reply));
+}
+
+
+// CMD_CC_SET payload: [track, cc_hi, cc_lo, value_hi, value_lo]
+// Reply payload: [track, cc_hi, cc_lo, value_hi, value_lo, status]
+//   status 0x01 = ok, 0x02 = bad payload, 0x03 = invalid track, 0x04 = SEQ_CC_Set rejected.
+static void cmd_cc_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 5 ) {
+    send_reply(port, CMD_CC_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0];
+  u8 cc_hi = payload[1] & 0x01;
+  u8 cc_lo = payload[2] & 0x7f;
+  u8 v_hi  = payload[3] & 0x01;
+  u8 v_lo  = payload[4] & 0x7f;
+  u16 cc = ((u16)cc_hi << 7) | cc_lo;
+  u8 value = ((u8)v_hi << 7) | v_lo;
+
+  reply[0] = track;
+  reply[1] = cc_hi;
+  reply[2] = cc_lo;
+  reply[3] = v_hi;
+  reply[4] = v_lo;
+
+  if( track >= SEQ_CORE_NUM_TRACKS ) {
+    reply[5] = 0x03;
+  } else {
+    s32 r = SEQ_CC_Set(track, (u8)cc, value);
+    reply[5] = (r < 0) ? 0x04 : 0x01;
+  }
+  send_reply(port, CMD_CC_SET, reply, sizeof(reply));
+}
+
+
+// CMD_PLAY_SECTION_GET payload: [track]
+// Reply payload: [track, value, status]
+static void cmd_play_section_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[3] = { 0, 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_PLAY_SECTION_GET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0];
+  reply[0] = track;
+  if( track >= SEQ_CORE_NUM_TRACKS ) {
+    reply[2] = 0x03;
+  } else {
+    reply[1] = seq_core_trk[track].play_section & 0x7f;
+    reply[2] = 0x01;
+  }
+  send_reply(port, CMD_PLAY_SECTION_GET, reply, sizeof(reply));
+}
+
+
+// CMD_PLAY_SECTION_SET payload: [track, value]
+// Reply payload: [track, value, status]
+static void cmd_play_section_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[3] = { 0, 0, 0x02 };
+  if( plen < 2 ) {
+    send_reply(port, CMD_PLAY_SECTION_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0];
+  u8 value = payload[1] & 0x7f;
+  reply[0] = track;
+  reply[1] = value;
+  if( track >= SEQ_CORE_NUM_TRACKS ) {
+    reply[2] = 0x03;
+  } else {
+    seq_core_trk[track].play_section = value;
+    reply[2] = 0x01;
+  }
+  send_reply(port, CMD_PLAY_SECTION_SET, reply, sizeof(reply));
+}
+
+
+// CMD_BOUNCE payload: [src_track, dst_group, dst_bank, dst_pattern, num_measures]
+// Reply payload: [src_track, dst_bank, dst_pattern, commit_ok, dispatch_status]
+//   commit_ok 0x01 = SEQ_CAPTURE_CommitToSlot returned >=0, 0x00 = returned <0.
+//   dispatch_status 0x01 = ok, 0x02 = bad payload.
+//
+// Synchronous: the parser blocks until SEQ_CAPTURE_CommitToSlot returns. SD I/O
+// can take 100ms+, so the harness must wait_for_sysex with a generous timeout
+// (~3s). PatternWrite + the in-RAM snapshot/restore both run inside the call.
+static void cmd_bounce(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[5] = { 0, 0, 0, 0, 0x02 };
+  if( plen < 5 ) {
+    send_reply(port, CMD_BOUNCE, reply, sizeof(reply));
+    return;
+  }
+  u8 src_track    = payload[0];
+  u8 dst_group    = payload[1];
+  u8 dst_bank     = payload[2] & 0x07;
+  u8 dst_pattern  = payload[3] & 0x7f;
+  u8 num_measures = payload[4] & 0x7f;
+
+  seq_pattern_t dst_pat;
+  dst_pat.ALL = 0;
+  dst_pat.bank = dst_bank;
+  dst_pat.pattern = dst_pattern;
+
+  s32 r = SEQ_CAPTURE_CommitToSlot(src_track, dst_group, dst_pat, num_measures);
+
+  reply[0] = src_track;
+  reply[1] = dst_bank;
+  reply[2] = dst_pattern;
+  reply[3] = (r >= 0) ? 0x01 : 0x00;
+  reply[4] = 0x01;
+  send_reply(port, CMD_BOUNCE, reply, sizeof(reply));
+}
+
+
+// CMD_PATTERN_LOAD payload: [group, bank, pattern]
+// Reply payload: [group, bank, pattern, load_ok, dispatch_status]
+//   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
+//
+// Synchronous: SD read can take 100ms+. Same timeout caveat as CMD_BOUNCE.
+static void cmd_pattern_load(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[5] = { 0, 0, 0, 0, 0x02 };
+  if( plen < 3 ) {
+    send_reply(port, CMD_PATTERN_LOAD, reply, sizeof(reply));
+    return;
+  }
+  u8 group   = payload[0];
+  u8 bank    = payload[1] & 0x07;
+  u8 pattern = payload[2] & 0x7f;
+
+  reply[0] = group;
+  reply[1] = bank;
+  reply[2] = pattern;
+
+  if( group >= SEQ_CORE_NUM_GROUPS ) {
+    reply[4] = 0x03;
+  } else {
+    seq_pattern_t pat;
+    pat.ALL = 0;
+    pat.bank = bank;
+    pat.pattern = pattern;
+    s32 r = SEQ_PATTERN_Load(group, pat);
+    reply[3] = (r >= 0) ? 0x01 : 0x00;
+    reply[4] = 0x01;
+  }
+  send_reply(port, CMD_PATTERN_LOAD, reply, sizeof(reply));
+}
+
+
 // CMD_LCD_SNAPSHOT: no payload.
 // Reply payload: [lines, columns, packed_bytes...]
 // Bit 7 of each lcd_buffer byte is MBSEQ's internal "already-rendered to the
@@ -527,6 +721,24 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TICK_QUERY:
             cmd_tick_query(port);
+            break;
+          case CMD_CC_GET:
+            cmd_cc_get(port, payload_buf, payload_len);
+            break;
+          case CMD_CC_SET:
+            cmd_cc_set(port, payload_buf, payload_len);
+            break;
+          case CMD_PLAY_SECTION_GET:
+            cmd_play_section_get(port, payload_buf, payload_len);
+            break;
+          case CMD_PLAY_SECTION_SET:
+            cmd_play_section_set(port, payload_buf, payload_len);
+            break;
+          case CMD_BOUNCE:
+            cmd_bounce(port, payload_buf, payload_len);
+            break;
+          case CMD_PATTERN_LOAD:
+            cmd_pattern_load(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

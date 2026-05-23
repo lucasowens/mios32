@@ -284,10 +284,10 @@ A small in-RAM ring buffer per track tracks every emitted MIDI event (note on/of
 
 When you trigger a bounce, the firmware:
 
-1. Snapshots the last N measures of the ring.
-2. Strips Fx (robotize / echo / humanize / LFO Extra) so the bounce is a deterministic playback.
-3. Writes the snapshot to the destination pattern slot.
-4. Reloads the source pattern so playback continues seamlessly.
+1. Takes an in-RAM snapshot of the source track (CC config, layer/trigger arrays, pattern name, `play_section`) so the source can be restored byte-for-byte after the write.
+2. Strips every generative setting (Fx, direction shaping, bus/transposer mode, groove, transpose, morph, per-step Probability/Nth/etc.) on the in-RAM copy so the bounce is a deterministic playback of the captured tape.
+3. Writes the mutated copy to the destination pattern slot.
+4. Restores the source from the snapshot. Source state — including subsection selection — is identical to pre-bounce.
 
 The capture tap is one branch on a `u8` flag in the hot path when no track is armed, and one packed write when armed; commit work runs in user-task context, not the tick path.
 
@@ -348,9 +348,18 @@ The default bounce length from this shortcut is whatever was last configured by 
 
 ### What Does *Not* Get Bounced
 
-* The Fx parameters themselves — robotize probabilities, echo settings, humanize amounts — are reset on the destination. The bounce is the *output* of those Fx, not their config.
+* All generative track config is neutralized on the destination — the bounce is the *output* of those generators, not their config. Specifically:
+  * **Fx parameters** — robotize probabilities, echo settings, humanize amounts, LFO, scale/limit, FX-MIDI duplicate.
+  * **Direction page** — direction mode (Forward/Backward/PingPong/Random/etc.), steps forward, jump back, replay, repeat, skip, RS interval. The destination plays linear-forward.
+  * **play_section** — the A–H subsection loop is dropped; the destination plays the full track length from step 1.
+  * **Bus / track mode** — Transposer/Arpeggiator modes are reset to Normal and the MIDI In bus assignment is cleared, so the destination won't re-transpose its own captured notes from a held chord.
+  * **Groove, global transpose, morph** — all baked into the captured timing/pitch already.
+  * **Generative parameter-layer types** — any Probability/Delay/Roll/Roll2/Nth1/Nth2/Root/Scale layer on the source is converted to an unused (None) slot on the destination. Note/Chord/Velocity/Length layers are preserved (they carry the captured tape).
+  * **Trigger assignments** — Accent/Glide/Roll/Skip/Random/no-Fx/Roll-Gate are all unassigned on the destination.
 * Anything that wasn't actually emitted during the captured window. A note that should have played but was suppressed by robotize-SKIP will be missing.
 * MIDI events received over loopback into bus tracks; the capture tap is on emission, not on the bus.
+
+The canonical list of what gets reset lives in `SEQ_CC_ResetGenerativeForBounce()` in [seq_cc.c](../core/seq_cc.c). When a new generative Fx or modulation feature lands, that function gets extended in the same review.
 
 ### Tips & Tricks
 

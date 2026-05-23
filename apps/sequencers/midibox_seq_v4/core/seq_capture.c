@@ -191,13 +191,19 @@ s32 SEQ_CAPTURE_FindNextFreeSlot(u8 group, u8 current_pattern)
 // the destination pattern slot.
 //
 // Steps:
-//   1. Save current pattern to SD so the in-RAM state isn't lost.
+//   1. Snapshot src_track's RAM state (CC, par/trg layers, name, play_section).
 //   2. Resolve the bounce range (start_tick, end_tick).
 //   3. Match NoteOn -> NoteOff pairs and compute lengths.
-//   4. Walk pairs; call SEQ_LAYER_RecEvent per NoteOn with the resolved length.
-//   5. Adjust dst track length to match the captured measures.
-//   6. PatternWrite to destination slot.
-//   7. PatternRead source slot back into RAM so playback continues seamlessly.
+//   4. Mutate src_track in-RAM: clear layers, sanitize generative CC, label BNC.
+//   5. Walk pairs; call SEQ_LAYER_RecEvent per NoteOn with the resolved length.
+//   6. PatternWrite to destination slot — reads the mutated RAM as the source.
+//   7. Restore src_track from the snapshot in step 1. Source is byte-identical.
+//
+// The snapshot/restore avoids SD round-trips on the source — historically we
+// used SEQ_PATTERN_Save + SEQ_PATTERN_Load to round-trip through SD, but a
+// non-zero seq_pattern_remix_map silently skipped the source track on reload,
+// and play_section (runtime state, not in the pattern file) couldn't be
+// restored that way at all. The RAM snapshot handles both.
 //
 // Note: this routine must run in user-task context. It takes both the SD-card
 // and MIDI-out mutexes; never call it from SEQ_CORE_Tick.
@@ -214,6 +220,13 @@ typedef struct {
 
 static bounce_note_t pair_table[SEQ_CAPTURE_RING_SIZE];
 
+// In-RAM snapshot buffers used to preserve the source track across the bounce
+// without touching SD. Sized to one track's worth of state.
+static seq_cc_trk_t bounce_cc_snapshot;
+static u8           bounce_par_snapshot[SEQ_PAR_MAX_BYTES];
+static u8           bounce_trg_snapshot[SEQ_TRG_MAX_BYTES];
+static char         bounce_name_snapshot[20];
+
 s32 SEQ_CAPTURE_CommitToSlot(u8 src_track, u8 dst_group, seq_pattern_t dst_pattern, u8 num_measures)
 {
   if( src_track >= SEQ_CORE_NUM_TRACKS ) return -1;
@@ -221,13 +234,20 @@ s32 SEQ_CAPTURE_CommitToSlot(u8 src_track, u8 dst_group, seq_pattern_t dst_patte
   if( num_measures == 0 || num_measures > 16 ) num_measures = 1;
 
   u8 src_group = src_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
-  seq_pattern_t src_pat = seq_pattern[src_group];
+  s32 status;
 
-  // 1. Save current source pattern to SD; we are about to mutate the in-RAM
-  //    layers and need a safe snapshot to reload after the dst write.
-  s32 status = SEQ_PATTERN_Save(src_group, src_pat);
-  if( status < 0 )
-    return status;
+  // 1. Snapshot the in-RAM source state. We mutate seq_cc_trk[src_track] and
+  //    the layer/trigger arrays in place (PatternWrite reads from them) and
+  //    restore at the end. SD-based round-trips have two failure modes that
+  //    bit us in practice: a non-zero seq_pattern_remix_map silently skips
+  //    the source track on reload, and runtime fields like play_section live
+  //    outside the pattern file entirely. Restoring from a RAM snapshot makes
+  //    source state byte-identical after the bounce regardless.
+  u8 play_section_snapshot = seq_core_trk[src_track].play_section;
+  memcpy(&bounce_cc_snapshot, &seq_cc_trk[src_track], sizeof(seq_cc_trk_t));
+  memcpy(bounce_par_snapshot, seq_par_layer_value[src_track], SEQ_PAR_MAX_BYTES);
+  memcpy(bounce_trg_snapshot, seq_trg_layer_value[src_track], SEQ_TRG_MAX_BYTES);
+  memcpy(bounce_name_snapshot, seq_pattern_name[src_group], 20);
 
   // 2. Resolve bounce range.
   //    Step period in BPM ticks derived from the track's clock divider,
@@ -300,27 +320,15 @@ s32 SEQ_CAPTURE_CommitToSlot(u8 src_track, u8 dst_group, seq_pattern_t dst_patte
   memset((u8 *)&seq_par_layer_value[src_track], 0, SEQ_PAR_MAX_BYTES);
   memset((u8 *)&seq_trg_layer_value[src_track], 0, SEQ_TRG_MAX_BYTES);
 
-  // Strip FX on the in-RAM src_track config before writing to dst. The dst
-  // pattern is meant to be a *frozen* capture of what was emitted; re-
-  // applying robotize / echo / duplicate / humanize / LFO on the captured
-  // notes would double-modulate and defeat the point. The source pattern's
-  // FX CCs are unaffected (we reload src from SD at step 7).
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_ACTIVE, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_SKIP_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_NOTE_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_VEL_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_LEN_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_OCT_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_SUSTAIN_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_NOFX_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_ECHO_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_DUPLICATE_PROBABILITY, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ROBOTIZE_LOOP_CYCLES, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_ECHO_REPEATS, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_HUMANIZE_VALUE, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_LFO_AMPLITUDE, 0);
-  SEQ_CC_Set(src_track, SEQ_CC_FX_MIDI_NUM_CHANNELS, 0);
+  // Sanitize generative state on the in-RAM src_track config before writing
+  // to dst. The dst pattern is a *frozen* capture of what was emitted; every
+  // generative feature (FX, direction shaping, bus/transposer, groove,
+  // global transpose, morph, per-step Probability/Delay/Roll/Nth/etc.) is
+  // already baked into the captured notes — re-applying them on playback
+  // would double-modulate or mute the tape. SEQ_CC_ResetGenerativeForBounce
+  // is the canonical list; extend that function when new generative CCs
+  // land. Source state is restored from the snapshot at step 7.
+  SEQ_CC_ResetGenerativeForBounce(src_track);
 
   MUTEX_MIDIOUT_TAKE;
 
@@ -384,9 +392,16 @@ s32 SEQ_CAPTURE_CommitToSlot(u8 src_track, u8 dst_group, seq_pattern_t dst_patte
   status = SEQ_FILE_B_PatternWrite(seq_file_session_name, dst_pattern.bank, dst_pattern.pattern, src_group, 1);
   MUTEX_SDCARD_GIVE;
 
-  // 7. Reload original source pattern so playback continues seamlessly.
-  //    SEQ_PATTERN_Load takes its own SDCARD mutex.
-  SEQ_PATTERN_Load(src_group, src_pat);
+  // 7. Restore source RAM from the snapshot taken at step 1. Always run, even
+  //    on write failure — the in-RAM state has to be returned to its pre-
+  //    bounce value either way. SEQ_CC_LinkUpdate re-derives the
+  //    link_par_layer_* fields from the restored par-layer assignments.
+  memcpy(&seq_cc_trk[src_track], &bounce_cc_snapshot, sizeof(seq_cc_trk_t));
+  memcpy(seq_par_layer_value[src_track], bounce_par_snapshot, SEQ_PAR_MAX_BYTES);
+  memcpy(seq_trg_layer_value[src_track], bounce_trg_snapshot, SEQ_TRG_MAX_BYTES);
+  memcpy(seq_pattern_name[src_group], bounce_name_snapshot, 20);
+  seq_core_trk[src_track].play_section = play_section_snapshot;
+  SEQ_CC_LinkUpdate(src_track);
 
   // ring keeps rolling; do not clear so the user can bounce again immediately.
 

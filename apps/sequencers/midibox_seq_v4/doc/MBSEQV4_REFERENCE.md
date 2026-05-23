@@ -249,6 +249,10 @@ Per CHANGELOG.txt V4.097: a loopback track assigned to Bus1..4 can drive the glo
 
 Because a track can be both a source (via loopback) and a sink (via `tcc->busasg`), any generic bounce-capture API needs an explicit "what am I capturing?" — the live MIDI output of a track, *before* loopback emission, *after* robotize / echo / etc. The natural shape is `SEQ_BOUNCE_Capture(target_track, source_descriptor)` where the source descriptor names a specific point in the per-step pipeline. The second-generator trigger condition still stands: don't design the API around robotize alone.
 
+The companion concern is destination-side modulation: the bounced pattern inherits the source track's CC config, and any generative setting on the destination would re-modulate the captured tape on playback (FX, direction shaping, bus mode, groove, per-step Probability/Nth/etc.). Centralized in `SEQ_CC_ResetGenerativeForBounce()` ([seq_cc.c](../core/seq_cc.c)) — called from `SEQ_CAPTURE_CommitToSlot()` after the layer clear and before the destination write. Extend that function in the same review when a new generative CC is added; the alternative — a growing inline disable list in `seq_capture.c` — silently drifts behind new features.
+
+Source-state preservation across the bounce uses an **in-RAM snapshot** of `seq_cc_trk[src_track]` + layer/trigger buffers + pattern name + `play_section`, restored after `PatternWrite`. The earlier SD-based round-trip (`SEQ_PATTERN_Save` → mutate → `SEQ_PATTERN_Load`) had two failure modes: a non-zero `seq_pattern_remix_map` silently skipped the source track on reload (leaving the sanitized RAM in place), and `play_section` lives in `seq_core_trk_t` runtime state — never in the pattern file — so the SD reload couldn't restore it at all. The snapshot path makes source byte-identical after the bounce regardless.
+
 ---
 
 ## 4. Feature catalog by version

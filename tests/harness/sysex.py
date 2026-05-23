@@ -17,6 +17,12 @@ CMD_RESET_STATE = 0x30
 CMD_PAGE_SET = 0x31
 CMD_TRACK_CONFIG = 0x32
 CMD_TICK_QUERY = 0x40
+CMD_CC_GET = 0x50
+CMD_CC_SET = 0x51
+CMD_PLAY_SECTION_GET = 0x52
+CMD_PLAY_SECTION_SET = 0x53
+CMD_BOUNCE = 0x54
+CMD_PATTERN_LOAD = 0x55
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.
@@ -120,6 +126,42 @@ BUTTON_STATUS_BAD_PAYLOAD = 0x02
 ENCODER_STATUS_DISPATCHED = 0x01
 ENCODER_STATUS_BAD_PAYLOAD = 0x02
 ENCODER_STATUS_OUT_OF_RANGE = 0x03
+
+
+# Status byte returned by all the synchronous SD-touching commands.
+CMD_STATUS_OK = 0x01
+CMD_STATUS_BAD_PAYLOAD = 0x02
+CMD_STATUS_INVALID_TRACK = 0x03
+CMD_STATUS_UNMAPPED_CC = 0x04
+
+
+# CC indices (mirror of seq_cc.h). Only the ones the tests actually touch are
+# listed — add more as needed. Values >= 0x80 use the 14-bit wire encoding.
+class CC:
+    LFO_AMPLITUDE = 0x31
+    MODE = 0x40
+    MODE_FLAGS = 0x41
+    BUSASG = 0x45
+    MIDI_CHANNEL = 0x46
+    MIDI_PORT = 0x47
+    DIRECTION = 0x48
+    STEPS_REPLAY = 0x49
+    STEPS_FORWARD = 0x4A
+    STEPS_JMPBCK = 0x4B
+    LENGTH = 0x4D
+    TRANSPOSE_SEMI = 0x50
+    TRANSPOSE_OCT = 0x51
+    GROOVE_VALUE = 0x52
+    GROOVE_STYLE = 0x53
+    MORPH_MODE = 0x54
+    HUMANIZE_VALUE = 0x56
+    STEPS_REPEAT = 0x5C
+    STEPS_SKIP = 0x5D
+    ASG_GATE = 0x60
+    ECHO_REPEATS = 0x70
+    FX_MIDI_NUM_CHANNELS = 0x7B
+    ROBOTIZE_ACTIVE = 0x82
+    ROBOTIZE_LOOP_CYCLES = 0x91
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:
