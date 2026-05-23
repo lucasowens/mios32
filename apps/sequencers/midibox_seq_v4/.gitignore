@@ -1,0 +1,20 @@
+# Build artifacts
+project_build/
+project.hex
+project.bin
+project.elf
+project.lss
+project.map
+*.o
+*.obj
+*.d
+
+# Editor / OS / IDE
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+.cproject
+.project
+.settings/
