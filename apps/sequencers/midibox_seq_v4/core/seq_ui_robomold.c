@@ -32,6 +32,8 @@
 #include "seq_cc.h"
 #include "seq_core.h"
 #include "seq_robotize.h"
+#include "seq_capture.h"
+#include "seq_pattern.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -45,6 +47,13 @@
 #define ITEM_LOOP_CYCLES     3
 #define ITEM_LOOP_ROTATE     4
 #define ITEM_ACTIONS_CURSOR  5  // placeholder so Up/Down doesn't get stuck on an action button
+
+// bounce dialog modes
+#define DIALOG_IDLE          0
+#define DIALOG_PICK_SLOT     1  // user picks destination via GP1..GP8
+
+static u8 bounce_dialog = DIALOG_IDLE;
+static u8 bounce_num_measures = 1;  // bounce length in measures (1..16)
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -90,6 +99,11 @@ static s32 LED_Handler(u16 *gp_leds)
 
   // also light the action-button positions as a hint
   *gp_leds |= 0x00E0; // GP6,7,8 - reseed/freeze/frzq
+  *gp_leds |= 0x0100; // GP9 - bounce
+
+  // when picker dialog active, also flash GP1..8 hint
+  if( bounce_dialog == DIALOG_PICK_SLOT && ui_cursor_flash )
+    *gp_leds |= 0x00FF;
 
   return 0;
 }
@@ -183,6 +197,49 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Bounce action: capture last `bounce_num_measures` of emitted MIDI on the
+// visible track and write into `dst_pattern_idx` (0..7) within the current
+// group's current bank. Source pattern is preserved.
+/////////////////////////////////////////////////////////////////////////////
+static s32 DoBounce(u8 visible_track, s32 dst_pattern_idx)
+{
+  u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+
+  if( dst_pattern_idx < 0 ) {
+    // pick next-free slot, skipping the currently playing pattern
+    dst_pattern_idx = SEQ_CAPTURE_FindNextFreeSlot(src_group, seq_pattern[src_group].pattern);
+    if( dst_pattern_idx < 0 ) {
+      // no free slot - open picker so user can choose explicitly
+      bounce_dialog = DIALOG_PICK_SLOT;
+      SEQ_UI_Msg_Track("pick slot 1-8");
+      return -1;
+    }
+  }
+
+  seq_pattern_t dst = seq_pattern[src_group];
+  dst.pattern = dst_pattern_idx & 0x07;
+
+  s32 status = SEQ_CAPTURE_CommitToSlot(visible_track, src_group, dst, bounce_num_measures);
+  if( status < 0 ) {
+    SEQ_UI_Msg_Track("bounce failed");
+    return status;
+  }
+
+  char msg[16];
+  // groups are A/B/C/D; pattern displayed 1-indexed for the user
+  msg[0] = '>';
+  msg[1] = 'A' + src_group;
+  msg[2] = '1' + (dst_pattern_idx & 0x07);
+  msg[3] = ' ';
+  msg[4] = 'O';
+  msg[5] = 'K';
+  msg[6] = 0;
+  SEQ_UI_Msg_Track(msg);
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Local button callback function
 /////////////////////////////////////////////////////////////////////////////
 static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
@@ -191,8 +248,29 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 
   u8 visible_track = SEQ_UI_VisibleTrackGet();
 
-  // SELECT-held: GP1..16 reroll measure anchor 0..15
+  // pick-slot dialog: consume GP1..GP8 as destination selection; any other
+  // button cancels the dialog. SELECT-reroll path is suppressed here so the
+  // user can pick without triggering the underlying reroll.
+  if( bounce_dialog == DIALOG_PICK_SLOT ) {
+    if( button <= SEQ_UI_BUTTON_GP8 ) {
+      u8 dst = (u8)button;
+      bounce_dialog = DIALOG_IDLE;
+      DoBounce(visible_track, dst);
+      return 1;
+    }
+    bounce_dialog = DIALOG_IDLE;
+    SEQ_UI_Msg_Track("cancelled");
+    return 1;
+  }
+
+  // SELECT-held: GP9 = open the bounce destination picker; other GPs
+  // continue to reroll the corresponding measure anchor.
   if( seq_ui_button_state.SELECT_PRESSED ) {
+    if( button == SEQ_UI_BUTTON_GP9 ) {
+      bounce_dialog = DIALOG_PICK_SLOT;
+      SEQ_UI_Msg_Track("pick slot 1-8");
+      return 1;
+    }
     if( button <= SEQ_UI_BUTTON_GP16 ) {
       u8 measure_idx = (u8)button; // GP1=0 ... GP16=15
       SEQ_ROBOTIZE_RerollBar(visible_track, measure_idx);
@@ -231,7 +309,13 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
     case SEQ_UI_BUTTON_GP4: ui_selected_item = ITEM_LOOP_CYCLES;    return 1;
     case SEQ_UI_BUTTON_GP5: ui_selected_item = ITEM_LOOP_ROTATE;    return 1;
 
-    case SEQ_UI_BUTTON_GP9:
+    case SEQ_UI_BUTTON_GP9: {
+      // BOUNCE: capture last N measures into the next-free pattern slot.
+      // If no free slot, DoBounce will open the pick-slot dialog.
+      DoBounce(visible_track, -1);
+      return 1;
+    }
+
     case SEQ_UI_BUTTON_GP10:
     case SEQ_UI_BUTTON_GP11:
     case SEQ_UI_BUTTON_GP12:
@@ -348,10 +432,15 @@ static s32 LCD_Handler(u8 high_prio)
   // total row 1 chars on LCD 1: 5*8 = 40 - good
 
   ///////////////////////////////////////////////////////////////////////////
-  // LCD 2 - Row 0: anchor grid header (40 chars)
+  // LCD 2 - Row 0: anchor grid header (40 chars), or dialog prompt
   SEQ_LCD_CursorSet(40, 0);
-  //                  "1234512345123451234512345123451234512345"
-  SEQ_LCD_PrintString("Anchors: * play, # loop, + palette   CCs");
+  if( bounce_dialog == DIALOG_PICK_SLOT ) {
+    //                   "1234512345123451234512345123451234512345"
+    SEQ_LCD_PrintString("PICK SLOT GP1-8  (any other GP cancels) ");
+  } else {
+    //                   "1234512345123451234512345123451234512345"
+    SEQ_LCD_PrintString("Anchors: * play, # loop, + palette   Bnc");
+  }
 
   ///////////////////////////////////////////////////////////////////////////
   // LCD 2 - Row 1: 16-char grid + phase indicator (40 chars)
@@ -408,6 +497,12 @@ s32 SEQ_UI_ROBOLOOP_Init(u32 mode)
   SEQ_UI_InstallEncoderCallback(Encoder_Handler);
   SEQ_UI_InstallLEDCallback(LED_Handler);
   SEQ_UI_InstallLCDCallback(LCD_Handler);
+
+  // capture tap is always armed at boot (SEQ_CAPTURE_Init), so we don't
+  // need to arm here. The ROBOLOOP GP9 stays as a convenience shortcut.
+
+  // reset any leftover dialog state when re-entering the page
+  bounce_dialog = DIALOG_IDLE;
 
   return 0;
 }

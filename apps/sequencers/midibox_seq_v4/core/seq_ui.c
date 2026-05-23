@@ -39,6 +39,8 @@
 #include "seq_layer.h"
 #include "seq_cc.h"
 #include "seq_record.h"
+#include "seq_capture.h"
+#include "seq_pattern.h"
 #include "seq_midi_sysex.h"
 #include "seq_midi_port.h"
 #include "seq_midi_in.h"
@@ -166,6 +168,19 @@ static u16 ui_delayed_action_ctr;
 
 static u8 seq_ui_track_setup_visible_track;
 static seq_ui_track_setup_t seq_ui_track_setup[SEQ_CORE_NUM_TRACKS];
+
+// Set to 1 when a GP press fired while PATTERN was held. Used by the PATTERN
+// button release handler to suppress the bare-press navigation (so a
+// PATTERN+GP bounce doesn't also navigate to the Pattern page).
+static u8 pattern_held_gp_consumed;
+
+// Two-step bounce gesture state, set when GP1..GP8 is pressed during a
+// PATTERN hold. Stores the chosen pattern-letter (0..7 = A..H).
+// 0xff = nothing stashed (no GP1-8 pressed yet during the current hold).
+// On PATTERN release: if stashed but no GP9-16 fired, perform a one-step
+// bounce to (current group's letter, stashed_letter as num). On GP9-16
+// press: perform a two-step bounce to (stashed_letter as letter, gp as num).
+static u8 pattern_stashed_letter = 0xff;
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -533,6 +548,72 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
 {
   if( !depressed ) // selection button has been pressed while Bookm/Step/Track/Param/Trigger/Instr/Mute/Phrase button pressed: don't take over new sel view anymore
     seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
+
+  // Global bounce gesture (PATTERN held).
+  //
+  // Two-step gesture mirroring the Pattern page's selection layout:
+  //   GP1..GP8  = pick the pattern letter (A..H, sets seq_pattern_t.group).
+  //   GP9..GP16 = pick the pattern number (1..8, sets seq_pattern_t.num) and
+  //               fire the bounce immediately.
+  //
+  // One-step shortcut: press GP1..GP8 alone, release PATTERN without ever
+  // pressing GP9..GP16. The PATTERN release handler then fires a bounce to
+  // (current letter, stashed_letter as num). Same as pressing GP1-8 + the
+  // matching GP9-16 for the current group's letter.
+  //
+  // Both fire in the same direction (low-latency from press), differ only
+  // in whether the deferred one-step bounce gets to fire or gets replaced
+  // by the explicit two-step.
+
+  if( !depressed && seq_ui_button_state.PATTERN_PRESSED && gp < 8 ) {
+    // first press of two-step (or one-step shortcut): stash the letter, do
+    // nothing else yet. The PATTERN release path or a subsequent GP9-16
+    // press will resolve what to do.
+    pattern_stashed_letter = (u8)gp;
+    pattern_held_gp_consumed = 1;
+    // overlay is drawn by the LCD dispatcher and reflects the new state.
+    return 0;
+  }
+
+  if( !depressed && seq_ui_button_state.PATTERN_PRESSED && gp >= 8 && gp < 16 ) {
+    // second press: requires a stashed letter (from a prior GP1-8 during the
+    // same PATTERN hold). Without it, ignore - we don't want a stray GP9-16
+    // alone to fire bounces into ambiguous letters.
+    if( pattern_stashed_letter == 0xff )
+      return 0;
+
+    pattern_held_gp_consumed = 1;
+    u8 visible_track = SEQ_UI_VisibleTrackGet();
+    u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    seq_pattern_t dst = seq_pattern[src_group];
+    dst.group = pattern_stashed_letter & 0x07;
+    dst.num   = (gp - 8) & 0x07;
+    dst.lower = 0;
+
+    MIOS32_MIDI_SendDebugMessage("[BOUNCE-2] src_trk=%d -> %c%d (tick=%d)\n",
+                                 visible_track, 'A' + dst.group, dst.num + 1,
+                                 (int)SEQ_BPM_TickGet());
+
+    s32 status = SEQ_CAPTURE_CommitToSlot(visible_track, src_group, dst, 1);
+    if( status < 0 ) {
+      MIOS32_MIDI_SendDebugMessage("[BOUNCE-2] failed status=%d\n", (int)status);
+      SEQ_UI_Msg_Track("bounce failed");
+    } else {
+      char msg[8];
+      msg[0] = '>';
+      msg[1] = 'A' + dst.group;
+      msg[2] = '1' + dst.num;
+      msg[3] = ' ';
+      msg[4] = 'O';
+      msg[5] = 'K';
+      msg[6] = 0;
+      SEQ_UI_Msg_Track(msg);
+    }
+
+    // letter stays stashed for the rest of the hold so the user can rapid-
+    // fire bounces to multiple numbers without re-picking the letter.
+    return 0;
+  }
 
   // in MENU page: overrule GP buttons as long as MENU button is pressed/active
   if( seq_ui_button_state.MENU_PRESSED || seq_hwcfg_blm.gp_always_select_menu_page ) {
@@ -1490,13 +1571,72 @@ static s32 SEQ_UI_Button_Mute(s32 depressed)
 
 static s32 SEQ_UI_Button_Pattern(s32 depressed)
 {
-  seq_ui_button_state.PATTERN_PRESSED = depressed ? 0 : 1;
+  if( !depressed ) {
+    // PATTERN pressed: arm the modifier; don't navigate yet. If the user
+    // hits a GP while holding, the GP intercept stashes the letter (GP1-8)
+    // or fires the two-step bounce (GP9-16). The release handler below
+    // resolves whatever's left. The held-overlay is drawn by the LCD
+    // dispatcher (search for PATTERN_PRESSED branch) so we don't need a
+    // SEQ_UI_Msg here.
+    seq_ui_button_state.PATTERN_PRESSED = 1;
+    pattern_held_gp_consumed = 0;
+    pattern_stashed_letter = 0xff;
+    return 0;
+  }
 
-  if( depressed ) return -1; // ignore when button depressed
+  // PATTERN released. Three cases:
+  //   1. No GP pressed during hold      -> bare tap; navigate to Pattern page.
+  //   2. GP1-8 stashed, no GP9-16 fired -> one-step bounce (current letter,
+  //                                        stashed_letter as the number).
+  //   3. GP9-16 fired (with letter)     -> bounce already happened; nothing
+  //                                        more to do here.
+  seq_ui_button_state.PATTERN_PRESSED = 0;
 
-  SEQ_UI_PageSet(SEQ_UI_PAGE_PATTERN);
+  u8 letter = pattern_stashed_letter;
+  u8 gp_consumed = pattern_held_gp_consumed;
+  pattern_stashed_letter = 0xff;
+  pattern_held_gp_consumed = 0;
 
-  return 0; // no error
+  if( !gp_consumed ) {
+    // Case 1: no GP at all - bare tap.
+    SEQ_UI_MsgStop();
+    SEQ_UI_PageSet(SEQ_UI_PAGE_PATTERN);
+    return 0;
+  }
+
+  if( letter != 0xff ) {
+    // Case 2: letter stashed but the user never hit GP9-16. Treat the GP1-8
+    // press as a one-step bounce into the current letter's slot N.
+    u8 visible_track = SEQ_UI_VisibleTrackGet();
+    u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    seq_pattern_t dst = seq_pattern[src_group];
+    dst.num = letter & 0x07; // keep current letter+lower; only the number changes
+
+    MIOS32_MIDI_SendDebugMessage("[BOUNCE-1] src_trk=%d -> %c%d (tick=%d)\n",
+                                 visible_track, 'A' + dst.group, dst.num + 1,
+                                 (int)SEQ_BPM_TickGet());
+
+    s32 status = SEQ_CAPTURE_CommitToSlot(visible_track, src_group, dst, 1);
+    if( status < 0 ) {
+      MIOS32_MIDI_SendDebugMessage("[BOUNCE-1] failed status=%d\n", (int)status);
+      SEQ_UI_Msg_Track("bounce failed");
+    } else {
+      char msg[8];
+      msg[0] = '>';
+      msg[1] = 'A' + dst.group;
+      msg[2] = '1' + dst.num;
+      msg[3] = ' ';
+      msg[4] = 'O';
+      msg[5] = 'K';
+      msg[6] = 0;
+      SEQ_UI_Msg_Track(msg);
+    }
+    return 0;
+  }
+
+  // Case 3: bounce already ran from a two-step gesture. Leave its own
+  // success/fail message visible; nothing to do here.
+  return 0;
 }
 
 static s32 SEQ_UI_Button_Pattern_Remix(s32 depressed)
@@ -3086,6 +3226,55 @@ s32 SEQ_UI_LCD_Handler(void)
     int i;
     for(i=0; i<16; ++i) {
       SEQ_LCD_PrintString(SEQ_UI_PAGES_MenuShortcutNameGet(i));
+    }
+  } else if( seq_ui_button_state.PATTERN_PRESSED ) {
+    // BOUNCE picker overlay: LCD 1 (cols 0-39) shows the letter row
+    // (GP1-8 = A..H), LCD 2 (cols 40-79) shows the slot row (GP9-16 = 1..8).
+    // The currently-stashed letter (if any) is bracketed.
+    u8 visible_track = SEQ_UI_VisibleTrackGet();
+    u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    u8 cur_letter = seq_pattern[src_group].group;
+
+    // LCD 1 row 0: title (40 chars)
+    SEQ_LCD_CursorSet(0, 0);
+    //                   "1234567890123456789012345678901234567890"
+    SEQ_LCD_PrintString("BOUNCE -> letter (GP1-8)                ");
+
+    // LCD 1 row 1: letter values, 5 chars per slot. Stashed letter has
+    // square brackets; current playing letter shows a small dot prefix.
+    SEQ_LCD_CursorSet(0, 1);
+    {
+      int i;
+      for(i=0; i<8; ++i) {
+        char letter = 'A' + i;
+        char prefix = (i == cur_letter) ? '.' : ' ';
+        if( i == pattern_stashed_letter )
+          SEQ_LCD_PrintFormattedString("%c[%c] ", prefix, letter);
+        else
+          SEQ_LCD_PrintFormattedString("%c %c  ", prefix, letter);
+      }
+    }
+
+    // LCD 2 row 0: title (40 chars)
+    SEQ_LCD_CursorSet(40, 0);
+    //                   "1234567890123456789012345678901234567890"
+    if( pattern_stashed_letter == 0xff )
+      SEQ_LCD_PrintString("       (release for current letter)     ");
+    else
+      SEQ_LCD_PrintString("BOUNCE -> slot 1-8 (GP9-16)             ");
+
+    // LCD 2 row 1: slot 1..8, 5 chars per slot. The "one-step release"
+    // target slot (which equals stashed_letter+1 in 1-indexed terms) is
+    // bracketed so the user can preview what RELEASE would bounce to.
+    SEQ_LCD_CursorSet(40, 1);
+    {
+      int i;
+      for(i=0; i<8; ++i) {
+        if( i == pattern_stashed_letter )
+          SEQ_LCD_PrintFormattedString("[%d]  ", i + 1);
+        else
+          SEQ_LCD_PrintFormattedString(" %d   ", i + 1);
+      }
     }
   } else {
     // re-init special chars

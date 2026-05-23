@@ -48,6 +48,7 @@
 #include "seq_cv.h"
 #include "seq_statistics.h"
 #include "seq_ui.h"
+#include "seq_capture.h"
 
 
 
@@ -215,6 +216,9 @@ s32 SEQ_CORE_Init(u32 mode)
   // reset robotizer module
   SEQ_ROBOTIZE_Init(0);
 
+  // reset capture/bounce ring
+  SEQ_CAPTURE_Init(0);
+
   // reset LFO module
   SEQ_LFO_Init(0);
 
@@ -283,6 +287,11 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 {
   s32 status = 0;
   mios32_midi_port_t fx_midi_port = tcc->fx_midi_port ? tcc->fx_midi_port : tcc->midi_port;
+
+  // capture tap: snapshot emitted event into the per-track ring buffer.
+  // No-op (single branch on a hot u8) when the track isn't armed.
+  if( SEQ_CAPTURE_IsArmed(track) )
+    SEQ_CAPTURE_TapEvent(track, midi_package, timestamp);
 
   u8 shadow_enabled = seq_core_shadow_out_chn && SEQ_UI_VisibleTrackGet() == track;
 
