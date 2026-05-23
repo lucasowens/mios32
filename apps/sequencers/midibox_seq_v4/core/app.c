@@ -59,6 +59,7 @@
 #include "seq_midi_in.h"
 #include "seq_midi_router.h"
 #include "seq_midi_sysex.h"
+#include "seq_testctrl.h"
 #include "seq_blm.h"
 #include "seq_terminal.h"
 #include "seq_statistics.h"
@@ -145,6 +146,7 @@ void APP_Init(void)
   SEQ_MIDI_PORT_Init(0);
   SEQ_MIDI_IN_Init(0);
   SEQ_MIDI_SYSEX_Init(0);
+  SEQ_TESTCTRL_Init(0);
   SEQ_BLM_Init(0);
   SEQ_MIDI_OUT_Init(0);
   SEQ_MIDI_ROUTER_Init(0);
@@ -252,6 +254,9 @@ s32 APP_SYSEX_Parser(mios32_midi_port_t port, u8 midi_in)
 
   // forward to common SysEx handler
   SEQ_MIDI_SYSEX_Parser(port, midi_in);
+
+  // forward to test-control parser (harness)
+  SEQ_TESTCTRL_Parser(port, midi_in);
 
   return 0; // no error
 }
@@ -866,6 +871,9 @@ static s32 NOTIFY_MIDI_TimeOut(mios32_midi_port_t port)
 {  
   // forward to SysEx parser
   SEQ_MIDI_SYSEX_TimeOut(port);
+
+  // forward timeout to test-control parser
+  SEQ_TESTCTRL_TimeOut(port);
 
   // forward timeout to BLM MASTER
   BLM_SCALAR_MASTER_MIDI_TimeOut(port);

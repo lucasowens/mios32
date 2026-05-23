@@ -173,6 +173,21 @@ s32 SEQ_LCD_Init(u32 mode)
 // Buffer handling functions
 /////////////////////////////////////////////////////////////////////////////
 
+const u8 *SEQ_LCD_BufferGet(void)
+{
+  return (const u8 *)lcd_buffer;
+}
+
+u16 SEQ_LCD_BufferLinesGet(void)
+{
+  return LCD_MAX_LINES;
+}
+
+u16 SEQ_LCD_BufferColumnsGet(void)
+{
+  return LCD_MAX_COLUMNS;
+}
+
 // clears the buffer
 s32 SEQ_LCD_Clear(void)
 {

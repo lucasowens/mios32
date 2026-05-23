@@ -1,0 +1,14 @@
+# Local Python venv
+.venv/
+
+# Bytecode + caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Editable-install metadata
+*.egg-info/
+
+# macOS
+.DS_Store

@@ -49,6 +49,10 @@ extern s32 SEQ_LCD_PrintChar(char c);
 extern s32 SEQ_LCD_CursorSet(u16 column, u16 line);
 extern s32 SEQ_LCD_Update(u8 force);
 
+extern const u8 *SEQ_LCD_BufferGet(void);
+extern u16 SEQ_LCD_BufferLinesGet(void);
+extern u16 SEQ_LCD_BufferColumnsGet(void);
+
 extern s32 SEQ_LCD_InitSpecialChars(seq_lcd_charset_t charset);
 extern s32 SEQ_LCD_ReInitSpecialChars(void);
 extern s32 SEQ_LCD_PrintString(const char *str);

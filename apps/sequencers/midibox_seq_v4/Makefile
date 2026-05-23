@@ -74,6 +74,7 @@ THUMB_SOURCE    = core/app.c \
 		core/seq_midi_port.c \
 		core/seq_midi_in.c \
 		core/seq_midi_sysex.c \
+		core/seq_testctrl.c \
 		core/seq_midi_router.c \
 		core/seq_midply.c \
 		core/seq_midexp.c \
@@ -87,6 +88,7 @@ THUMB_SOURCE    = core/app.c \
 		core/seq_morph.c \
 		core/seq_humanize.c \
 		core/seq_robotize.c \
+		core/seq_capture.c \
 		core/seq_lfo.c \
 		core/seq_chord.c \
 		core/seq_pattern.c \

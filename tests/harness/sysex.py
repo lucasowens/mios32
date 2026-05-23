@@ -1,0 +1,155 @@
+"""SysEx protocol constants for the SEQ V4 test-control interface.
+
+Wire format:
+    request : F0 00 00 7E 4F 54 <cmd> [args...] F7
+    reply   : F0 00 00 7E 4F 54 <cmd> [data...] F7
+
+Keep this file in sync with seq_testctrl.c.
+"""
+
+TESTCTRL_HEADER = bytes([0xF0, 0x00, 0x00, 0x7E, 0x4F, 0x54])
+
+CMD_PING = 0x01
+CMD_BUTTON = 0x10
+CMD_ENCODER = 0x11
+CMD_LCD_SNAPSHOT = 0x20
+CMD_RESET_STATE = 0x30
+CMD_PAGE_SET = 0x31
+CMD_TRACK_CONFIG = 0x32
+CMD_TICK_QUERY = 0x40
+
+
+# Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.
+class Page:
+    MENU = 1
+    EDIT = 16
+    MUTE = 17
+    PATTERN = 19
+    SONG = 20
+    MIXER = 21
+    TRKEVNT = 22
+    TRKEUCLID = 33
+    TRKJAM = 34
+    BPM = 47
+
+
+# mios32_midi_port_t values that fit in 7 bits.
+class MidiPort:
+    DEFAULT = 0x00
+    USB0 = 0x10  # shows as "USB1" in the SEQ UI (off-by-one display)
+    USB1 = 0x11
+    USB2 = 0x12
+    USB3 = 0x13
+    UART0 = 0x20
+    UART1 = 0x21
+    UART2 = 0x22
+    UART3 = 0x23
+
+
+# Encoder indices match MBSEQ's internal numbering.
+class Encoder:
+    DATAWHEEL = 0
+    BPM = 17
+
+    @staticmethod
+    def GP(n: int) -> int:
+        """GP1..GP16 -> encoder index. n is 1-based."""
+        if not 1 <= n <= 16:
+            raise ValueError(f"GP index out of range: {n}")
+        return n
+
+
+# RESET_STATE flags.
+RESET_STOP_TRANSPORT = 0x01
+RESET_PAGE_TO_EDIT = 0x02
+RESET_TRACK_SELECTION = 0x04
+RESET_UNMUTE_ALL = 0x08
+RESET_DEFAULT = (
+    RESET_STOP_TRANSPORT | RESET_PAGE_TO_EDIT | RESET_TRACK_SELECTION | RESET_UNMUTE_ALL
+)
+
+
+# Logical button IDs (mirror of button_id_t in seq_testctrl.c).
+class Button:
+    MENU = 0x01
+    SELECT = 0x02
+    EXIT = 0x03
+    PLAY = 0x04
+    STOP = 0x05
+    PAUSE = 0x06
+    RECORD = 0x07
+    REW = 0x08
+    FWD = 0x09
+    LEFT = 0x0A
+    RIGHT = 0x0B
+    UP = 0x0C
+    DOWN = 0x0D
+    EDIT = 0x0E
+    MUTE = 0x0F
+    PATTERN = 0x10
+    SONG = 0x11
+    BOOKMARK = 0x12
+    CLEAR = 0x13
+    UNDO = 0x14
+    COPY = 0x15
+    PASTE = 0x16
+
+    @staticmethod
+    def GP(n: int) -> int:
+        """GP1..GP16 -> button id. n is 1-based."""
+        if not 1 <= n <= 16:
+            raise ValueError(f"GP index out of range: {n}")
+        return 0x40 + (n - 1)
+
+
+# Status byte returned by CMD_BUTTON.
+BUTTON_STATUS_DISPATCHED = 0x01
+BUTTON_STATUS_UNCONFIGURED = 0x00
+BUTTON_STATUS_BAD_PAYLOAD = 0x02
+
+# Status byte returned by CMD_ENCODER.
+ENCODER_STATUS_DISPATCHED = 0x01
+ENCODER_STATUS_BAD_PAYLOAD = 0x02
+ENCODER_STATUS_OUT_OF_RANGE = 0x03
+
+
+def frame(cmd: int, payload: bytes = b"") -> bytes:
+    """Build a complete SysEx message for a testctrl command."""
+    return TESTCTRL_HEADER + bytes([cmd]) + payload + bytes([0xF7])
+
+
+def parse_reply(msg: bytes) -> tuple[int, bytes] | None:
+    """Parse an incoming SysEx message. Returns (cmd, payload) or None if not ours."""
+    if len(msg) < len(TESTCTRL_HEADER) + 2:
+        return None
+    if not msg.startswith(TESTCTRL_HEADER):
+        return None
+    if msg[-1] != 0xF7:
+        return None
+    cmd = msg[len(TESTCTRL_HEADER)]
+    payload = bytes(msg[len(TESTCTRL_HEADER) + 1 : -1])
+    return cmd, payload
+
+
+def unpack7(packed: bytes) -> bytes:
+    """Inverse of the firmware's pack7(): unpacks 7-bit-safe groups back to raw bytes.
+
+    Encoding: every group is `(msbs, b0..b6)` where bit j of `msbs` is the
+    high bit of byte j. Trailing partial groups are supported.
+    """
+    out = bytearray()
+    i = 0
+    while i < len(packed):
+        msbs = packed[i]
+        i += 1
+        # A group has up to 7 data bytes. The last group may be shorter; in
+        # that case the encoder still wrote (group_len) data bytes after the
+        # msb byte, so we just consume whatever's left.
+        group = min(7, len(packed) - i)
+        for j in range(group):
+            b = packed[i + j] & 0x7F
+            if msbs & (1 << j):
+                b |= 0x80
+            out.append(b)
+        i += group
+    return bytes(out)
