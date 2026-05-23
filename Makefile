@@ -86,7 +86,7 @@ hwcfg-lh:
 	cp $(HWCFG_DIR)/midiphy_lh/MBSEQ_HW.V4 "$(SD)/MBSEQ_HW.V4"
 	@echo "wrote $(SD)/MBSEQ_HW.V4 (midiphy_lh)"
 
-TESTS_DIR := tests
+TESTS_DIR := mios32/tests
 TESTS_VENV := $(TESTS_DIR)/.venv
 TESTS_PY := $(TESTS_VENV)/bin/python
 
@@ -98,11 +98,11 @@ test-setup:
 
 test-discover:
 	@test -x $(TESTS_PY) || { echo "run 'make test-setup' first"; exit 1; }
-	cd $(TESTS_DIR) && ../$(TESTS_PY) discover.py
+	cd $(TESTS_DIR) && ./.venv/bin/python discover.py
 
 test:
 	@test -x $(TESTS_PY) || { echo "run 'make test-setup' first"; exit 1; }
-	cd $(TESTS_DIR) && ../$(TESTS_PY) -m pytest
+	cd $(TESTS_DIR) && ./.venv/bin/python -m pytest
 
 # Open MIOS Studio with the hex selected. Default to SEQ v4 hex.
 upload:

@@ -17,7 +17,7 @@ def main() -> int:
     print()
     try:
         with Board() as b:
-            print(f"matched IN  -> {b.input_port_name}")
+            print(f"matched IN  -> {b.input_port_names}")
             print(f"matched OUT -> {b.output_port_name}")
             print("sending PING...")
             try:
