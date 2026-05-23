@@ -266,16 +266,16 @@ static void cmd_encoder(mios32_midi_port_t port, const u8 *payload, u8 plen)
 //   flags bit 0: stop transport  (SEQ_BPM_Stop)
 //   flags bit 1: return to default page (SEQ_UI_PAGE_EDIT)
 //   flags bit 2: reset UI track selection to G1T1 (group=0, tracks bitmask=1)
-//   flags bit 3: solo track 0 (mute all *other* tracks, unmute track 0)
-//                so test playback only emits from the one track under test.
+//   flags bit 3: unmute all tracks + clear port mutes + clear solo + clear slaveclk mute
+//   flags bit 4: clear robotize state (ACTIVE/MASK1/MASK2) on all 16 tracks
 // Reply payload: [flags] echoed back, then status 0x01.
 //
 // Deliberately does NOT clear pattern data — tests that need an empty pattern
 // should press CLEAR after reset.
 static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
-  // Default: stop + page + track-select + solo-track-0.
-  u8 flags = (plen >= 1) ? (payload[0] & 0x7f) : 0x0f;
+  // Default: stop + page + track-select + unmute-all + clear-robotize.
+  u8 flags = (plen >= 1) ? (payload[0] & 0x7f) : 0x1f;
 
   if( flags & 0x01 )
     SEQ_BPM_Stop();
@@ -286,19 +286,24 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
     ui_selected_tracks = 1;
   }
   if( flags & 0x08 ) {
-    // Unmute all tracks. The "solo track 0" approach turned out to silence
-    // track 0 too (likely some interaction with the mute-mask check we haven't
-    // traced yet); just unmute everything and let tests deal with whatever
-    // other tracks happen to be in the loaded pattern.
     seq_core_trk_muted = 0;
     seq_core_trk_soloed = 0;
     seq_core_slaveclk_mute = SEQ_CORE_SLAVECLK_MUTE_Off;
-    // Also unmute USB0..USB3 at the port level. The user's session may have
-    // toggled the port-mute on USB1 via the PMUTE page.
     SEQ_MIDI_PORT_OutMuteSet(USB0, 0);
     SEQ_MIDI_PORT_OutMuteSet(USB1, 0);
     SEQ_MIDI_PORT_OutMuteSet(USB2, 0);
     SEQ_MIDI_PORT_OutMuteSet(USB3, 0);
+  }
+
+  if( flags & 0x10 ) {
+    // Robotize state survives both page changes and the regular mute reset.
+    // Without this, a previous test that enabled robotize SKIP/VELOCITY/etc.
+    // leaks across pytest invocations and silently breaks the generator tests.
+    for(u8 t=0; t<SEQ_CORE_NUM_TRACKS; ++t) {
+      SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_ACTIVE, 0);
+      SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_MASK1, 0);
+      SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_MASK2, 0);
+    }
   }
 
   u8 reply[2] = { flags, 0x01 };
