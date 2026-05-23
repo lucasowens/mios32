@@ -814,7 +814,7 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
     } else {
       SEQ_LCD_PrintString("Step Trg  Layer Par                ");
     }
-    SEQ_LCD_PrintString("Step Datawheel:  Record   Random    Euclid   ");
+    SEQ_LCD_PrintString("Step Datawheel:  Record   Random    Track    ");
     SEQ_LCD_CursorSet(0, 1);
     SEQ_LCD_PrintString("View View View View               Select");
     SEQ_LCD_PrintString((char *)seq_ui_edit_datawheel_mode_str[seq_ui_edit_datawheel_mode]);
