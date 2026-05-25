@@ -30,6 +30,9 @@ CMD_MSP_QUERY = 0x59
 CMD_UI_INSTR_SET = 0x5a
 CMD_TRACK_DRUM_INIT = 0x5b
 CMD_GENERATOR_QUERY = 0x5c
+CMD_UI_TRACK_SET = 0x5d
+CMD_TRACK_DRUM_PAR_SET = 0x5e
+CMD_TRACK_DRUM_PAR_GET = 0x5f
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.

@@ -678,6 +678,86 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
 }
 
 
+// Phase F.3 — count enabled-processor tracks excluding `exclude_track`,
+// returning the first found via *out_track. The PITCHGEN BOUNCE dispatch
+// uses this both to find the cross-track-capture src candidate AND to
+// refuse the gesture when the choice is ambiguous (count > 1).
+u8 SEQ_CORE_FindEnabledProcessorTrack(u8 exclude_track, u8 *out_track)
+{
+  u8 count = 0;
+  u8 track;
+  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+    if( track == exclude_track ) continue;
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+      const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+      if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) {
+        if( count == 0 && out_track ) *out_track = track;
+        ++count;
+        break;
+      }
+    }
+  }
+  return count;
+}
+
+
+// Phase F.3 cross-track non-destructive capture. The §3 "additive at
+// empty target" half of the processor-bounce gesture: snapshot the
+// src track's current post-processor output into the dst track's
+// source par/trg buffers, leave the src processor stack enabled and
+// the src tcc untouched. dst must be empty (no enabled processor, no
+// engaged generator) — refuse otherwise.
+s32 SEQ_CORE_ProcessorBounceCapture(u8 src_track, u8 dst_track)
+{
+  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -3;
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -3;
+  if( src_track == dst_track ) return -3;
+
+  // src must have an enabled processor; otherwise there's nothing to capture.
+  u8 src_has_proc = 0;
+  u8 slot;
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    const seq_processor_slot_t *p = &seq_processor_stack[src_track][slot];
+    if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) { src_has_proc = 1; break; }
+  }
+  if( !src_has_proc ) return -2;
+
+  // dst must be empty: no enabled processor slot AND no engaged gen.
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    const seq_processor_slot_t *p = &seq_processor_stack[dst_track][slot];
+    if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) return -1;
+  }
+  if( SEQ_GENERATOR_FindEngagedOnTrack(dst_track, NULL) ) return -1;
+
+  // Force a full quiet render of src so its OutputActive is current across
+  // the whole buffer. Without this, a recent dial touch on src puts the
+  // renderer in sweep regime, which only refreshes a 4-step slice — the
+  // rest of OutputActive is stale and the capture would only mirror the
+  // slice. The touched_ms reset is benign: the next dial touch will arm
+  // sweep again.
+  seq_render_touched_ms[src_track] = 0;
+  seq_render_dirty[src_track] = 1;
+  SEQ_CORE_RenderTrack(src_track);
+
+  // Copy active output halves → dst source. Active is what the tick reads now,
+  // so it carries the most-recent post-processor render of src.
+  memcpy(seq_par_layer_value[dst_track], SEQ_PAR_OutputActive(src_track),
+         SEQ_PAR_MAX_BYTES);
+  memcpy(seq_trg_layer_value[dst_track], SEQ_TRG_OutputActive(src_track),
+         SEQ_TRG_MAX_BYTES);
+
+  // dst has no processor stack → identity output ≡ source after re-render.
+  // Force a quiet (full-buffer) render too, so SEQ_PAR_Get(dst) — which
+  // reads through the output mirror — returns the captured bytes across
+  // the whole buffer, not just a 4-step sweep slice.
+  seq_render_touched_ms[dst_track] = 0;
+  seq_render_dirty[dst_track] = 1;
+  SEQ_CORE_RenderTrack(dst_track);
+  return 0;
+}
+
+
 void SEQ_CORE_RenderTracks(void)
 {
   u8 track;

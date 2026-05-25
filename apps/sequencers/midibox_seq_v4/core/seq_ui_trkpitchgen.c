@@ -158,10 +158,51 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
     }
 
     // disengaged → ENGAGE
+    //
+    // §3 default-destination rule: "first empty legal layer in the
+    // current track." If the cursor sits on a drum that already has
+    // Note content AND no existing gen slot, jump to the first empty
+    // legal drum before engaging — protects user-authored material from
+    // the gen's first source-write. If every drum has content, fall
+    // through to in-place engage (the UNDO snapshot is the safety net).
+    u8 auto_jumped = 0;
+    if( SEQ_GENERATOR_Get(track, instr) == NULL ) {
+      seq_cc_trk_t *tcc = &seq_cc_trk[track];
+      if( tcc->event_mode == SEQ_EVENT_MODE_Drum &&
+          tcc->link_par_layer_note >= 0 ) {
+        u8 par_layer = (u8)tcc->link_par_layer_note;
+        s32 nps_s = SEQ_PAR_NumStepsGet(track);
+        if( nps_s > 0 ) {
+          u16 nps = (u16)nps_s;
+          u16 s;
+          u8  cursor_has_content = 0;
+          for(s=0; s<nps; ++s) {
+            if( SEQ_PAR_Get(track, s, par_layer, instr) != 0 ) {
+              cursor_has_content = 1;
+              break;
+            }
+          }
+          u8 candidate;
+          if( cursor_has_content &&
+              SEQ_GENERATOR_FindFirstEmptyDrum(track, &candidate) ) {
+            ui_selected_instrument = candidate;
+            instr = candidate;
+            auto_jumped = 1;
+          }
+        }
+      }
+    }
+
     s32 r = SEQ_GENERATOR_Engage(track, instr);
     switch( r ) {
       case 0:
-        SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
+        if( auto_jumped ) {
+          char line2[21];
+          sprintf(line2, "ENGAGED on D%2d", instr + 1);
+          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", line2);
+        } else {
+          SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
+        }
         break;
       case -1:
         SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "pool full (64/64)");
@@ -187,20 +228,24 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
   }
 
   if( button == SEQ_UI_BUTTON_GP8 ) {
-    // Phase F.2 BOUNCE — cursor-aware destination (§3).
+    // Phase F.2 + F.3 BOUNCE — cursor-aware destination (§3).
     //
     // Resolve in order:
-    //   1. Cursor IS on the engaged gen → in-place bounce (free slot,
-    //      source stays as last-written). The §3 "destination occupied →
-    //      replace" branch.
+    //   1. Cursor IS on the engaged gen → in-place gen bounce (free slot,
+    //      source stays as last-written). §3 "occupied → replace".
     //   2. A gen is engaged elsewhere on the visible track → relocate it
     //      to (cursor track, cursor instr): restore src from undo, write
-    //      loop to dst. The §3 "destination empty → additive" branch
-    //      (additive at dst, src returns to original).
-    //   3. No engaged gen but enabled processor stack on track → processor
-    //      bounce-in-place (override deferred — processor relocate is more
-    //      involved; the design doc records this as a known limitation).
-    //   4. Nothing applicable → guidance message.
+    //      loop to dst. §3 "empty → additive".
+    //   3. Visible track has an enabled processor → in-place processor
+    //      bounce-and-commit (destructive: output → source on visible
+    //      track). §3 "occupied → replace" for processors.
+    //   4. Visible track empty AND exactly one other track has an enabled
+    //      processor → cross-track capture: copy that track's output into
+    //      visible track's source, leave the src processor untouched. §3
+    //      "empty → additive" for processors (phase F.3).
+    //   5. Visible track empty AND multiple other tracks have processors
+    //       → refuse with "multi proc" message (ambiguous).
+    //   6. Nothing applicable → "nothing to bounce" guidance.
     if( SEQ_GENERATOR_IsEngaged(track, instr) ) {
       SEQ_GENERATOR_Bounce(track, instr);
       SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "BOUNCED in place");
@@ -228,9 +273,38 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 
     if( SEQ_CORE_ProcessorBounce(track) ) {
       SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "BOUNCED (proc)");
-    } else {
-      SEQ_UI_Msg(SEQ_UI_MSG_USER, 1500, "Pitch Gen:", "nothing to bounce");
+      return 1;
     }
+
+    // Phase F.3 cross-track capture. Only reaches here when the visible
+    // track has nothing of its own to bounce.
+    u8 cap_src;
+    u8 cap_count = SEQ_CORE_FindEnabledProcessorTrack(track, &cap_src);
+    if( cap_count == 1 ) {
+      s32 r = SEQ_CORE_ProcessorBounceCapture(cap_src, track);
+      switch( r ) {
+        case 0: {
+          char line2[21];
+          sprintf(line2, "CAPTURED from T%2d", cap_src + 1);
+          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1200, "Pitch Gen:", line2);
+          break;
+        }
+        case -1:
+          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1800, "Pitch Gen:", "dst not empty");
+          break;
+        case -2:
+          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1500, "Pitch Gen:", "nothing to bounce");
+          break;
+        default:
+          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1800, "Pitch Gen:", "CAPTURE failed");
+      }
+      return 1;
+    } else if( cap_count >= 2 ) {
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "multi proc - pick one");
+      return 1;
+    }
+
+    SEQ_UI_Msg(SEQ_UI_MSG_USER, 1500, "Pitch Gen:", "nothing to bounce");
     return 1;
   }
 
@@ -288,6 +362,22 @@ static s32 LCD_Handler(u8 high_prio)
   if( !engaged )
     has_other_engaged = SEQ_GENERATOR_FindEngagedOnTrack(track, &other_engaged_instr);
 
+  // Phase F.3 — cross-track capture candidate hint. Only meaningful when
+  // the visible track has nothing of its own (no engaged gen anywhere on
+  // it, and no enabled processor).
+  u8 cap_src_track = 0;
+  u8 cap_count = 0;
+  u8 has_own_proc = 0;
+  if( !engaged && !has_other_engaged ) {
+    u8 s;
+    for(s=0; s<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++s) {
+      const seq_processor_slot_t *p = &seq_processor_stack[track][s];
+      if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) { has_own_proc = 1; break; }
+    }
+    if( !has_own_proc )
+      cap_count = SEQ_CORE_FindEnabledProcessorTrack(track, &cap_src_track);
+  }
+
   // Row 0
   SEQ_LCD_CursorSet(0, 0);
   SEQ_LCD_PrintFormattedString("PITCH GEN  Trk%2d.D%2d   ", track+1, instr+1);
@@ -326,6 +416,9 @@ static s32 LCD_Handler(u8 high_prio)
   } else if( has_other_engaged ) {
     SEQ_LCD_PrintFormattedString("GEN on D%2d  GP8 relocates here       ",
                                  other_engaged_instr + 1);
+  } else if( cap_count == 1 ) {
+    SEQ_LCD_PrintFormattedString("Proc on T%2d  GP8 captures here         ",
+                                 cap_src_track + 1);
   } else
     SEQ_LCD_PrintString("press GP1 to ENGAGE   GP8=bounce proc   ");
 

@@ -455,6 +455,41 @@ s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr)
 }
 
 
+// Phase F.3 ENGAGE auto-jump support. "Empty drum slot" = no engaged gen
+// AND every step of the drum's Note par-layer is 0. Scans instruments in
+// ascending order; the §3 "first empty legal layer" rule. Returns 1 +
+// writes out_instr if found, 0 otherwise. Caller is responsible for the
+// track-mode + Note-layer gating (a non-drum track or a track without a
+// Note par-layer assignment trivially has no legal empty drum — returns 0).
+s32 SEQ_GENERATOR_FindFirstEmptyDrum(u8 track, u8 *out_instr)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->event_mode != SEQ_EVENT_MODE_Drum ) return 0;
+  if( tcc->link_par_layer_note < 0 ) return 0;
+
+  u8  par_layer    = (u8)tcc->link_par_layer_note;
+  s32 num_p_steps_s = SEQ_PAR_NumStepsGet(track);
+  if( num_p_steps_s <= 0 ) return 0;
+  u16 num_p_steps  = (u16)num_p_steps_s;
+
+  u8 instr;
+  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS; ++instr) {
+    if( SEQ_GENERATOR_IsEngaged(track, instr) ) continue;
+    u16 step;
+    u8 empty = 1;
+    for(step=0; step<num_p_steps; ++step) {
+      if( SEQ_PAR_Get(track, step, par_layer, instr) != 0 ) { empty = 0; break; }
+    }
+    if( empty ) {
+      if( out_instr ) *out_instr = instr;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
 s32 SEQ_GENERATOR_Undo(void)
 {
   if( !undo_slot.valid ) return -1;

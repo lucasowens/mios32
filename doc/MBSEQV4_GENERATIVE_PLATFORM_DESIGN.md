@@ -904,6 +904,49 @@ Append-only-ish; revise an entry only with a dated note.
     harness's LCD-scrape assertions which read the LCD right after a
     popup nominally cleared. Pre-existing, predates this fork.
 
+  - **F.3: ENGAGE auto-jump + cross-track processor capture — done
+    2026-05-26.** The two phase-F deferred items, shipped together.
+    - **ENGAGE auto-jump.** §3 "default destination = first empty legal
+      layer in the current track." `SEQ_GENERATOR_FindFirstEmptyDrum`
+      scans drums 0..15 for "no engaged gen + Note par-layer all-zero."
+      GP1 disengaged branch checks if cursor drum has any non-zero Note
+      step AND no allocated slot — if so, jumps `ui_selected_instrument`
+      to the first empty before engaging. Popup is `"ENGAGED on D 5"`
+      vs the plain `"ENGAGED"` when no jump fires. Existing test
+      `test_bounce_clears_locks_for_next_slot` was updated: after
+      BOUNCE-in-place the bounced drum's source still holds the gen's
+      loop notes, so re-ENGAGE now auto-jumps to D2 — the §3-literal
+      behavior, not a regression.
+    - **Cross-track processor capture.** `SEQ_CORE_ProcessorBounceCapture`
+      copies src's post-processor output → dst's source par+trg, leaves
+      src untouched (processor stack + tcc preserved). The §3 "empty
+      target → additive" half of processor BOUNCE; symmetric with gen
+      `BounceRelocate`. New GP8 dispatch branches: cursor on empty
+      visible track + exactly one other track has an enabled processor
+      → capture; multiple other-track processors → refuse "multi proc".
+      LCD row-1 RHS: "Proc on T 3  GP8 captures here" hint when
+      eligible. The capture function forces a quiet (full-buffer) render
+      of both src (before copy, so it reads a complete `OutputActive`)
+      and dst (after copy, so `SEQ_PAR_Get(dst)` returns the captured
+      bytes through the output-mirror redirection §A2).
+
+    **Harness automation (added same session).** 3 LCD/dispatch tests in
+    `tests/apps/seq_v4/test_pitchgen_engage_autojump.py`; 3 dispatch +
+    bytes-match tests in `test_processor_capture.py`. New testctrl
+    commands: `CMD_UI_TRACK_SET` (0x5d — park visible track for cross-
+    track tests), `CMD_TRACK_DRUM_PAR_SET` (0x5e — seed a drum's Note
+    layer without engaging a gen), `CMD_TRACK_DRUM_PAR_GET` (0x5f —
+    symmetric readback for bytes-match assertions). Hygiene: three
+    existing testctrl commands (`UI_INSTR_SET`, `UI_TRACK_SET`,
+    `TRACK_DRUM_PAR_SET`) now set `seq_ui_display_update_req = 1` so
+    LCD scrapers see content changes within SETTLE rather than racing
+    the ~250ms cursor-flash periodic. Full harness **44/44 green**
+    against the F.3 firmware.
+
+    No new persistent state — CCMRAM stays at 46.8 KB used / 64 KB,
+    main RAM unchanged. Flash +1208 B (helpers + 3 testctrl commands +
+    dispatch + LCD hint).
+
 - **Step 6 — Generator polish (phase G). DONE 2026-05-25.** Per-step LOCK,
   ROLL gesture, mutation depth, contour shapes. Sub-phased G.0–G.4 but
   shipped as one commit since each piece was a single small wiring change
@@ -1073,20 +1116,21 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   See §8 step 5 phase F for the resolution order and the one-deep-undo
   caveat (relocate disengages every other gen on the src track).
 
-**Open (deferred phase-F-related work)**
-- **Processor BOUNCE relocate** (phase F.3 candidate). Phase F implemented
-  cursor-aware relocate for *generators* only; processor BOUNCE is still
-  in-place (overwrites the source par/trg). The non-destructive contract
-  in §3 says processor source should never be overwritten — relocate
-  semantics would copy track T's output → dst track's source while
-  leaving T's source untouched. Untackled because (a) the chord_mask is
-  the only live processor, (b) the user-pressure for the gen path was
-  the immediate ask, and (c) the wiring needs a way to express "which
-  track's processor stack" when the cursor moves to a different track.
-- **ENGAGE destination auto-jump** (phase F.3 candidate). §3 "default
-  destination = first empty legal layer in the current track." Currently
-  the user navigates the cursor manually. Cheap to add; deferred to keep
-  phase F scope tight.
+**Closed phase F.3 (2026-05-26)**
+- **Processor BOUNCE cross-track capture — CLOSED.** Reframed: §3
+  ¶176-178 actually wants in-place processor bounce to BE destructive
+  ("the processed notes *are* the buffer"). What was missing was the
+  symmetric *additive* half — capture src's output into an empty
+  *other* track's source. Wired as `SEQ_CORE_ProcessorBounceCapture`
+  with a visible-track + count-other-track-processors dispatch in the
+  PITCHGEN GP8 handler; refuses if multiple other-track processors
+  (ambiguous). Same-track BOUNCE retains the existing in-place /
+  replace semantic.
+- **ENGAGE destination auto-jump — CLOSED.** `SEQ_GENERATOR_FindFirstEmptyDrum`
+  + a GP1-disengaged-branch check in `seq_ui_trkpitchgen.c`. Cursor
+  jumps if its drum has any non-zero Note step AND no allocated slot.
+  Confirmed live + bytewise-test green; closes §10's "ENGAGE destination
+  auto-jump" item.
 
 **Open bugs (pre-existing, surfaced 2026-05-25)**
 - **`SEQ_CC_CHORDMASK_STRENGTH = 0x96` is outside the v2 persisted ext-CC range
@@ -1273,10 +1317,12 @@ MULT / ANCHOR / SNAP still **not allocated** (no fields, no dispatch) —
 they come if and when listen-test demands.
 
 The BOUNCE control is the first place the §3 destination semantic is wired in
-the UI: cursor IS the destination, occupancy decides additive-vs-replace. The
-ENGAGE auto-jump-to-first-empty-legal-layer behavior (§3 "default destination
-= first empty legal layer") is **not yet implemented** — user navigates the
-cursor manually for now. Adding auto-jump is a small phase F.3 candidate.
+the UI: cursor IS the destination, occupancy decides additive-vs-replace.
+Phase F.3 (2026-05-26) wired the ENGAGE auto-jump-to-first-empty-legal-layer
+behavior (§3 "default destination = first empty legal layer") and the
+cross-track processor BOUNCE-capture symmetric counterpart of in-place
+processor BOUNCE — both halves of the §3 destination model are now
+present in the UI for generators and processors alike.
 
 **Turing model (mechanics):** loop array; global mutation rate; per-step multiplier
 (4-bit, 0×–2× — *hybrid scope*); per-step lock bitmask; contour (walk/Brownian/

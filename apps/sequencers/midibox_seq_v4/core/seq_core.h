@@ -422,6 +422,29 @@ extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
 // occurred (any slot was enabled), 0 otherwise.
 extern s32 SEQ_CORE_ProcessorBounce(u8 track);
 
+// Phase F.3 BOUNCE-capture: cross-track non-destructive variant of the
+// processor bounce — copies src_track's current post-processor output
+// (active par + trg halves) into dst_track's source par/trg buffers,
+// leaving src_track entirely alone (processor stack stays enabled,
+// chord_mask tcc mirror untouched). The §3 destination model: writing
+// to an empty/different track is the *additive* counterpart of the
+// in-place replace done by SEQ_CORE_ProcessorBounce.
+//
+// Returns:
+//    0  on success
+//   -1  dst_track has any enabled processor slot OR any engaged generator
+//       (we only capture into an "empty" target — refuse otherwise)
+//   -2  src_track has no enabled processor slot
+//   -3  src/dst track index out of range, or src == dst
+extern s32 SEQ_CORE_ProcessorBounceCapture(u8 src_track, u8 dst_track);
+
+// Phase F.3 helper. Returns the number of tracks with any enabled
+// processor slot, *excluding* `exclude_track`. If at least one is
+// found, writes the first such track to *out_track. Used by the
+// PITCHGEN BOUNCE dispatch to find the cross-track-capture src
+// candidate and to refuse when the choice is ambiguous (>1).
+extern u8 SEQ_CORE_FindEnabledProcessorTrack(u8 exclude_track, u8 *out_track);
+
 // Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
 // free region between `_eusrstack` and the current MSP at paint time with a
 // sentinel pattern; later reads scan upward from `_eusrstack` to find the first

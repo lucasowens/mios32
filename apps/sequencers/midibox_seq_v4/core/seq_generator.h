@@ -164,6 +164,12 @@ extern s32 SEQ_GENERATOR_BounceRelocate(u8 src_track, u8 src_instr,
 // different drum slot than the engaged gen.
 extern s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr);
 
+// Phase F.3 ENGAGE auto-jump. Returns 1 + writes the first drum
+// instrument on `track` whose Note par-layer is all-zero AND has no
+// engaged gen. Returns 0 if the track is not drum-mode, has no Note
+// par-layer, or every drum already has content / an engaged gen.
+extern s32 SEQ_GENERATOR_FindFirstEmptyDrum(u8 track, u8 *out_instr);
+
 // Restore the par-buffer from the auto-undo slot and disengage every
 // generator on the snapshot's track. One-deep, global — most recent ENGAGE
 // wins. Returns -1 if no snapshot is held.

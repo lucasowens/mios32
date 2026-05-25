@@ -56,6 +56,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_UI_INSTR_SET      0x5a
 #define CMD_TRACK_DRUM_INIT   0x5b
 #define CMD_GENERATOR_QUERY   0x5c
+#define CMD_UI_TRACK_SET      0x5d
+#define CMD_TRACK_DRUM_PAR_SET 0x5e
+#define CMD_TRACK_DRUM_PAR_GET 0x5f
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -479,9 +482,104 @@ static void cmd_ui_instr_set(mios32_midi_port_t port, const u8 *payload, u8 plen
   }
   u8 instr = payload[0] & 0x0f;   // 0..15
   ui_selected_instrument = instr;
+  // Pages render content dependent on the cursor — request a low-prio LCD
+  // pass so tests reading the LCD within SETTLE see the change instead of
+  // racing the ~250ms cursor-flash periodic. Same fix as cmd_ui_track_set.
+  seq_ui_display_update_req = 1;
   reply[0] = instr;
   reply[1] = 0x01;
   send_reply(port, CMD_UI_INSTR_SET, reply, sizeof(reply));
+}
+
+
+// CMD_UI_TRACK_SET payload: [track 0..15]
+// Reply payload: [track, status]   status 0x01 = set, 0x02 = bad payload.
+//
+// Sets ui_selected_group + ui_selected_tracks so SEQ_UI_VisibleTrackGet
+// returns `track`. Phase F.3 cross-track tests use this to park the visible
+// track on Tx before pressing BOUNCE / opening PITCHGEN.
+static void cmd_ui_track_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_UI_TRACK_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;        // 0..15
+  ui_selected_group = track >> 2;       // 0..3
+  // Stamp a single bit for track%4 into the group's nibble; clear the rest.
+  ui_selected_tracks = (u16)(1 << (track & 3)) << (ui_selected_group * 4);
+  // The PITCHGEN page (and any other page reading visible track) only
+  // redraws on display_update_req — set it so the LCD reflects the new
+  // visible track in time for the test's SETTLE-then-read pattern.
+  seq_ui_display_update_req = 1;
+  reply[0] = track;
+  reply[1] = 0x01;
+  send_reply(port, CMD_UI_TRACK_SET, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_DRUM_PAR_SET payload: [track, instr, step, value]
+// Reply payload: [track, instr, step, status]   status 0x01 = set, 0x02 = bad.
+//
+// Direct write to a drum-slot Note par-layer step. Used by the auto-jump
+// harness to seed a drum with content without going through ENGAGE
+// (which would itself trigger the auto-jump logic under test).
+static void cmd_track_drum_par_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_TRACK_DRUM_PAR_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+  u8 instr = payload[1] & 0x0f;
+  u8 step  = payload[2] & 0x7f;
+  u8 value = payload[3] & 0x7f;
+  reply[0] = track;
+  reply[1] = instr;
+  reply[2] = step;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->event_mode != SEQ_EVENT_MODE_Drum || tcc->link_par_layer_note < 0 ) {
+    send_reply(port, CMD_TRACK_DRUM_PAR_SET, reply, sizeof(reply));
+    return;
+  }
+  SEQ_PAR_Set(track, step, (u8)tcc->link_par_layer_note, instr, value);
+  // PITCHGEN row-1 hint depends on whether the cursor drum has any non-zero
+  // par bytes; force a redraw so the hint reflects the new content under
+  // the test's SETTLE.
+  seq_ui_display_update_req = 1;
+  reply[3] = 0x01;
+  send_reply(port, CMD_TRACK_DRUM_PAR_SET, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_DRUM_PAR_GET payload: [track, instr, step]
+// Reply payload: [track, instr, step, value, status]
+//   status 0x01 = ok, 0x02 = bad payload, 0x03 = track not drum-mode / no Note layer.
+static void cmd_track_drum_par_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[5] = { 0, 0, 0, 0, 0x02 };
+  if( plen < 3 ) {
+    send_reply(port, CMD_TRACK_DRUM_PAR_GET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+  u8 instr = payload[1] & 0x0f;
+  u8 step  = payload[2] & 0x7f;
+  reply[0] = track;
+  reply[1] = instr;
+  reply[2] = step;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->event_mode != SEQ_EVENT_MODE_Drum || tcc->link_par_layer_note < 0 ) {
+    reply[4] = 0x03;
+    send_reply(port, CMD_TRACK_DRUM_PAR_GET, reply, sizeof(reply));
+    return;
+  }
+  s32 v = SEQ_PAR_Get(track, step, (u8)tcc->link_par_layer_note, instr);
+  reply[3] = (u8)(v & 0x7f);
+  reply[4] = 0x01;
+  send_reply(port, CMD_TRACK_DRUM_PAR_GET, reply, sizeof(reply));
 }
 
 
@@ -1067,6 +1165,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_GENERATOR_QUERY:
             cmd_generator_query(port, payload_buf, payload_len);
+            break;
+          case CMD_UI_TRACK_SET:
+            cmd_ui_track_set(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_DRUM_PAR_SET:
+            cmd_track_drum_par_set(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_DRUM_PAR_GET:
+            cmd_track_drum_par_get(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

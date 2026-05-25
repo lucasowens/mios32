@@ -35,6 +35,9 @@ from .sysex import (
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
     CMD_GENERATOR_QUERY,
+    CMD_UI_TRACK_SET,
+    CMD_TRACK_DRUM_PAR_SET,
+    CMD_TRACK_DRUM_PAR_GET,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -565,6 +568,73 @@ class Board:
             raise RuntimeError(f"short UI_INSTR_SET reply: {payload!r}")
         if payload[1] != CMD_STATUS_OK:
             raise ValueError(f"UI_INSTR_SET status {payload[1]:#04x}")
+
+    def ui_track_set(self, track: int, timeout: float = 1.0) -> None:
+        """Park the UI's visible-track cursor (ui_selected_group +
+        ui_selected_tracks) so SEQ_UI_VisibleTrackGet() returns `track`.
+        Required by phase F.3 cross-track capture tests.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_UI_TRACK_SET, bytes([track])))
+        payload = self.wait_for_sysex(CMD_UI_TRACK_SET, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short UI_TRACK_SET reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"UI_TRACK_SET status {payload[1]:#04x}")
+
+    def track_drum_par_set(
+        self, track: int, instr: int, step: int, value: int, timeout: float = 1.0
+    ) -> None:
+        """Direct write to a drum slot's Note par-layer step. Use to seed
+        drum content without engaging a generator. Track must be drum-mode
+        with a Note par-layer assigned (e.g. via track_drum_init()).
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instr <= 15:
+            raise ValueError(f"instr out of range: {instr}")
+        if not 0 <= step <= 127:
+            raise ValueError(f"step out of range: {step}")
+        if not 0 <= value <= 127:
+            raise ValueError(f"value out of range: {value}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_TRACK_DRUM_PAR_SET, bytes([track, instr, step, value]))
+        )
+        payload = self.wait_for_sysex(
+            CMD_TRACK_DRUM_PAR_SET, timeout=timeout, since=since
+        )
+        if len(payload) < 4:
+            raise RuntimeError(f"short TRACK_DRUM_PAR_SET reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_DRUM_PAR_SET status {payload[3]:#04x}")
+
+    def track_drum_par_get(
+        self, track: int, instr: int, step: int, timeout: float = 1.0
+    ) -> int:
+        """Read a single drum slot's Note par-layer step value. Returns
+        the 7-bit value. Raises if the track is not drum-mode / no Note
+        par-layer assigned."""
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instr <= 15:
+            raise ValueError(f"instr out of range: {instr}")
+        if not 0 <= step <= 127:
+            raise ValueError(f"step out of range: {step}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_TRACK_DRUM_PAR_GET, bytes([track, instr, step]))
+        )
+        payload = self.wait_for_sysex(
+            CMD_TRACK_DRUM_PAR_GET, timeout=timeout, since=since
+        )
+        if len(payload) < 5:
+            raise RuntimeError(f"short TRACK_DRUM_PAR_GET reply: {payload!r}")
+        if payload[4] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_DRUM_PAR_GET status {payload[4]:#04x}")
+        return payload[3]
 
     def bounce(
         self,

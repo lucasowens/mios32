@@ -32,6 +32,7 @@ GP_ENC_7 = Encoder.GP(7)
 # overlays the page LCD; sleep through it before reading the LCD.
 SETTLE = 0.15
 ENGAGE_MSG_MS = 750
+ENGAGE_JUMPED_MSG_MS = 1000  # phase F.3 auto-jumped popup is "ENGAGED on Dnn"
 ROLL_MSG_MS = 500
 LOCK_MSG_MS = 500
 DISENGAGE_MSG_MS = 750
@@ -377,12 +378,19 @@ def test_locks_survive_disengage_reengage(board):
 
 @pytest.mark.hardware
 def test_bounce_clears_locks_for_next_slot(board):
-    """BOUNCE-in-place frees the pool slot; a subsequent ENGAGE on the same
-    (track, instrument) must allocate a fresh slot with all locks cleared.
+    """BOUNCE-in-place frees the pool slot; a subsequent ENGAGE allocates a
+    fresh slot with all locks cleared.
 
     Regression target: a future change that forgot to memset the freed slot
     (or shared lock storage across slot lifetimes) would leak the old lock
     bitmap into the new gen — silently breaking the "fresh" contract.
+
+    Phase F.3 detail: after BOUNCE-in-place the bounced drum's source par-
+    layer still holds the gen's last loop notes (BOUNCE freezes the gen by
+    leaving its written source intact). So re-ENGAGE triggers the §3
+    "first empty legal layer" auto-jump — the fresh slot lands on D2
+    (instrument index 1), not back on D0. Query wherever the new slot ends
+    up via FindEngagedOnTrack-style scan.
     """
     _setup_pitchgen(board)
     _engage(board)
@@ -401,16 +409,32 @@ def test_bounce_clears_locks_for_next_slot(board):
     board.press(Button.GP(8))
     _wait_msg_clear(1000)  # BOUNCE_MSG_MS
 
-    # Slot should be freed.
+    # D0's slot should be freed.
     queried = board.generator_query(PITCHGEN_TRACK, 0)
-    assert queried is None, "BOUNCE-in-place should free the pool slot"
+    assert queried is None, "BOUNCE-in-place should free the pool slot at D0"
 
-    # Re-ENGAGE allocates fresh; all locks must be False.
+    # Re-ENGAGE — auto-jump moves cursor past the (now-populated) D0 to
+    # the first empty drum, D1. Verify the fresh slot exists somewhere on
+    # the track and has clean locks.
     board.press(GP1)
-    _wait_msg_clear(ENGAGE_MSG_MS)
+    _wait_msg_clear(ENGAGE_JUMPED_MSG_MS)
 
-    fresh = board.generator_query(PITCHGEN_TRACK, 0)
-    assert fresh is not None and fresh.engaged
+    fresh = None
+    fresh_instr = -1
+    for instr in range(16):
+        candidate = board.generator_query(PITCHGEN_TRACK, instr)
+        if candidate is not None and candidate.engaged:
+            fresh = candidate
+            fresh_instr = instr
+            break
+    assert fresh is not None, (
+        "fresh ENGAGE after BOUNCE should have allocated a slot somewhere "
+        "on the track"
+    )
+    assert fresh_instr != 0, (
+        f"auto-jump should have skipped D0 (still has the bounced loop "
+        f"notes); fresh slot landed at D{fresh_instr+1}"
+    )
     assert not any(fresh.locks), (
         f"fresh ENGAGE after BOUNCE should produce a slot with no locks; "
         f"got locks at: {[i for i, b in enumerate(fresh.locks) if b]}"
