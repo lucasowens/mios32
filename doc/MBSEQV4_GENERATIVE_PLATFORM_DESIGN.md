@@ -818,6 +818,24 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   per-(track, instrument) slot allocation. Eviction policy when full: refuse new
   ENGAGE (UI message) or LRU evict idle slots. Decide by play behavior.
 
+**Open puzzles (surfaced 2026-05-25, not gating, revisit with a clean baseline)**
+- **EDIT-LCD vs tick-time gate read disconnect.** While diagnosing the
+  `test_polyrhythm_3_in_8` baseline failure, the EDIT page LCD showed a
+  correctly-sparse 3-of-8 gate trigger pattern after polyrhythm regen (gates
+  at steps 3, 6, 8, 11, 14, 16) — but playback emitted NoteOns on **every**
+  step at ~107 ms intervals. Both code paths use `SEQ_TRG_GateGet` →
+  `SEQ_TRG_Get`, which after phase A reads `seq_trg_output_value` (the
+  rendered mirror). If they read from the same place, they should agree.
+  Reproducible across multiple runs; root cause not found. Proximate
+  trigger appears to be multi-Note-layer par content on this device (the
+  user's loaded pattern A1:1 has A1, A5–A8 all Note-typed with values at
+  every step), which the test-session rig (`doc/plans/2026-05-25-test-
+  session-rig.md`) will remove — but the LCD-vs-tick disagreement itself
+  hints at something deeper (a parallel gate path? render-cache race? read
+  from `seq_trg_layer_value` somewhere I missed?). Investigate once
+  `AUTO_TEST` baselines exist and we can A/B a clean state against the
+  current broken one.
+
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
 - Window edge-wrap behavior (loop / freeze / hold-last / continue) — decide live.
