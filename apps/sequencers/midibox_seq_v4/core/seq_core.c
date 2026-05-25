@@ -622,6 +622,62 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
   }
 }
 
+// Phase F BOUNCE (processor half): commit the post-processor output buffer
+// back into the source par/trg layer and clear every enabled processor slot,
+// so the freshly written source *is* the bounced material and subsequent
+// renders are identity (output ≡ source). Returns 1 if a bounce occurred,
+// 0 if there was nothing to bounce.
+//
+// The chord_mask processor is doubly-bound: slot 0 mirrors tcc->playmode +
+// tcc->chordmask_strength via SEQ_CORE_ChordMaskSlotSync. Clearing the slot
+// alone would let the next SlotSync re-enable it, so we also reset
+// playmode → Normal and chordmask_strength → 0. This matches §3's
+// "processors return to zero after bounce" contract.
+s32 SEQ_CORE_ProcessorBounce(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
+
+  // Anything enabled to bounce? If not, leave source untouched and report 0.
+  u8 any_enabled = 0;
+  u8 slot;
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+    if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) {
+      any_enabled = 1;
+      break;
+    }
+  }
+  if( !any_enabled )
+    return 0;
+
+  // Commit output → source. Read from the active half: it carries the most
+  // recently published post-processor render. (Sweep regime writes the active
+  // half in place, quiet regime flips inactive→active — either way the active
+  // pointer is what the tick currently reads.)
+  memcpy(seq_par_layer_value[track], SEQ_PAR_OutputActive(track), SEQ_PAR_MAX_BYTES);
+  memcpy(seq_trg_layer_value[track], SEQ_TRG_OutputActive(track), SEQ_TRG_MAX_BYTES);
+
+  // Clear every slot.
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    seq_processor_stack[track][slot].id       = SEQ_PROCESSOR_ID_NONE;
+    seq_processor_stack[track][slot].enabled  = 0;
+    seq_processor_stack[track][slot].strength = 0;
+    seq_processor_stack[track][slot].bus      = 0;
+  }
+
+  // Untangle the chord_mask tcc mirror so the next SlotSync doesn't re-arm.
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask )
+    tcc->playmode = SEQ_CORE_TRKMODE_Normal;
+  tcc->chordmask_strength = 0;
+
+  // Re-render so the output mirror equals the new source (identity copy).
+  SEQ_CORE_RenderTouched(track);
+  seq_render_dirty[track] = 1;
+  return 1;
+}
+
+
 void SEQ_CORE_RenderTracks(void)
 {
   u8 track;

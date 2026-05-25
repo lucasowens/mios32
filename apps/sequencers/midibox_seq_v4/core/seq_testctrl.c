@@ -24,6 +24,9 @@
 #include "seq_pattern.h"
 #include "seq_file.h"
 #include "seq_trg.h"
+#include "seq_par.h"
+#include "seq_layer.h"
+#include "seq_generator.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -50,6 +53,8 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_SESSION_NAME_GET  0x57
 #define CMD_TRG_BYTE_GET      0x58
 #define CMD_MSP_QUERY         0x59
+#define CMD_UI_INSTR_SET      0x5a
+#define CMD_TRACK_DRUM_INIT   0x5b
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -323,6 +328,12 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
       SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_MASK1, 0);
       SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_MASK2, 0);
     }
+
+    // Generator pool also persists across tests (engaged slots from a prior
+    // test would otherwise transcribe loops into the next test's freshly-
+    // loaded pattern on the first measure boundary). Re-init wipes pool +
+    // index map + undo + last-seen-step sentinels.
+    SEQ_GENERATOR_Init(0);
   }
 
   if( flags & 0x20 ) {
@@ -359,6 +370,67 @@ static void cmd_page_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
   SEQ_UI_PAGES_CallInit((seq_ui_page_t)page);
   reply[1] = 0x01;
   send_reply(port, CMD_PAGE_SET, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_DRUM_INIT payload: [track]
+// Reply payload: [track, status]   status 0x01 = ok, 0x02 = bad payload.
+//
+// Self-contained drum-mode track setup for harness tests. Reinitializes the
+// par/trg layout to (64 steps × 1 par-layer × 16 instruments) for par and
+// (64 steps × 8 trg-layers × 1 trg-instrument) for trg, sets event_mode = Drum
+// (CC 0x42), sets par_assignment_drum[0] = Note so the generator can find a
+// destination Note layer, then calls SEQ_CC_LinkUpdate to refresh the layer
+// link cache (link_par_layer_note in particular). This is the minimum a
+// PITCHGEN ENGAGE call needs to pass its drum-mode + Note-layer gating —
+// no preset-track-name / per-drum-note assignments (tests don't depend on
+// MIDI playback, only on the dispatch behavior).
+static void cmd_track_drum_init(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_TRACK_DRUM_INIT, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+
+  // Layout for 16-instrument drum mode: 64 par steps × 1 layer × 16 instr =
+  // 1024 B (exactly SEQ_PAR_MAX_BYTES); 64 trg steps × 8 layers × 1 instr.
+  SEQ_PAR_TrackInit(track, 64, 1, 16);
+  SEQ_TRG_TrackInit(track, 64, 8, 1);
+
+  // event_mode = Drum, par-layer 0 = Note, then refresh link cache so
+  // tcc->link_par_layer_note ends up at 0.
+  SEQ_CC_Set(track, SEQ_CC_MIDI_EVENT_MODE, SEQ_EVENT_MODE_Drum);
+  seq_cc_trk[track].par_assignment_drum[0] = SEQ_PAR_Type_Note;
+  SEQ_CC_LinkUpdate(track);
+
+  reply[0] = track;
+  reply[1] = 0x01;
+  send_reply(port, CMD_TRACK_DRUM_INIT, reply, sizeof(reply));
+}
+
+
+// CMD_UI_INSTR_SET payload: [instr]
+// Reply payload: [instr, status]   status 0x01 = set, 0x02 = bad payload.
+//
+// Writes ui_selected_instrument directly — the global the PITCHGEN page (and
+// drum-mode EDIT) reads as the "cursor target drum". Required so the harness
+// can park the cursor on an empty drum slot before pressing BOUNCE to exercise
+// the relocate path. No display dirty bit — the next LCD frame redraw picks
+// the new value up.
+static void cmd_ui_instr_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_UI_INSTR_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 instr = payload[0] & 0x0f;   // 0..15
+  ui_selected_instrument = instr;
+  reply[0] = instr;
+  reply[1] = 0x01;
+  send_reply(port, CMD_UI_INSTR_SET, reply, sizeof(reply));
 }
 
 
@@ -935,6 +1007,12 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_MSP_QUERY:
             cmd_msp_query(port);
+            break;
+          case CMD_UI_INSTR_SET:
+            cmd_ui_instr_set(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_DRUM_INIT:
+            cmd_track_drum_init(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

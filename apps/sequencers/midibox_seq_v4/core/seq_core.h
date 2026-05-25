@@ -415,6 +415,13 @@ extern void SEQ_CORE_RenderTracks(void);
 // whenever the underlying CCs change. Called from SEQ_CC_Set.
 extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
 
+// Phase F BOUNCE (processor half): commit the current output (post-processor)
+// back into the source par/trg layer and clear every enabled processor slot.
+// Also untangles the chord_mask tcc mirror (playmode → Normal, strength → 0)
+// so the next SlotSync doesn't re-arm the slot. Returns 1 if a bounce
+// occurred (any slot was enabled), 0 otherwise.
+extern s32 SEQ_CORE_ProcessorBounce(u8 track);
+
 // Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
 // free region between `_eusrstack` and the current MSP at paint time with a
 // sentinel pattern; later reads scan upward from `_eusrstack` to find the first

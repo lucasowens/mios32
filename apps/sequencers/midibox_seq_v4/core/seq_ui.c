@@ -4134,8 +4134,19 @@ s32 SEQ_UI_MENU_Handler_Periodic()
   }
 
   // used for temporary messages
-  if( ui_msg_ctr )
+  if( ui_msg_ctr ) {
     --ui_msg_ctr;
+
+    // On expiry, request a page redraw so the LCD buffer's previously-
+    // overlaid cells get overwritten with the underlying page content.
+    // Without this, the popup's text stays visible in the LCD until the
+    // next time the page's LCD_Handler is otherwise scheduled — which the
+    // PITCHGEN harness tests surfaced by snapshotting the LCD right after
+    // a popup nominally cleared and seeing the stale overlay. Matches the
+    // ui_hold_msg_ctr pattern just above.
+    if( !ui_msg_ctr )
+      seq_ui_display_update_req = 1;
+  }
 
   // VU meters (used in MUTE menu, could also be available as LED matrix...)
   static u8 vu_meter_prediv = 0; // predivider for VU meters

@@ -32,6 +32,8 @@ from .sysex import (
     CMD_SESSION_NAME_GET,
     CMD_MSP_QUERY,
     CMD_TRG_BYTE_GET,
+    CMD_UI_INSTR_SET,
+    CMD_TRACK_DRUM_INIT,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -502,6 +504,45 @@ class Board:
             raise RuntimeError(f"short PLAY_SECTION_SET reply: {payload!r}")
         if payload[2] != CMD_STATUS_OK:
             raise ValueError(f"PLAY_SECTION_SET status {payload[2]:#04x}")
+
+    def track_drum_init(self, track: int, timeout: float = 1.0) -> None:
+        """Reinitialize a track for 16-instrument drum mode (64 par steps × 1
+        Note layer × 16 drums, 64 trg steps × 8 trg-layers × 1 trg-instr).
+
+        Use this in tests that need a deterministic drum-mode track without
+        relying on a pre-saved AUTOTEST drum pattern. Sets event_mode = Drum,
+        par_assignment_drum[0] = Note, then refreshes link cache. After this
+        call, `SEQ_GENERATOR_Engage(track, instr)` will pass its drum-mode
+        and Note-layer gating for instruments 0..15.
+
+        Destructive: par + trg layers are cleared.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_DRUM_INIT, bytes([track])))
+        payload = self.wait_for_sysex(CMD_TRACK_DRUM_INIT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short TRACK_DRUM_INIT reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_DRUM_INIT status {payload[1]:#04x}")
+
+    def ui_instrument_set(self, instr: int, timeout: float = 1.0) -> None:
+        """Park the UI's drum-slot cursor (ui_selected_instrument).
+
+        The PITCHGEN page reads this as the BOUNCE/ENGAGE destination. Drum-
+        mode tracks have 16 instrument slots (0..15). Outside drum mode the
+        value has limited meaning (the firmware masks to 4 bits).
+        """
+        if not 0 <= instr <= 15:
+            raise ValueError(f"instrument out of range: {instr}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_UI_INSTR_SET, bytes([instr])))
+        payload = self.wait_for_sysex(CMD_UI_INSTR_SET, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short UI_INSTR_SET reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"UI_INSTR_SET status {payload[1]:#04x}")
 
     def bounce(
         self,

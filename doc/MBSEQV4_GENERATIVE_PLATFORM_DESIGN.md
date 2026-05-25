@@ -832,8 +832,8 @@ Append-only-ish; revise an entry only with a dated note.
       against the existing tick prologue budget. §A4 #5 will measure if a real
       worst case appears.
     - **Per-step LOCK / MULT / ANCHOR / SNAP / ROLL / contour shapes:**
-      explicitly NOT allocated yet (build less, §2). Phase-F (or whichever
-      phase polishes these) grows the struct from 72 B → ~184 B per slot,
+      explicitly NOT allocated yet (build less, §2). §8 step 6 (the polish
+      pass after phase F) grows the struct from 72 B → ~184 B per slot,
       bringing the pool toward §A5's 12 KB target as those fields land.
     RAM cost measured: **CCMRAM +5.76 KB** (pool 4608 B + index 256 B + undo
     slot 1026 B), bringing CCMRAM to 46.0 KB used / 18.0 KB free of 64 KB;
@@ -842,10 +842,67 @@ Append-only-ish; revise an entry only with a dated note.
     confirmed live 2026-05-25 — Turing line on drum, mutation rate sweeps from
     locked to skittish, range narrow→wide gives detune-feel→leaps, UNDO
     restores cleanly.
-  - **F: BOUNCE verb.** Processor-stack BOUNCE: copy output→source, clear all
-    enabled processors. Generator BOUNCE: disengage; source remains as last
-    written. Both gestures map to one BOUNCE button; behavior depends on whether
-    a generator is engaged or a processor stack is non-empty.
+  - **F: BOUNCE verb — done 2026-05-25.** PITCHGEN GP8, **cursor-aware**
+    destination per §3 (extended over the F.1 in-place-only first cut after a
+    listen-test revealed in-place silently overwrote the source pattern):
+    - **In-place gen BOUNCE** (`SEQ_GENERATOR_Bounce`) — cursor IS on the
+      engaged gen → freeze + free the pool slot. Source stays as last
+      written; loop array discarded so next ENGAGE rerolls fresh. The §3
+      "destination occupied → replace" branch.
+    - **Relocating gen BOUNCE** (`SEQ_GENERATOR_BounceRelocate`) — cursor on
+      an empty drum slot while a gen is engaged elsewhere on the visible
+      track → restore src par-buffer from the global one-deep undo, then
+      transcribe the gen's loop into the cursor's Note par-layer; free the
+      gen slot and clear undo. The §3 "destination empty → additive" branch.
+      User workflow: ENGAGE on a drum, listen, navigate cursor to empty
+      drum, BOUNCE — original drum returns, the iteration lands on a fresh
+      slot, user re-ENGAGEs for another variation.
+      *Refuses with `-3` if the undo slot covers a different track* (one-deep
+      undo, last first-ENGAGE wins — global, not per-gen). *Whole-track
+      restore also disengages every other gen on the src track*: the undo
+      can't preserve independent gens, so relocate is effectively a
+      one-gen-per-track gesture.
+    - **Processor BOUNCE** (`SEQ_CORE_ProcessorBounce`) — fallback when no
+      gen is engaged on visible track and any slot is enabled. Copies
+      active-output → source (par + trg), clears every slot, untangles the
+      chord_mask tcc-mirror (`playmode → Normal`, `chordmask_strength → 0`)
+      so the next `SEQ_CORE_ChordMaskSlotSync` does not re-arm slot 0.
+      *Relocate semantic deferred for processor* — current behavior is
+      in-place only (overwrites source). Phase F.3 candidate.
+    - **Neither** → guidance message "nothing to bounce".
+
+    Resolution order: cursor-engaged gen → other-gen-on-track relocate →
+    processor → nothing. The "live overlay" composes on top of the "buffer
+    transform"; bouncing the overlay first leaves the processor still
+    bounceable.
+
+    LCD row 1 RHS now switches contextually: "GP3/4=range … GP8=bnc" when
+    cursor IS the gen, "GEN on Dnn  GP8 relocates here" when cursor parked
+    on an empty drum while a gen is engaged elsewhere on the track, default
+    hint otherwise.
+
+    No new state added — phase F is code-only end-to-end; CCMRAM stays at
+    46.0 KB used, main RAM unchanged.
+
+    **Harness automation (added same session, 2026-05-25).** Three LCD-scrape
+    tests in `tests/apps/seq_v4/test_pitchgen_bounce.py` pin the *dispatch*
+    layer: in-place vs relocate vs stale-undo refuse. New testctrl commands
+    `CMD_TRACK_DRUM_INIT` (0x5b — programmatic drum-mode track setup, no
+    saved pattern required) and `CMD_UI_INSTR_SET` (0x5a — cursor parking).
+    `SEQ_GENERATOR_Init(0)` now also runs in the test-state reset path so
+    engaged generators don't leak between tests. Listen-test still owns the
+    audible "src restored, dst plays loop" contract. Full harness **26/26
+    green** against the F.2 firmware.
+
+    **Latent bug fix in `seq_ui.c`** (surfaced by the harness tests).
+    `ui_msg_ctr` counts down on the 1 ms periodic tick but did not request
+    a display redraw when it hit 0, so popup-overlay text remained in the
+    LCD buffer until the next time the page's LCD_Handler was otherwise
+    scheduled. The neighboring `ui_hold_msg_ctr` already set
+    `seq_ui_display_update_req = 1` on expiry; matched the pattern.
+    Cosmetic in normal use (live users rarely notice); blocking for the
+    harness's LCD-scrape assertions which read the LCD right after a
+    popup nominally cleared. Pre-existing, predates this fork.
 - **Step 5 build discipline.** Each phase ships its own harness regression test;
   the §A4 timing tests (#3 same-tick, #4 knob-to-sound, #5 worst-case tick,
   #6 priority-inversion) attach progressively as phases land. Phase A passes
@@ -939,6 +996,27 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   with 16 max tracks × at-most-16 drums per track = 256 possible (track, instr)
   pairs, but a realistic live session engages 4–8; pool ceiling is far above
   observed use). Revisit only if play behavior demands.
+- **BOUNCE destination semantic — CLOSED 2026-05-25 (phase F).** BOUNCE
+  honors §3: cursor IS the destination. Cursor on engaged gen → in-place
+  (replace). Cursor on empty drum slot while a gen is engaged elsewhere on
+  track → relocate (additive at dst, src restored from whole-track undo).
+  See §8 step 5 phase F for the resolution order and the one-deep-undo
+  caveat (relocate disengages every other gen on the src track).
+
+**Open (deferred phase-F-related work)**
+- **Processor BOUNCE relocate** (phase F.3 candidate). Phase F implemented
+  cursor-aware relocate for *generators* only; processor BOUNCE is still
+  in-place (overwrites the source par/trg). The non-destructive contract
+  in §3 says processor source should never be overwritten — relocate
+  semantics would copy track T's output → dst track's source while
+  leaving T's source untouched. Untackled because (a) the chord_mask is
+  the only live processor, (b) the user-pressure for the gen path was
+  the immediate ask, and (c) the wiring needs a way to express "which
+  track's processor stack" when the cursor moves to a different track.
+- **ENGAGE destination auto-jump** (phase F.3 candidate). §3 "default
+  destination = first empty legal layer in the current track." Currently
+  the user navigates the cursor manually. Cheap to add; deferred to keep
+  phase F scope tight.
 
 **Open bugs (pre-existing, surfaced 2026-05-25)**
 - **`SEQ_CC_CHORDMASK_STRENGTH = 0x96` is outside the v2 persisted ext-CC range
@@ -1107,12 +1185,25 @@ double-counted existing source as new — do not budget it that way.
 
 ## A3. Generator UI page layout (provisional)
 
-Turing-style pitch generator across GP1–GP8: ENGAGE (GP1, LED), Seed (GP2), Range
-min/max (GP3/4), Scale (GP5), Contour (GP6), Mutation rate (GP7), BOUNCE (GP8).
-Dedicated gestures: ANCHOR, SNAP, ROLL; LOCK (held modifier → step-button lock
-toggles, LEDs show lock state), MULT (held modifier → per-step mutation multiplier,
-4-level LED brightness). Step LEDs default to a pitch-as-brightness gradient with a
-play cursor. LCD: DEST + param strip; lower LCD a loop-content visualization.
+Provisional reference layout — Turing-style pitch generator across GP1–GP8:
+ENGAGE (GP1, LED), Seed (GP2), Range min/max (GP3/4), Scale (GP5), Contour (GP6),
+Mutation rate (GP7), BOUNCE (GP8). Dedicated gestures: ANCHOR, SNAP, ROLL; LOCK
+(held modifier → step-button lock toggles, LEDs show lock state), MULT (held
+modifier → per-step mutation multiplier, 4-level LED brightness). Step LEDs default
+to a pitch-as-brightness gradient with a play cursor. LCD: DEST + param strip;
+lower LCD a loop-content visualization.
+
+**As-built through phase F (2026-05-25):** GP1 ENGAGE (LED), GP2 UNDO, GP3/GP4
+range min/max, GP5 Mutation rate, GP6/GP7 reserved for §8 step 6 (LOCK / MULT /
+SNAP / contour), GP8 BOUNCE (cursor-aware — see §8 step 5 phase F). Seed
+(separate from ENGAGE) collapses into ENGAGE-while-engaged ROLL once step 6 lands
+its ROLL gesture; current `Seed` slot in the provisional layout is vestigial.
+
+The BOUNCE control is the first place the §3 destination semantic is wired in
+the UI: cursor IS the destination, occupancy decides additive-vs-replace. The
+ENGAGE auto-jump-to-first-empty-legal-layer behavior (§3 "default destination
+= first empty legal layer") is **not yet implemented** — user navigates the
+cursor manually for now. Adding auto-jump is a small phase F.3 candidate.
 
 **Turing model (mechanics):** loop array; global mutation rate; per-step multiplier
 (4-bit, 0×–2× — *hybrid scope*); per-step lock bitmask; contour (walk/Brownian/
@@ -1233,11 +1324,13 @@ unmodeled headroom** — the budget must be a CCM-vs-SRAM split, not a flat numb
 | C (chord_mask)     | 20.25 KB | 0     | 95.9 KB | code only |
 | D (double-buffer)  | 40.25 KB | +20.0 | 95.92 KB | +16 B `active_buf` |
 | **E (generator)**  | **46.0 KB** | **+5.76** | **~96.0 KB** | pool 4.5 KB + index 256 B + undo 1 KB CCM; 16 B `last_seen_step` main |
+| **F (BOUNCE verb)** | **46.0 KB** | **0** | **~96.0 KB** | code-only — `SEQ_GENERATOR_Bounce` + `SEQ_GENERATOR_BounceRelocate` + `SEQ_GENERATOR_FindEngagedOnTrack` + `SEQ_CORE_ProcessorBounce` + cursor-aware PITCHGEN GP8 dispatch; no new state |
 
 Phase E lands ~6 KB below the §A5 forecast (~12 KB pool) because the 64-step
 loop is the only generator state allocated for now — anchor / lock / multiplier
 fields are deferred to the §8 step-6 polish phase. CCMRAM still has ~18 KB
-headroom; the deferred fields fit trivially when they arrive.
+headroom; the deferred fields fit trivially when they arrive. Phase F is
+code-only and does not move either budget.
 
 **Three corrections vs the prior draft (these were real faults):**
 

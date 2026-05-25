@@ -77,6 +77,41 @@ extern s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument);
 // loop survives DISENGAGE→ENGAGE without re-snapshotting undo.
 extern s32 SEQ_GENERATOR_Disengage(u8 track, u8 instrument);
 
+// Phase F BOUNCE (generator half): freeze + disengage + free the pool slot.
+// Source stays as last written (the transcribed loop). Loop is discarded, so
+// the next ENGAGE on this (track, instrument) seeds a fresh Turing line. The
+// undo slot is preserved — UNDO after BOUNCE still rolls back to pre-engage,
+// which is the live-safety net (§3 "live-safety" rule). Returns 0 if a slot
+// was freed, -1 if no slot existed.
+extern s32 SEQ_GENERATOR_Bounce(u8 track, u8 instrument);
+
+// Phase F.2 BOUNCE-relocate: deliver the §3 destination semantic for BOUNCE.
+// Transcribes the engaged gen's loop into the destination's Note par-layer
+// (additive at dst — original dst content overwritten by the bounce), then
+// restores the src track's whole par-buffer from the global one-deep undo
+// slot so the source is back to pre-engagement (the user's iterate-and-stack
+// workflow). Frees the gen slot and invalidates the undo (it has been spent).
+//
+// Returns:
+//   0  on success
+//  -1  no gen engaged at (src_track, src_instr)
+//  -2  bad track/instr indices, or dst is not drum-mode / missing Note layer
+//  -3  undo slot doesn't cover this gen's track (e.g. another gen on a
+//      different track was the most-recent first-ENGAGE) — refuse rather
+//      than restore stale state. Caller should UNDO + re-ENGAGE first.
+//
+// Caveat: whole-track restore on src wipes any edits to *other* drum slots
+// on the src track made since this gen's first ENGAGE. The one-deep undo
+// is a live-safety net, not a transactional history (§3 wording).
+extern s32 SEQ_GENERATOR_BounceRelocate(u8 src_track, u8 src_instr,
+                                        u8 dst_track, u8 dst_instr);
+
+// Returns 1 if any pool slot is in_use && engaged on `track`, writing the
+// instrument coordinate to *out_instr. Returns 0 if none. Used by PITCHGEN
+// BOUNCE to find the gen to relocate when the cursor has moved to a
+// different drum slot than the engaged gen.
+extern s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr);
+
 // Restore the par-buffer from the auto-undo slot and disengage every
 // generator on the snapshot's track. One-deep, global — most recent ENGAGE
 // wins. Returns -1 if no snapshot is held.

@@ -27,6 +27,8 @@ CMD_SESSION_LOAD = 0x56
 CMD_SESSION_NAME_GET = 0x57
 CMD_TRG_BYTE_GET = 0x58
 CMD_MSP_QUERY = 0x59
+CMD_UI_INSTR_SET = 0x5a
+CMD_TRACK_DRUM_INIT = 0x5b
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.
@@ -45,6 +47,7 @@ class Page:
     FX_ROBOTIZE = 38
     ROBOLOOP = 39
     BPM = 47
+    PITCHGEN = 59
 
 
 # mios32_midi_port_t values that fit in 7 bits.
