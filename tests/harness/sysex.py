@@ -26,6 +26,7 @@ CMD_PATTERN_LOAD = 0x55
 CMD_SESSION_LOAD = 0x56
 CMD_SESSION_NAME_GET = 0x57
 CMD_TRG_BYTE_GET = 0x58
+CMD_MSP_QUERY = 0x59
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.

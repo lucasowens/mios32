@@ -101,6 +101,12 @@ static s32 NOTIFY_MIDI_TimeOut(mios32_midi_port_t port);
 /////////////////////////////////////////////////////////////////////////////
 void APP_Init(void)
 {
+  // Phase D.0 — paint the MSP/handler-stack free region with a sentinel so
+  // SEQ_CORE_MSPHighWaterBytes() can later report the deepest MSP excursion.
+  // Done before any other init so the painted extent is maximal (small live
+  // frame at paint time = more region available to measure).
+  SEQ_CORE_MSPPaint();
+
 #if !defined(MIOS32_DONT_USE_BOARD_LED)
   // initialize all LEDs
   MIOS32_BOARD_LED_Init(0xffffffff);

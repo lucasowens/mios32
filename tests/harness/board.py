@@ -30,6 +30,7 @@ from .sysex import (
     CMD_RESET_STATE,
     CMD_SESSION_LOAD,
     CMD_SESSION_NAME_GET,
+    CMD_MSP_QUERY,
     CMD_TRG_BYTE_GET,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
@@ -677,6 +678,41 @@ class Board:
         layer_bytes = bytes(raw[0:expected:2])
         output_bytes = bytes(raw[1:expected:2])
         return layer_bytes, output_bytes
+
+    def msp_query(self, timeout: float = 1.0) -> dict:
+        """Read MSP/handler-stack high-water (phase D.0 measurement).
+
+        Returns a dict with:
+          high_water_bytes     — peak MSP usage since paint
+          paint_extent_bytes   — size of the painted region (lo..hi)
+          paint_initial_depth  — _estack - paint_hi (MSP already used at paint time)
+          paint_lo             — absolute address of paint floor
+          paint_hi             — absolute address of paint ceiling
+          peak_usage_bytes     — paint_initial_depth + high_water_bytes (convenience)
+        """
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_MSP_QUERY))
+        payload = self.wait_for_sysex(CMD_MSP_QUERY, timeout=timeout, since=since)
+        raw = unpack7(payload)
+        if len(raw) < 20:
+            raise RuntimeError(f"short MSP_QUERY reply ({len(raw)}b): {raw!r}")
+
+        def u32(off: int) -> int:
+            return raw[off] | (raw[off + 1] << 8) | (raw[off + 2] << 16) | (raw[off + 3] << 24)
+
+        high_water = u32(0)
+        extent     = u32(4)
+        initial    = u32(8)
+        lo         = u32(12)
+        hi         = u32(16)
+        return {
+            "high_water_bytes": high_water,
+            "paint_extent_bytes": extent,
+            "paint_initial_depth": initial,
+            "paint_lo": lo,
+            "paint_hi": hi,
+            "peak_usage_bytes": initial + high_water,
+        }
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:
         """Read the current 2x80 LCD buffer from the firmware."""

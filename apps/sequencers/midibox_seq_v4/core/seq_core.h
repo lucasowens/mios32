@@ -360,4 +360,17 @@ extern void SEQ_CORE_RenderTracks(void);
 // whenever the underlying CCs change. Called from SEQ_CC_Set.
 extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
 
+// Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
+// free region between `_eusrstack` and the current MSP at paint time with a
+// sentinel pattern; later reads scan upward from `_eusrstack` to find the first
+// non-pattern word (the deepest MSP excursion since paint). Painted ONCE from
+// APP_Init before FreeRTOS scheduler starts — after that, kernel + ISRs run on
+// MSP and the painted bytes get progressively overwritten as the MSP grows.
+extern void SEQ_CORE_MSPPaint(void);
+extern u32 SEQ_CORE_MSPHighWaterBytes(void);   // peak MSP usage since paint (0 if never grown)
+extern u32 SEQ_CORE_MSPPaintExtent(void);      // hi - lo, painted region size in bytes
+extern u32 SEQ_CORE_MSPPaintInitialDepth(void); // _estack - hi, MSP already used at paint time
+extern u32 SEQ_CORE_MSPPaintLo(void);          // absolute address of paint floor (= &_eusrstack)
+extern u32 SEQ_CORE_MSPPaintHi(void);          // absolute address of paint ceiling (= SP at paint - margin)
+
 #endif /* _SEQ_CORE_H */

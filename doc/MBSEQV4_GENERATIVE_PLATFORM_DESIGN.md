@@ -753,8 +753,19 @@ Append-only-ish; revise an entry only with a dated note.
     within 50ms of last change → render current step + small lookahead live,
     bypassing cache. After 50ms quiet → background render to inactive buffer
     half + atomic swap at tick boundary. RAM cost: +1.25KB/track for the
-    second buffer half (~20KB across 16 tracks). Knob-moving detection
-    mechanism still open (§10).
+    second buffer half (~20KB across 16 tracks).
+    - **D.0: MSP stack-paint. ✓ DONE 2026-05-25.** §10 gating measurement.
+      `SEQ_CORE_MSPPaint()` runs at the top of `APP_Init` (smallest live
+      frame = maximal painted extent); fills 32 544 B of free MSP region with
+      sentinel `0xA5A5A5A5`. Readback via `SEQ_CORE_MSPHighWaterBytes()`
+      exposed through `CMD_MSP_QUERY` (testctrl 0x59) + `board.msp_query()`.
+      Peak after full harness: **592 B** (~2 % of region). §10 MSP-gating
+      concern closed favorably; phase D's +20 KB lands in CCMRAM, never
+      competed with MSP. *Decided sub-questions:* knob-moving detection =
+      per-track "last touched" timestamp on slot-relevant `SEQ_CC_Set` fields
+      (D.1); render scheduling = tick prologue + sweep-window live render,
+      defer FreeRTOS background task until §A4 #5/#6 measure a real miss
+      (D.2/D.3).
   - **E: Generator workflow basics.** ENGAGE/DISENGAGE on PITCHGEN page (or its
     successor) with LED state. Per-(track, instrument) generator instance from a
     shared pool (cap 64, §A5). On ENGAGE: snapshot pre-engagement par-layer into
@@ -771,9 +782,9 @@ Append-only-ish; revise an entry only with a dated note.
   #6 priority-inversion) attach progressively as phases land. Phase A passes
   iff the existing harness still passes unchanged (no behavior change). RAM
   budget tracked at each phase: phase A baseline + 21KB single-buffered output
-  is acceptable; phase D's double-buffering adds another ~20KB — verify against
-  measured base (§A5) at each step. *MSP high-water still unmeasured (§10) — do
-  the stack-paint before phase D approaches full Part II scale.*
+  is acceptable; phase D's double-buffering adds another ~20KB in CCMRAM — verify
+  against measured base (§A5) at each step. *MSP high-water measured 2026-05-25
+  (phase D.0): peak 592 B vs 32 KB free region — closed and favorable (§A5/§10).*
 - **Pattern format extends to v3** (versioned in-line, backward-compatible) to carry
   processor + generator posture.
 - **Build order is music-first** (§8): hand-authored melody → throwaway generator →
@@ -819,10 +830,11 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
 - **Base SRAM — measured 2026-05-24 (CLOSED):** 95.9KB used / ~32KB free main, 64KB
   CCM virgin. First build fits trivially; full Part II fits but tight (~8KB static).
   See §A5.
-- **MSP/handler-stack high-water — unmeasured (gating for step 5 phase D onward).**
-  Grows into the same ~32KB free main-RAM region and eats the full-Part-II margin.
-  Stack-paint and measure before phase D's double-buffering pushes the budget;
-  irrelevant to phases A–C (single-buffered, +21KB only).
+- **MSP/handler-stack high-water — measured 2026-05-25 (CLOSED).** Phase D.0:
+  sentinel paint of free MSP region from `APP_Init`, readback via `CMD_MSP_QUERY`.
+  After full harness exercise: **peak 592 B** against **~32 KB free region** (~2 %
+  usage; ≈ 32 KB headroom). Phase D's +20 KB double-buffer lands in **CCMRAM**, so
+  it never competed with MSP anyway — separate budget. Numbers + table in §A5.
 - **Max generator loop length** for static allocation — a real capability-vs-budget
   decision (§A5). Recommended v1 default: 64-step cap with tiling across longer
   tracks; revisit if a piece wants longer. Decides at step 5 phase E.
@@ -1085,9 +1097,31 @@ is well-supplied.
 
 **Threshold met** (base ≤ ~104 KB) and all 64 KB CCM is virgin — but "met" is the
 *floor*, not comfort. The free main-RAM region is *shared with the runtime MSP/handler
-stack* (grows down from `_estack`; high-water **not yet measured**, §10), which eats
-into the ~32 KB. See **Does it fit?** below for the honest full-scale read: first
-build trivial, full Part II tight.
+stack* (grows down from `_estack`). See **Does it fit?** below for the honest
+full-scale read: first build trivial, full Part II tight.
+
+**MSP high-water measured 2026-05-25 (phase D.0, stack-paint):** sentinel paint of
+the free MSP region at the top of `APP_Init`; readback via `CMD_MSP_QUERY` (0x59
+testctrl). After full pytest harness (23 tests, 72 s, exercises encoders / buttons /
+pattern loads / playback / track config / capture / robotize / chord-mask):
+
+| Quantity | Value |
+|---|---|
+| Painted extent (`_eusrstack` → paint ceiling) | **32 544 B** (≈ 31.8 KB) |
+| Paint floor (`_eusrstack`) | `0x20017FB8` |
+| Paint ceiling (SP at paint − 256 B margin) | `0x2001FED8` |
+| MSP usage at paint time (`_estack` − ceiling) | **296 B** |
+| MSP growth past paint ceiling (high-water bytes) | **296 B** |
+| **Total peak MSP usage from `_estack`** | **592 B** |
+| Unused painted tail (headroom) | **32 248 B** |
+
+Net: MSP consumes **~2 %** of the ~32 KB free main-RAM region. The §10 gating
+concern is closed — phase D's +20 KB double-buffer lives in **CCMRAM** (not main
+RAM), so it doesn't even compete with MSP. The "~8 KB static headroom" figure
+below is *also* unaffected: it referred to total static allocation against 192 KB,
+not MSP encroachment. Caveat: pytest doesn't exercise pathological ISR nesting or
+all-16-tracks-with-full-stacks simultaneously, so 592 B is a lower bound on
+real-world peak — but with 30+ KB of unused painted tail, even 10× growth fits.
 
 **Hardware reality (corrected framing).** STM32F407 = **128KB main SRAM (DMA-capable;
 SRAM1 112KB + SRAM2 16KB) + 64KB CCM (CPU-only, no DMA)** = 192KB, *not* 192KB
@@ -1138,20 +1172,21 @@ unmodeled headroom** — the budget must be a CCM-vs-SRAM split, not a flat numb
   throwaway generator + minimal mask are KB-scale. The measurement does not gate the
   first sound at all.
 - **The full Part II ceiling: fits, but tight.** ~88KB new + 95.9KB base = ~183.9KB
-  static against 192KB total ⇒ **~8KB static headroom** — and the unmeasured MSP
-  high-water comes *out of* that 8KB. So "free" ≠ "headroom": of the ~96KB free
+  static against 192KB total ⇒ **~8KB static headroom**. Of the ~96KB free
   (32 main + 64 CCM), the full design wants 88, leaving ~8. Realizing it *requires
   actively using CCM* (88KB new > 64KB CCM ⇒ ~24KB must go to main RAM, where ~32KB is
   free; or relocate existing CPU-only buffers into CCM to make room — ~56KB available
   at zero design cost). And the 88KB is **worst-case-everything-on**, not steady state
   (render output only allocates for processor-bearing tracks; track slots could be 8
   not 16; conditional triggers are a ceiling) — realistic concurrent use is well under.
+  The MSP high-water (592 B measured, see above) does *not* eat into this 8KB
+  headroom because phase D's CCM allocations don't compete with main-RAM MSP.
 
-**Net:** base-RAM unknown is *closed and favorable*. The first build is green-lit with
-huge room. The full vision fits but lands near the edge, so the **MSP high-water is now
-the gating unmeasured quantity** (stack-paint it before approaching full Part II), and
-the per-feature cost is met incrementally as each piece goes in — not committed up
-front. The earlier "~22KB headroom against 192KB" was meaningless; disregard it.
+**Net:** base-RAM unknown is *closed and favorable*; **MSP high-water also closed and
+favorable** (592 B measured vs ~32 KB free region — see table above). The first build
+is green-lit with huge room. The full vision fits but lands near the edge, and the
+per-feature cost is met incrementally as each piece goes in — not committed up front.
+The earlier "~22KB headroom against 192KB" was meaningless; disregard it.
 
 **Constraints / levers (if measurement shows pressure):** static pre-allocation, no
 malloc in critical paths; **relocate CPU-only buffers to CCM first** (highest-value,

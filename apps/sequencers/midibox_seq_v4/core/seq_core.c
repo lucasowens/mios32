@@ -501,6 +501,78 @@ void SEQ_CORE_RenderTracks(void)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Phase D.0 — MSP/handler-stack high-water measurement.
+//
+// Standard stack-paint pattern: at startup, fill the free MSP region with a
+// sentinel; later, scan from the bottom upward and the first non-sentinel word
+// marks the deepest MSP excursion. _eusrstack / _estack are linker symbols
+// (see etc/ld/STM32F4xx/STM32F407VG.ld). _estack is the MSP top (0x20020000);
+// _eusrstack is the bottom of the ~32KB region reserved for MSP growth (see
+// §A5). Paint runs once, before FreeRTOS starts, while we're still on MSP —
+// after that, kernel + ISRs consume MSP and the painted bytes get overwritten
+// from the top down. Tasks run on PSP so they don't touch this region.
+/////////////////////////////////////////////////////////////////////////////
+extern char _eusrstack[];
+extern char _estack[];
+
+#define MSP_PAINT_PATTERN  0xa5a5a5a5u
+#define MSP_PAINT_MARGIN   256u  // bytes below current SP we deliberately do NOT paint
+
+static u32 *msp_paint_lo = 0;  // inclusive
+static u32 *msp_paint_hi = 0;  // exclusive
+
+void SEQ_CORE_MSPPaint(void)
+{
+  u32 sp;
+  __asm__ volatile ("mov %0, sp" : "=r"(sp));
+
+  u32 lo = (u32)(uintptr_t)_eusrstack;
+  // Round SP-margin down to a word boundary; never paint above current SP or
+  // we'd corrupt the live frame.
+  u32 hi = (sp - MSP_PAINT_MARGIN) & ~3u;
+
+  if( hi <= lo )
+    return;
+
+  msp_paint_lo = (u32 *)(uintptr_t)lo;
+  msp_paint_hi = (u32 *)(uintptr_t)hi;
+
+  u32 *p;
+  for(p=msp_paint_lo; p<msp_paint_hi; ++p)
+    *p = MSP_PAINT_PATTERN;
+}
+
+u32 SEQ_CORE_MSPHighWaterBytes(void)
+{
+  if( !msp_paint_lo || !msp_paint_hi )
+    return 0;
+  u32 *p;
+  // Scan from low end upward — first non-pattern word marks the deepest reach.
+  for(p=msp_paint_lo; p<msp_paint_hi; ++p)
+    if( *p != MSP_PAINT_PATTERN )
+      return (u32)((u8 *)msp_paint_hi - (u8 *)p);
+  return 0;
+}
+
+u32 SEQ_CORE_MSPPaintExtent(void)
+{
+  if( !msp_paint_lo || !msp_paint_hi )
+    return 0;
+  return (u32)((u8 *)msp_paint_hi - (u8 *)msp_paint_lo);
+}
+
+u32 SEQ_CORE_MSPPaintInitialDepth(void)
+{
+  if( !msp_paint_hi )
+    return 0;
+  return (u32)((uintptr_t)_estack - (uintptr_t)msp_paint_hi);
+}
+
+u32 SEQ_CORE_MSPPaintLo(void) { return (u32)(uintptr_t)msp_paint_lo; }
+u32 SEQ_CORE_MSPPaintHi(void) { return (u32)(uintptr_t)msp_paint_hi; }
+
+
+/////////////////////////////////////////////////////////////////////////////
 // This function schedules a MIDI event by considering the "normal" and "Fx"
 // MIDI port
 /////////////////////////////////////////////////////////////////////////////

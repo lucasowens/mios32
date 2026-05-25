@@ -49,6 +49,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_SESSION_LOAD      0x56
 #define CMD_SESSION_NAME_GET  0x57
 #define CMD_TRG_BYTE_GET      0x58
+#define CMD_MSP_QUERY         0x59
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -753,6 +754,36 @@ static void cmd_trg_byte_get(mios32_midi_port_t port, const u8 *payload, u8 plen
 }
 
 
+// CMD_MSP_QUERY: no payload. Reply payload is pack7-encoded:
+//   raw[0..3]   = high_water_bytes   (peak MSP usage since paint, LE u32)
+//   raw[4..7]   = paint_extent_bytes (painted region size, LE u32)
+//   raw[8..11]  = paint_initial_depth (_estack - paint_hi, LE u32)
+//   raw[12..15] = paint_lo (absolute address, LE u32)
+//   raw[16..19] = paint_hi (absolute address, LE u32)
+// MSP peak usage from _estack = paint_initial_depth + high_water_bytes.
+static void cmd_msp_query(mios32_midi_port_t port)
+{
+  u32 high_water = SEQ_CORE_MSPHighWaterBytes();
+  u32 extent     = SEQ_CORE_MSPPaintExtent();
+  u32 initial    = SEQ_CORE_MSPPaintInitialDepth();
+  u32 lo         = SEQ_CORE_MSPPaintLo();
+  u32 hi         = SEQ_CORE_MSPPaintHi();
+
+  u8 raw[20];
+  u32 vals[5] = { high_water, extent, initial, lo, hi };
+  for(u32 i=0; i<5; ++i) {
+    raw[4*i + 0] = (u8)(vals[i] & 0xff);
+    raw[4*i + 1] = (u8)((vals[i] >> 8)  & 0xff);
+    raw[4*i + 2] = (u8)((vals[i] >> 16) & 0xff);
+    raw[4*i + 3] = (u8)((vals[i] >> 24) & 0xff);
+  }
+
+  u8 reply[32];
+  u32 w = pack7(raw, sizeof(raw), reply);
+  send_reply(port, CMD_MSP_QUERY, reply, w);
+}
+
+
 // CMD_LCD_SNAPSHOT: no payload.
 // Reply payload: [lines, columns, packed_bytes...]
 // Bit 7 of each lcd_buffer byte is MBSEQ's internal "already-rendered to the
@@ -899,6 +930,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRG_BYTE_GET:
             cmd_trg_byte_get(port, payload_buf, payload_len);
+            break;
+          case CMD_MSP_QUERY:
+            cmd_msp_query(port);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface
