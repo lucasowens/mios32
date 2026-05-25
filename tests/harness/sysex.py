@@ -29,6 +29,7 @@ CMD_TRG_BYTE_GET = 0x58
 CMD_MSP_QUERY = 0x59
 CMD_UI_INSTR_SET = 0x5a
 CMD_TRACK_DRUM_INIT = 0x5b
+CMD_GENERATOR_QUERY = 0x5c
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.

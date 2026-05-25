@@ -55,6 +55,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_MSP_QUERY         0x59
 #define CMD_UI_INSTR_SET      0x5a
 #define CMD_TRACK_DRUM_INIT   0x5b
+#define CMD_GENERATOR_QUERY   0x5c
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -408,6 +409,56 @@ static void cmd_track_drum_init(mios32_midi_port_t port, const u8 *payload, u8 p
   reply[0] = track;
   reply[1] = 0x01;
   send_reply(port, CMD_TRACK_DRUM_INIT, reply, sizeof(reply));
+}
+
+
+// CMD_GENERATOR_QUERY payload: [track, instrument]
+// Reply payload (status 0x01 = ok):
+//   [track, instr, status, range_min, range_max, mutation_rate,
+//    mutation_depth, contour_shape, engaged,
+//    pack7(loop[64] | locks[8])]    // 72 raw bytes -> 88 wire bytes
+// Reply payload (status 0x02 bad / 0x03 no slot):
+//   [track, instr, status]
+//
+// Lets harness tests pin behavioral contracts (LOCK survives mutation, ROLL
+// only touches unlocked steps, depth=0 freezes) without resorting to MIDI
+// capture. Returns raw loop bytes + lock bitmap; callers reconstruct via
+// unpack7. Engaged byte is 0/1 so a single query covers both "slot exists"
+// and "currently mutating".
+static void cmd_generator_query(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[3 + 6 + 96] = { 0, 0, 0x02 };
+  if( plen < 2 ) {
+    send_reply(port, CMD_GENERATOR_QUERY, reply, 3);
+    return;
+  }
+  u8 track = payload[0];
+  u8 instr = payload[1];
+  reply[0] = track;
+  reply[1] = instr;
+
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+  if( g == NULL ) {
+    reply[2] = 0x03;
+    send_reply(port, CMD_GENERATOR_QUERY, reply, 3);
+    return;
+  }
+
+  reply[2] = 0x01;
+  reply[3] = g->range_min;
+  reply[4] = g->range_max;
+  reply[5] = g->mutation_rate;
+  reply[6] = g->mutation_depth;
+  reply[7] = g->contour_shape;
+  reply[8] = g->engaged ? 1 : 0;
+
+  // Bundle loop[64] + locks[8] into 72 raw bytes, pack7 to wire.
+  u8 raw[SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_LOCKS_BYTES];
+  memcpy(raw, g->loop, SEQ_GENERATOR_LOOP_LEN);
+  memcpy(raw + SEQ_GENERATOR_LOOP_LEN, g->locks, SEQ_GENERATOR_LOCKS_BYTES);
+
+  u32 w = 9 + pack7(raw, sizeof(raw), &reply[9]);
+  send_reply(port, CMD_GENERATOR_QUERY, reply, w);
 }
 
 
@@ -1013,6 +1064,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRACK_DRUM_INIT:
             cmd_track_drum_init(port, payload_buf, payload_len);
+            break;
+          case CMD_GENERATOR_QUERY:
+            cmd_generator_query(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

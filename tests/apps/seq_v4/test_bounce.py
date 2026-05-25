@@ -252,3 +252,89 @@ def test_bounce_destination_plays_captured_notes(board):
         board.page_set(Page.MUTE)
         time.sleep(0.05)
         board.press(Button.GP(1))
+
+
+@pytest.mark.hardware
+def test_pattern_held_gp_bounce_lands_on_sd(board):
+    """End-to-end coverage of the PATTERN-held + GP-letter + GP-number bounce
+    gesture (the workflow exposed at the global button dispatcher, distinct
+    from the BOUNCE menu page and from CMD_BOUNCE).
+
+    Pins two things the gesture path does that CMD_BOUNCE bypasses:
+      1. PATTERN press arms `PATTERN_PRESSED`; GP1..GP8 stashes a letter;
+         GP9..GP16 fires `SEQ_CAPTURE_CommitToSlot` via the global GP
+         dispatcher (seq_ui.c:568-616). A regression in that dispatcher
+         (stashed-letter reset, modifier-state leak, GP intercept ordering)
+         would silently drop the bounce — invisible until someone tried
+         to play the dst slot and found it empty.
+      2. The dst is constructed as `dst = seq_pattern[src_group]` then
+         overrides `dst.group = letter; dst.num = number-8; dst.lower = 0`.
+         This inherits the current bank from the active pattern (the
+         `bank` field, bits 10-12, doesn't overlap group/num/lower in the
+         seq_pattern_t union). If a future refactor breaks the inherit
+         (e.g. zeroes `dst.ALL` first), the slot would land in bank 0
+         instead of the current bank — the test below catches that by
+         loading bank 0 specifically, which is the current bank after
+         pattern_load(0,0,0).
+
+    User-perceived bug being guarded against: "I bounced and the dst slot
+    is empty / got erased when I wasn't on it." Concretely: confirms the
+    dst on SD survives across a pattern_load to a different group + emits
+    notes on playback.
+
+    Bounces from track 0 to slot 63 = (letter H = group 7, number 8 = num 7)
+    in current bank, mirroring BOUNCE_BANK/BOUNCE_PATTERN above.
+    """
+    # Force a known current bank/pattern so the dst.bank inherit is
+    # deterministic. test_bounce.py's other tests use CMD_BOUNCE which
+    # specifies bank explicitly, so they don't care; the gesture path does.
+    assert board.pattern_load(group=0, bank=0, pattern=0)
+
+    _setup_track0_with_triggers(board)
+    _fill_ring_via_playback(board)
+
+    # PATTERN press → GP letter → GP number. The bounce fires on the
+    # GP9..GP16 press; PATTERN release after that is a no-op (the GP-
+    # consumed branch in SEQ_UI_Button_Pattern).
+    board.button(Button.PATTERN, depressed=False)
+    time.sleep(0.05)
+    board.press(Button.GP(8))    # letter H → dst.group = 7
+    time.sleep(0.05)
+    board.press(Button.GP(16))   # number 8 → dst.num = 7  → fires bounce
+    time.sleep(0.05)
+    board.button(Button.PATTERN, depressed=True)
+    time.sleep(0.4)              # SD write headroom (PatternWrite is 100ms+)
+
+    # Load the dst into group 1 to verify it's actually on SD.
+    # bank=0 from the inherit; pattern = (lower<<6)|(group<<3)|num
+    #                                  = (0<<6)|(7<<3)|7 = 63.
+    assert board.pattern_load(
+        group=DST_VERIFY_GROUP, bank=BOUNCE_BANK, pattern=BOUNCE_PATTERN
+    ), "pattern_load of gesture-bounce dst failed"
+    board.track_config(track=DST_VERIFY_TRACK, midi_port=MidiPort.USB0, channel=0)
+
+    # Same mute-source + capture-from-dst pattern as the CMD_BOUNCE test.
+    board.page_set(Page.MUTE)
+    time.sleep(0.05)
+    board.press(Button.GP(1))   # mute track 0
+    time.sleep(0.05)
+    try:
+        capture_t0 = board.capture_start()
+        board.press(Button.PLAY)
+        time.sleep(PLAY_SECONDS)
+        board.press(Button.STOP)
+        time.sleep(0.2)
+        notes = [
+            e for e in board.capture_notes(since=capture_t0)
+            if e.is_on and e.channel == 0
+        ]
+        assert len(notes) > 0, (
+            f"PATTERN-held gesture bounce produced no notes on dst track "
+            f"{DST_VERIFY_TRACK} — either the gesture didn't dispatch the "
+            f"bounce, the dst was written to a different slot than expected, "
+            f"or the slot was empty on SD"
+        )
+    finally:
+        board.page_set(Page.MUTE)
+        time.sleep(0.05)
+        board.press(Button.GP(1))

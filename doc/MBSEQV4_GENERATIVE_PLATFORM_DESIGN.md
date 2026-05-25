@@ -903,6 +903,76 @@ Append-only-ish; revise an entry only with a dated note.
     Cosmetic in normal use (live users rarely notice); blocking for the
     harness's LCD-scrape assertions which read the LCD right after a
     popup nominally cleared. Pre-existing, predates this fork.
+
+- **Step 6 — Generator polish (phase G). DONE 2026-05-25.** Per-step LOCK,
+  ROLL gesture, mutation depth, contour shapes. Sub-phased G.0–G.4 but
+  shipped as one commit since each piece was a single small wiring change
+  on top of the phase E generator engine.
+    - **G.0 slot growth.** `seq_generator_t` 72 → 84 B: 12 B header
+      (added `mutation_depth`, `contour_shape`, 3 B reserved pad) + 64 B
+      loop + 8 B `locks` bitmap. Pool: 64 slots × 12 B delta = **+768 B
+      CCMRAM** (47.1 → 47.9 KB used / 64 KB; ~17.2 KB headroom).
+      Defaults preserve phase E behavior exactly: `mutation_depth = 127`
+      (full reroll), `contour_shape = UNIFORM`, all locks 0.
+    - **G.1 ROLL gesture.** Per §9 line 1199, ROLL collapses into
+      ENGAGE-while-engaged ROLL. New `SEQ_GENERATOR_Roll(track)` reroll-
+      every-unlocked-step honors contour and ignores rate/depth (it's the
+      "fire one variation now" trigger). GP1 dispatch:
+        - disengaged   → ENGAGE (alloc + seed + snapshot undo)
+        - engaged      → ROLL
+        - SEL + GP1    → DISENGAGE (the rarely-used escape — live use
+                         prefers BOUNCE-in-place or UNDO).
+    - **G.2 mutation depth.** GP6 encoder, 0..127. Upgrades `mutate_loop`
+      from pure-reroll to depth-controlled: 0 = no-op (frozen even at
+      rate=127), 127 = full reroll (phase E behavior), in between =
+      perturb existing value by ±depth semitones clamped to range.
+      Two-dimensional control: rate = "how many steps touched per measure",
+      depth = "how far each touched step moves". rate=high+depth=low gives
+      shimmer; both high gives chaos; both low/zero gives a frozen loop.
+    - **G.3 contour shapes.** GP7 encoder cycles UNIFORM / LOW_BIAS /
+      HIGH_BIAS / TRIANGLE. Biases the *full-reroll* path only (depth=127
+      or ROLL); perturb path ignores contour. Cheap distribution shaping
+      via min/max/sum of two uniforms — no trig or tables. Audibly skews
+      the loop distribution most when range is wide and ROLL is pressed
+      a few times per shape.
+    - **G.4 per-step LOCK.** Datawheel scrolls `ui_selected_step` cursor
+      (clamped to LOOP_LEN-1=63). GP6 button-press toggles lock on the
+      cursor step. `SEQ_GENERATOR_LockToggle(track, instr, step)`. Locks
+      survive mutation in BOTH paths (perturb-while-mutate AND reroll
+      from ROLL). Persist across DISENGAGE→ENGAGE (slot stays allocated).
+      Cleared on slot recycle (BOUNCE-in-place, relocate, UNDO restoring
+      to a different gen's track).
+    - **LCD layout phase G.** Row 1 LHS: `Lo:C 2 Hi:C 6 R:008 D:127 Ct:Uni`
+      (Lo/Hi = range, R = rate, D = depth, Ct = contour). Row 1 RHS when
+      engaged: `Stp:NN [L]/[ ] GP6=LOCK SEL+GP1=disen`. Row 0 RHS:
+      `GP1=ENGAGE/ROLL GP2=UNDO  GP8=BOUNCE`.
+    - **As-built encoder layout.** GP1 ENGAGE/ROLL, GP2 UNDO, GP3/4 range
+      min/max, GP5 rate, GP6 depth (button = LOCK toggle), GP7 contour,
+      GP8 BOUNCE. Datawheel = step cursor. MULT/ANCHOR/SNAP still
+      explicitly NOT allocated (no fields, no dispatch) — they come if
+      and when listen-test demands.
+
+    **Harness automation (added same session).** 7 LCD-scrape dispatch
+    tests + 4 behavioral tests in `tests/apps/seq_v4/test_pitchgen_step6.py`.
+    Dispatch covers ROLL/DISENGAGE/LOCK/cursor/depth/contour LCD effects.
+    Behavioral tests use new `CMD_GENERATOR_QUERY` (0x5c) to read live
+    `loop[64]` + `locks` bitmap + dial values from a slot, pinning: ROLL
+    preserves locked steps, ROLL actually rerolls unlocked steps, locks
+    survive DISENGAGE→ENGAGE, BOUNCE-in-place clears locks for the next
+    slot. The new query returns 9 header bytes + pack7(72 raw bytes) =
+    ~97 wire bytes; harness exposes it as `Board.generator_query() →
+    GeneratorState | None`. Also added 1 regression test in
+    `test_bounce.py` for the PATTERN-held + GP-letter + GP-number bounce
+    gesture (seq_ui.c:568-616) — confirms the gesture-path dst lands on
+    SD and survives a pattern-load to a different group. Full harness
+    **38/38 green** against the G firmware.
+
+    **Still listen-test only (deferred):** mutate-path LOCK preservation
+    across actual measure-boundary mutation (would need a measure-trigger
+    testctrl command or a play-and-wait cycle; the ROLL path exercises
+    the same lock-respect code so coverage is partial), depth=0 freezing
+    (ROLL ignores depth), contour distribution shape (statistical).
+
 - **Step 5 build discipline.** Each phase ships its own harness regression test;
   the §A4 timing tests (#3 same-tick, #4 knob-to-sound, #5 worst-case tick,
   #6 priority-inversion) attach progressively as phases land. Phase A passes
@@ -1193,11 +1263,14 @@ modifier → per-step mutation multiplier, 4-level LED brightness). Step LEDs de
 to a pitch-as-brightness gradient with a play cursor. LCD: DEST + param strip;
 lower LCD a loop-content visualization.
 
-**As-built through phase F (2026-05-25):** GP1 ENGAGE (LED), GP2 UNDO, GP3/GP4
-range min/max, GP5 Mutation rate, GP6/GP7 reserved for §8 step 6 (LOCK / MULT /
-SNAP / contour), GP8 BOUNCE (cursor-aware — see §8 step 5 phase F). Seed
-(separate from ENGAGE) collapses into ENGAGE-while-engaged ROLL once step 6 lands
-its ROLL gesture; current `Seed` slot in the provisional layout is vestigial.
+**As-built through phase G (2026-05-25):** GP1 ENGAGE/ROLL (LED reflects
+engaged; second-press = ROLL when engaged, SEL+GP1 = DISENGAGE), GP2 UNDO,
+GP3/GP4 range min/max, GP5 mutation rate, GP6 mutation depth (encoder)
++ LOCK toggle (button-press for cursor step), GP7 contour shape cycle
+(UNIFORM/LOW/HIGH/TRIANGLE), GP8 BOUNCE (cursor-aware — see §8 step 5
+phase F). Datawheel scrolls the LOCK cursor across loop steps 0..63.
+MULT / ANCHOR / SNAP still **not allocated** (no fields, no dispatch) —
+they come if and when listen-test demands.
 
 The BOUNCE control is the first place the §3 destination semantic is wired in
 the UI: cursor IS the destination, occupancy decides additive-vs-replace. The

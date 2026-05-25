@@ -1,4 +1,4 @@
-from .board import Board, BoardNotFound, LCDSnapshot, NoteEvent
+from .board import Board, BoardNotFound, GeneratorState, LCDSnapshot, NoteEvent
 from .sysex import (
     Button,
     CC,
@@ -20,6 +20,7 @@ from .sysex import (
     CMD_TRG_BYTE_GET,
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
+    CMD_GENERATOR_QUERY,
     Encoder,
     MidiPort,
     Page,
@@ -36,6 +37,7 @@ __all__ = [
     "Button",
     "CC",
     "Encoder",
+    "GeneratorState",
     "LCDSnapshot",
     "MidiPort",
     "NoteEvent",
@@ -59,6 +61,7 @@ __all__ = [
     "CMD_TRG_BYTE_GET",
     "CMD_UI_INSTR_SET",
     "CMD_TRACK_DRUM_INIT",
+    "CMD_GENERATOR_QUERY",
     "RESET_DEFAULT",
     "RESET_PAGE_TO_EDIT",
     "RESET_STOP_TRANSPORT",

@@ -1,14 +1,25 @@
 // $Id$
 /*
- * Pitch Generator page — phase E + phase F.
+ * Pitch Generator page — phase E + F + G (§8 step 6 polish).
  *
- * GP1 ENGAGE toggle (LED reflects engaged state).
+ * GP1 ENGAGE / ROLL / DISENGAGE (LED reflects engaged state).
+ *       - disengaged          → ENGAGE (alloc slot, snapshot par, seed loop)
+ *       - engaged             → ROLL (one-shot reroll of unlocked steps)
+ *       - SELECT held + GP1   → DISENGAGE (stop mutating, keep slot+loop)
+ *     This collapses the phase-F ENGAGE-toggle into the design-doc shape
+ *     (§9 line 1199): "ROLL collapses into ENGAGE-while-engaged ROLL once
+ *     step 6 lands." DISENGAGE moves behind the SELECT modifier because
+ *     live use favors BOUNCE-in-place or UNDO over plain DISENGAGE.
  * GP2 UNDO (restores pre-engage par snapshot, disengages every gen on that
  *     track).
  * GP3 Range min   (encoder; clamped to <= range_max).
  * GP4 Range max   (encoder; clamped to >= range_min).
  * GP5 Mutation rate 0..127 (encoder; the §5 journey dial, sweepable live).
- * GP6..GP7 reserved for §8 step 6 (LOCK / MULT / SNAP / contour).
+ * GP6 Mutation depth 0..127 (encoder; 0=frozen, 127=full reroll, between =
+ *     ±depth semitone perturb around existing value). Phase G.
+ *     Button press: toggle per-step LOCK at cursor step (phase G.4 — TODO).
+ * GP7 Contour shape (encoder cycles UNIFORM/LOW_BIAS/HIGH_BIAS/TRIANGLE).
+ *     Biases the full-reroll distribution. Phase G.
  * GP8 BOUNCE — phase F. Dual semantics on one button:
  *       - generator engaged on (track, instr)  → freeze + free the slot
  *         (SEQ_GENERATOR_Bounce). Loop is discarded; source stays as last
@@ -50,11 +61,25 @@ static s32 LED_Handler(u16 *gp_leds)
 
 
 /////////////////////////////////////////////////////////////////////////////
-// Range / rate encoder dispatch.
+// Range / rate / depth / contour encoder dispatch + datawheel cursor.
 /////////////////////////////////////////////////////////////////////////////
 static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 {
   u8 track = SEQ_UI_VisibleTrackGet();
+
+  // Datawheel scrolls the lock cursor across the loop. Works regardless of
+  // engagement state — moving the cursor pre-ENGAGE lets the user pre-aim
+  // where the first LOCK toggle will land. Clamped to loop length, not the
+  // track's par-step count (the gen always works in LOOP_LEN units).
+  if( encoder == SEQ_UI_ENCODER_Datawheel ) {
+    if( SEQ_UI_Var8_Inc(&ui_selected_step, 0,
+                        SEQ_GENERATOR_LOOP_LEN - 1, incrementer) >= 1 ) {
+      ui_selected_step_view = ui_selected_step / 16;
+      return 1;
+    }
+    return 0;
+  }
+
   seq_generator_t *g = SEQ_GENERATOR_Get(track, ui_selected_instrument);
 
   // No allocated slot ⇒ nothing to tune yet. Encoders no-op until ENGAGE.
@@ -81,6 +106,18 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       g->mutation_rate = v;
       return r;
     }
+    case SEQ_UI_ENCODER_GP6: {
+      u8 v = g->mutation_depth;
+      s32 r = SEQ_UI_Var8_Inc(&v, 0, 127, incrementer);
+      g->mutation_depth = v;
+      return r;
+    }
+    case SEQ_UI_ENCODER_GP7: {
+      u8 v = g->contour_shape;
+      s32 r = SEQ_UI_Var8_Inc(&v, 0, SEQ_GENERATOR_CONTOUR_NUM - 1, incrementer);
+      g->contour_shape = v;
+      return r;
+    }
     default:
       break;
   }
@@ -99,27 +136,44 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
   u8 instr = ui_selected_instrument;
 
   if( button == SEQ_UI_BUTTON_GP1 ) {
-    if( SEQ_GENERATOR_IsEngaged(track, instr) ) {
-      SEQ_GENERATOR_Disengage(track, instr);
-      SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "DISENGAGED");
-    } else {
-      s32 r = SEQ_GENERATOR_Engage(track, instr);
-      switch( r ) {
-        case 0:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
-          break;
-        case -1:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "pool full (64/64)");
-          break;
-        case -2:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "needs drum-mode track");
-          break;
-        case -3:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "assign Note par-layer");
-          break;
-        default:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "ENGAGE failed");
+    u8 engaged = SEQ_GENERATOR_IsEngaged(track, instr);
+
+    // SELECT held = explicit DISENGAGE escape (rarely needed in live use,
+    // but covers DISENGAGE→re-ENGAGE iteration without losing the loop).
+    if( seq_ui_button_state.SELECT_PRESSED ) {
+      if( engaged ) {
+        SEQ_GENERATOR_Disengage(track, instr);
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "DISENGAGED");
+      } else {
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "not engaged");
       }
+      return 1;
+    }
+
+    if( engaged ) {
+      // ROLL: one-shot reroll of unlocked steps. Independent of rate dial.
+      SEQ_GENERATOR_Roll(track);
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 500, "Pitch Gen:", "ROLL");
+      return 1;
+    }
+
+    // disengaged → ENGAGE
+    s32 r = SEQ_GENERATOR_Engage(track, instr);
+    switch( r ) {
+      case 0:
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
+        break;
+      case -1:
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "pool full (64/64)");
+        break;
+      case -2:
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "needs drum-mode track");
+        break;
+      case -3:
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "assign Note par-layer");
+        break;
+      default:
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "ENGAGE failed");
     }
     return 1;
   }
@@ -180,6 +234,18 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
     return 1;
   }
 
+  if( button == SEQ_UI_BUTTON_GP6 ) {
+    // Phase G LOCK toggle at the cursor step. No-op if no slot allocated.
+    s32 r = SEQ_GENERATOR_LockToggle(track, instr, ui_selected_step);
+    if( r < 0 ) {
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "ENGAGE first to LOCK");
+    } else {
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 500, "Pitch Gen:",
+                 r ? "step LOCKED" : "step unlocked");
+    }
+    return 1;
+  }
+
   if( button >= SEQ_UI_BUTTON_GP3 && button <= SEQ_UI_BUTTON_GP7 ) {
     return Encoder_Handler((seq_ui_encoder_t)button, 0);
   }
@@ -194,9 +260,19 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 // 00000000001111111111222222222233333333330000000000111111111122222222223333333333
 // 01234567890123456789012345678901234567890123456789012345678901234567890123456789
 // <--------------------------------------><-------------------------------------->
-// PITCH GEN  Trk 1.D 3   state:ENGAGED      GP1=ENGAGE GP2=UNDO   GP8=BOUNCE
-// RMin:C 2  RMax:C 6  Rate:  8               GP3/4=range GP5=rate GP2=undo GP8=bnc
+// PITCH GEN  Trk 1.D 3   state:ENGAGED      GP1=ENGAGE/ROLL GP2=UNDO  GP8=BOUNCE
+// Lo:C 2 Hi:C 6 R:008 D:127 Ct:Uni          Stp:03 [L] GP6=LOCK SEL+GP1=disengage
 /////////////////////////////////////////////////////////////////////////////
+static const char *contour_name(u8 shape)
+{
+  switch( shape ) {
+    case SEQ_GENERATOR_CONTOUR_LOW_BIAS:  return "Lo ";
+    case SEQ_GENERATOR_CONTOUR_HIGH_BIAS: return "Hi ";
+    case SEQ_GENERATOR_CONTOUR_TRIANGLE:  return "Tri";
+    default:                              return "Uni";
+  }
+}
+
 static s32 LCD_Handler(u8 high_prio)
 {
   if( high_prio )
@@ -220,32 +296,34 @@ static s32 LCD_Handler(u8 high_prio)
   else                 SEQ_LCD_PrintString("state:--          ");
 
   SEQ_LCD_CursorSet(40, 0);
-  SEQ_LCD_PrintString("GP1=ENGAGE GP2=UNDO         GP8=BOUNCE  ");
+  SEQ_LCD_PrintString("GP1=ENGAGE/ROLL GP2=UNDO  GP8=BOUNCE    ");
 
-  // Row 1
+  // Row 1 LHS: dials. Phase G adds depth (D:) and contour (Ct:).
   SEQ_LCD_CursorSet(0, 1);
   if( g != NULL ) {
-    SEQ_LCD_PrintString("RMin:");
+    SEQ_LCD_PrintString("Lo:");
     SEQ_LCD_PrintNote(g->range_min);
-    SEQ_LCD_PrintString(" RMax:");
+    SEQ_LCD_PrintString(" Hi:");
     SEQ_LCD_PrintNote(g->range_max);
-    SEQ_LCD_PrintFormattedString(" Rate:%3d            ", g->mutation_rate);
+    SEQ_LCD_PrintFormattedString(" R:%03d D:%03d Ct:%s         ",
+                                 g->mutation_rate, g->mutation_depth,
+                                 contour_name(g->contour_shape));
   } else {
-    SEQ_LCD_PrintString("RMin:--   RMax:--   Rate:---            ");
+    SEQ_LCD_PrintString("Lo:--  Hi:--  R:--- D:--- Ct:---        ");
   }
 
+  // Row 1 RHS: contextual hint.
   SEQ_LCD_CursorSet(40, 1);
   if( tcc->event_mode != SEQ_EVENT_MODE_Drum )
     SEQ_LCD_PrintString("(needs drum-mode track)                 ");
   else if( tcc->link_par_layer_note < 0 )
     SEQ_LCD_PrintString("(assign Note in PAR-ASG first)          ");
-  else if( engaged )
-    SEQ_LCD_PrintString("GP3/4=range GP5=rate GP2=undo GP8=bnc   ");
-  else if( has_other_engaged ) {
-    // Engaged gen on this track, cursor parked on a different drum slot.
-    // BOUNCE here will relocate the variation: restore src drum, write
-    // loop into cursor's drum. Show the source so the user knows what
-    // GP8 will act on.
+  else if( engaged ) {
+    // Show cursor + its lock state + key gestures.
+    u8 locked = SEQ_GENERATOR_LockGet(g, ui_selected_step);
+    SEQ_LCD_PrintFormattedString("Stp:%02d %s GP6=LOCK SEL+GP1=disen ",
+                                 ui_selected_step + 1, locked ? "[L]" : "[ ]");
+  } else if( has_other_engaged ) {
     SEQ_LCD_PrintFormattedString("GEN on D%2d  GP8 relocates here       ",
                                  other_engaged_instr + 1);
   } else

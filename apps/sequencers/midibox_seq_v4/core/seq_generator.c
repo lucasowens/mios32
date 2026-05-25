@@ -1,10 +1,13 @@
 // $Id$
 /*
  * Phase E — generator workflow.
+ * Phase G — §8 step 6 polish (per-step LOCK, ROLL, depth, contour).
  * See seq_generator.h for the model. This file implements:
  *   - the cap-64 pool + per-(track, instrument) sparse lookup
  *   - one-deep global auto-undo
  *   - per-measure-boundary mutate-then-rewrite (Turing loop → source par)
+ *   - phase G: lock-aware mutation, depth-controlled perturb vs reroll,
+ *     contour-biased reroll distribution, on-demand ROLL gesture
  *
  * Measure-boundary detection: per-track last_seen_step. SEQ_GENERATOR_Tick
  * fires when t->step == 0 AND last_seen != 0 (or on the first call after
@@ -68,35 +71,115 @@ static u8 last_seen_step[SEQ_CORE_NUM_TRACKS];
 // Helpers
 /////////////////////////////////////////////////////////////////////////////
 
-static u8 reroll_pitch(u8 lo, u8 hi)
+static void normalize_range(u8 *lo, u8 *hi)
 {
-  if( lo > hi ) {
-    u8 t = lo;
-    lo = hi;
-    hi = t;
-  }
-  if( lo == 0 )
-    lo = 1; // 0 is the drum lay_const fallback marker — never roll into it
-  if( hi > 127 ) hi = 127;
-  if( lo > hi ) lo = hi;
-  return (u8)SEQ_RANDOM_Gen_Range(lo, hi);
+  if( *lo > *hi ) { u8 t = *lo; *lo = *hi; *hi = t; }
+  if( *lo == 0 ) *lo = 1; // 0 is the drum lay_const fallback marker
+  if( *hi > 127 ) *hi = 127;
+  if( *lo > *hi ) *lo = *hi;
 }
 
 
-// Mutate the loop in place: each cell with prob (rate/255) gets rerolled.
+// Pick a fresh pitch in [lo..hi] biased by contour shape. UNIFORM is the
+// existing phase E behavior. Bias shapes draw two uniforms and combine them
+// to cheaply approximate the target distribution without trig or tables.
+static u8 reroll_pitch(u8 lo, u8 hi, u8 contour)
+{
+  normalize_range(&lo, &hi);
+  u32 span = (u32)(hi - lo) + 1;  // ≥1
+
+  switch( contour ) {
+    case SEQ_GENERATOR_CONTOUR_LOW_BIAS: {
+      // min of two uniforms ⇒ density falls toward hi — concentrates near lo.
+      u32 a = SEQ_RANDOM_Gen_Range(0, span - 1);
+      u32 b = SEQ_RANDOM_Gen_Range(0, span - 1);
+      return (u8)(lo + (a < b ? a : b));
+    }
+    case SEQ_GENERATOR_CONTOUR_HIGH_BIAS: {
+      u32 a = SEQ_RANDOM_Gen_Range(0, span - 1);
+      u32 b = SEQ_RANDOM_Gen_Range(0, span - 1);
+      return (u8)(lo + (a > b ? a : b));
+    }
+    case SEQ_GENERATOR_CONTOUR_TRIANGLE: {
+      // sum of two uniforms over half-span ⇒ triangular, peak at mid-range.
+      u32 half = (span + 1) / 2;
+      u32 a = SEQ_RANDOM_Gen_Range(0, half - 1);
+      u32 b = SEQ_RANDOM_Gen_Range(0, half - 1);
+      u32 v = a + b;
+      if( v >= span ) v = span - 1;
+      return (u8)(lo + v);
+    }
+    default: // SEQ_GENERATOR_CONTOUR_UNIFORM
+      return (u8)SEQ_RANDOM_Gen_Range(lo, hi);
+  }
+}
+
+
+// Perturb an existing value by ±depth semitones, clamped to [lo..hi].
+// depth==0 returns existing unchanged; the caller is responsible for not
+// calling perturb_pitch when depth==0 (early-out keeps the hot path clean).
+static u8 perturb_pitch(u8 existing, u8 lo, u8 hi, u8 depth)
+{
+  normalize_range(&lo, &hi);
+  if( existing < lo ) existing = lo;
+  if( existing > hi ) existing = hi;
+
+  // Symmetric ±depth window; SEQ_RANDOM_Gen_Range with 2*depth+1 buckets.
+  u32 d = depth;
+  u32 bucket = SEQ_RANDOM_Gen_Range(0, 2*d);
+  s32 delta = (s32)bucket - (s32)d;
+  s32 v = (s32)existing + delta;
+  if( v < (s32)lo ) v = lo;
+  if( v > (s32)hi ) v = hi;
+  return (u8)v;
+}
+
+
+// Mutate the loop in place. Phase G upgrades phase E's pure-reroll path:
+//   - locked steps are never touched (LOCK survives any mutation)
+//   - rate gates "is this step touched at all?" (per-step probability)
+//   - depth selects perturb-vs-reroll: 0 = no-op, 127 = full reroll
+//     (phase E behavior), in between = perturb by ±depth around existing
+//   - contour biases the reroll path only
 static void mutate_loop(seq_generator_t *g)
 {
   if( g->mutation_rate == 0 )
     return; // pass-through (§2.3 sweep contract)
+  if( g->mutation_depth == 0 )
+    return; // frozen — touched cells still don't move
 
   u8 i;
   for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i) {
+    if( SEQ_GENERATOR_LockGet(g, i) )
+      continue; // §G LOCK — preserved verbatim
+
     // SEQ_RANDOM_Gen_Range(0, 254) gives a uniform u8 in [0,254]; comparing
-    // against rate*2 maps rate 0..127 → ~0..100% reroll probability per cell.
+    // against rate*2 maps rate 0..127 → ~0..100% touch probability per cell.
     u32 r = SEQ_RANDOM_Gen_Range(0, 254);
-    if( r < (u32)(g->mutation_rate * 2) ) {
-      g->loop[i] = reroll_pitch(g->range_min, g->range_max);
+    if( r >= (u32)(g->mutation_rate * 2) )
+      continue;
+
+    if( g->mutation_depth >= 127 ) {
+      g->loop[i] = reroll_pitch(g->range_min, g->range_max, g->contour_shape);
+    } else {
+      g->loop[i] = perturb_pitch(g->loop[i], g->range_min, g->range_max,
+                                 g->mutation_depth);
     }
+  }
+}
+
+
+// ROLL gesture (phase G): reroll *every unlocked step* immediately, ignoring
+// rate and depth. Always honors contour. This is the "manual variation"
+// trigger — pairs naturally with rate=0 (frozen) + locks + ROLL = punctuated
+// surprise within an otherwise stable loop.
+static void roll_loop(seq_generator_t *g)
+{
+  u8 i;
+  for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i) {
+    if( SEQ_GENERATOR_LockGet(g, i) )
+      continue;
+    g->loop[i] = reroll_pitch(g->range_min, g->range_max, g->contour_shape);
   }
 }
 
@@ -141,12 +224,12 @@ static void write_loop_to_source(const seq_generator_t *g)
 
 // Seed loop[] with an initial reroll across the range (called once at first
 // ENGAGE so the engaged generator is immediately audible without waiting for
-// the next measure).
+// the next measure). Honors contour; locks aren't relevant — fresh slot.
 static void seed_loop(seq_generator_t *g)
 {
   u8 i;
   for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i)
-    g->loop[i] = reroll_pitch(g->range_min, g->range_max);
+    g->loop[i] = reroll_pitch(g->range_min, g->range_max, g->contour_shape);
 }
 
 
@@ -226,13 +309,17 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument)
   seq_generator_t *g = alloc_slot();
   if( g == NULL ) return -1;
 
-  g->track         = track;
-  g->instrument    = instrument;
-  g->range_min     = SEQ_GENERATOR_DEFAULT_RANGE_MIN;
-  g->range_max     = SEQ_GENERATOR_DEFAULT_RANGE_MAX;
-  g->mutation_rate = SEQ_GENERATOR_DEFAULT_RATE;
-  g->engaged       = 1;
-  g->in_use        = 1;
+  g->track          = track;
+  g->instrument     = instrument;
+  g->range_min      = SEQ_GENERATOR_DEFAULT_RANGE_MIN;
+  g->range_max      = SEQ_GENERATOR_DEFAULT_RANGE_MAX;
+  g->mutation_rate  = SEQ_GENERATOR_DEFAULT_RATE;
+  g->mutation_depth = SEQ_GENERATOR_DEFAULT_DEPTH;
+  g->contour_shape  = SEQ_GENERATOR_DEFAULT_CONTOUR;
+  g->engaged        = 1;
+  g->in_use         = 1;
+  // alloc_slot returned a memset-clean slot, so locks[] is already 0; no
+  // explicit clear needed (slots are also memset-cleared at free).
   seed_loop(g);
 
   pool_index[track][instrument] = (u8)(g - pool);
@@ -398,6 +485,33 @@ void SEQ_GENERATOR_ForceRewrite(u8 track)
     if( g->in_use && g->engaged && g->track == track )
       write_loop_to_source(g);
   }
+}
+
+
+u8 SEQ_GENERATOR_Roll(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
+  u8 i, n = 0;
+  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
+    seq_generator_t *g = &pool[i];
+    if( !g->in_use || !g->engaged || g->track != track )
+      continue;
+    roll_loop(g);
+    write_loop_to_source(g);
+    ++n;
+  }
+  return n;
+}
+
+
+s32 SEQ_GENERATOR_LockToggle(u8 track, u8 instrument, u8 step)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return -1;
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
+  if( g == NULL ) return -1;
+  u8 next = SEQ_GENERATOR_LockGet(g, step) ? 0 : 1;
+  SEQ_GENERATOR_LockSet(g, step, next);
+  return next;
 }
 
 

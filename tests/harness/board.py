@@ -34,6 +34,7 @@ from .sysex import (
     CMD_TRG_BYTE_GET,
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
+    CMD_GENERATOR_QUERY,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -99,6 +100,27 @@ class LCDSnapshot:
 
     def __str__(self) -> str:
         return self.text
+
+
+@dataclass
+class GeneratorState:
+    """Live snapshot of a SEQ_GENERATOR_* pool slot.
+
+    Returned by Board.generator_query(). `loop` is the 64-byte Turing array
+    (pitch per step, the source the gen writes into the Note par-layer).
+    `locks` is a 64-tuple of bools (True = step locked, survives mutation).
+    """
+
+    track: int
+    instrument: int
+    range_min: int
+    range_max: int
+    mutation_rate: int
+    mutation_depth: int
+    contour_shape: int
+    engaged: bool
+    loop: bytes              # 64 bytes
+    locks: tuple[bool, ...]  # 64 entries
 
 
 @dataclass
@@ -754,6 +776,59 @@ class Board:
             "paint_hi": hi,
             "peak_usage_bytes": initial + high_water,
         }
+
+    def generator_query(
+        self,
+        track: int,
+        instrument: int,
+        timeout: float = 1.0,
+    ) -> GeneratorState | None:
+        """Read the live state of the generator slot for (track, instrument).
+
+        Returns a GeneratorState if a slot is allocated, or None if there is
+        no slot. Used by behavioral tests to verify LOCK / ROLL / depth math
+        without needing to capture MIDI.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_GENERATOR_QUERY, bytes([track, instrument])))
+        payload = self.wait_for_sysex(
+            CMD_GENERATOR_QUERY, timeout=timeout, since=since
+        )
+        if len(payload) < 3:
+            raise RuntimeError(f"short GENERATOR_QUERY reply: {payload!r}")
+        status = payload[2]
+        if status == 0x03:
+            return None
+        if status != CMD_STATUS_OK:
+            raise RuntimeError(f"GENERATOR_QUERY status {status:#04x}")
+        if len(payload) < 9:
+            raise RuntimeError(f"short GENERATOR_QUERY ok-reply: {payload!r}")
+        raw = unpack7(payload[9:])
+        if len(raw) < 72:
+            raise RuntimeError(
+                f"GENERATOR_QUERY raw underflow: {len(raw)} bytes, need 72"
+            )
+        loop = bytes(raw[:64])
+        locks_bitmap = bytes(raw[64:72])
+        locks = tuple(
+            bool((locks_bitmap[s >> 3] >> (s & 7)) & 1) for s in range(64)
+        )
+        return GeneratorState(
+            track=payload[0],
+            instrument=payload[1],
+            range_min=payload[3],
+            range_max=payload[4],
+            mutation_rate=payload[5],
+            mutation_depth=payload[6],
+            contour_shape=payload[7],
+            engaged=bool(payload[8]),
+            loop=loop,
+            locks=locks,
+        )
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:
         """Read the current 2x80 LCD buffer from the firmware."""

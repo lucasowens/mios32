@@ -1,6 +1,8 @@
 // $Id$
 /*
  * Phase E — generator workflow (Turing-style pitch generator per drum slot).
+ * Phase G (§8 step 6 polish) — per-step LOCK, ROLL gesture, mutation depth,
+ * contour shapes.
  *
  * §3 noun. A generator deposits material into a *source* buffer, always
  * overwrites at its destination, and stays engaged across measures — the §5
@@ -16,9 +18,23 @@
  *     the source Note par-layer for the engaged (track, instrument) pair.
  *     Mutation rate + range min/max are live dials.
  *
- * Deferred to §8 step 6 (no fields allocated yet): per-step LOCK, MULT,
- * ANCHOR, SNAP, ROLL, contour shapes. The 64-byte loop is the only generator
- * state for now — phase 6 fields grow the struct.
+ * Phase G (§8 step 6) adds:
+ *   - locks[]: 64-bit bitmap (1 bit per step) — locked steps survive mutation
+ *     in both perturb and reroll paths. Toggled from the PITCHGEN page via the
+ *     cursor encoder + dedicated button.
+ *   - mutation_depth: how *far* each touched step moves per measure.
+ *     0 = no change (frozen), 127 = full reroll across [range_min..range_max].
+ *     In between = perturb existing value by ±depth semitones, clamped to
+ *     range. Stacks with mutation_rate (how *many* steps get touched).
+ *   - contour_shape: bias for the reroll distribution. UNIFORM (default,
+ *     phase E behavior), LOW_BIAS, HIGH_BIAS, TRIANGLE. Affects only the
+ *     full-reroll path (depth=127), not perturb.
+ *   - ROLL gesture (SEQ_GENERATOR_Roll): one-shot reroll-of-unlocked-steps
+ *     immediately, independent of measure-boundary cadence. Lets the user
+ *     "freeze the music" (rate=0 + locks held) and trigger fresh variations
+ *     on demand.
+ *
+ * Still deferred: MULT, ANCHOR, SNAP (no fields allocated yet).
  *
  * ==========================================================================
  */
@@ -37,9 +53,23 @@
 #define SEQ_GENERATOR_LOOP_LEN       64
 #define SEQ_GENERATOR_INSTRUMENTS    16   // max drum slots per track
 
+#define SEQ_GENERATOR_LOCKS_BYTES    (SEQ_GENERATOR_LOOP_LEN / 8)  // 8 — bitmap
+
 #define SEQ_GENERATOR_DEFAULT_RANGE_MIN  36   // C2
 #define SEQ_GENERATOR_DEFAULT_RANGE_MAX  84   // C6
 #define SEQ_GENERATOR_DEFAULT_RATE        8   // gentle mutation
+#define SEQ_GENERATOR_DEFAULT_DEPTH     127   // full reroll (= phase E behavior)
+#define SEQ_GENERATOR_DEFAULT_CONTOUR     0   // UNIFORM (= phase E behavior)
+
+// Contour shape codes. The reroll path uses this to bias the distribution
+// (full-reroll path only — depth=127). Perturb path ignores contour.
+typedef enum {
+  SEQ_GENERATOR_CONTOUR_UNIFORM   = 0,  // flat across [range_min..range_max]
+  SEQ_GENERATOR_CONTOUR_LOW_BIAS  = 1,  // weighted toward range_min (parabolic)
+  SEQ_GENERATOR_CONTOUR_HIGH_BIAS = 2,  // weighted toward range_max
+  SEQ_GENERATOR_CONTOUR_TRIANGLE  = 3,  // weighted toward mid-range
+  SEQ_GENERATOR_CONTOUR_NUM
+} seq_generator_contour_t;
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -53,10 +83,32 @@ typedef struct {
   u8 instrument;     // 0..SEQ_GENERATOR_INSTRUMENTS-1
   u8 range_min;      // pitch lower bound (1..127, clamped to ≤ range_max)
   u8 range_max;      // pitch upper bound (1..127, clamped to ≥ range_min)
-  u8 mutation_rate;  // 0..127 — per-cell reroll probability per measure
-  u8 reserved;       // pad to 8B header
-  u8 loop[SEQ_GENERATOR_LOOP_LEN];  // Turing loop array — pitch per step
+  u8 mutation_rate;  // 0..127 — per-cell touch probability per measure
+  u8 mutation_depth; // 0..127 — how far each touched cell moves
+                     //   0   = no change (frozen)
+                     //   127 = full reroll (= phase E behavior)
+                     //   N   = perturb existing by ±N semitones, clamped
+  u8 contour_shape;  // seq_generator_contour_t — biases full-reroll only
+  u8 reserved[3];    // pad — keep header 12B aligned to follow the loop
+  u8 loop[SEQ_GENERATOR_LOOP_LEN];        // Turing loop array — pitch per step
+  u8 locks[SEQ_GENERATOR_LOCKS_BYTES];    // bitmap; bit set => step locked
 } seq_generator_t;
+
+
+// Lock bitmap helpers — small, inlinable, kept here so callers don't
+// reach into locks[] directly.
+static inline u8 SEQ_GENERATOR_LockGet(const seq_generator_t *g, u8 step)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return 0;
+  return (g->locks[step >> 3] >> (step & 7)) & 1;
+}
+
+static inline void SEQ_GENERATOR_LockSet(seq_generator_t *g, u8 step, u8 on)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return;
+  if( on ) g->locks[step >> 3] |=  (1 << (step & 7));
+  else     g->locks[step >> 3] &= ~(1 << (step & 7));
+}
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -121,13 +173,27 @@ extern s32 SEQ_GENERATOR_Undo(void);
 extern s32 SEQ_GENERATOR_IsEngaged(u8 track, u8 instrument);
 
 // Returns the slot for (track, instrument) or NULL. Callers may mutate
-// range_min/range_max/mutation_rate directly — these are live dials.
+// range_min/range_max/mutation_rate/mutation_depth/contour_shape directly —
+// these are live dials.
 extern seq_generator_t *SEQ_GENERATOR_Get(u8 track, u8 instrument);
 
 // Force a one-shot reroll + rewrite for every engaged generator on `track`,
 // outside the normal measure-boundary cadence. Used at ENGAGE to make the
 // generator audible without waiting for the next wrap.
 extern void SEQ_GENERATOR_ForceRewrite(u8 track);
+
+// Phase G ROLL gesture: for every engaged generator on `track`, reroll every
+// *unlocked* step in its loop (locked steps preserved verbatim) and rewrite
+// the source par-layer. Independent of measure-boundary cadence and of the
+// rate dial — this is the on-demand reroll button. Honors contour_shape.
+// Returns the number of generators rolled (0 if none engaged on track).
+extern u8 SEQ_GENERATOR_Roll(u8 track);
+
+// Phase G per-step LOCK toggle. Returns the new lock state (0/1) on success
+// or -1 if no allocated slot exists for (track, instrument) or step out of
+// range. Locks survive both perturb and reroll; they're cleared when the slot
+// is freed (BOUNCE-in-place, relocate, or pool re-init).
+extern s32 SEQ_GENERATOR_LockToggle(u8 track, u8 instrument, u8 step);
 
 // Tick prologue hook. Call BEFORE SEQ_CORE_RenderTracks() each tick: if a
 // track just wrapped to step 0, mutate every engaged generator on that track
