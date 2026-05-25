@@ -28,6 +28,8 @@ from .sysex import (
     CMD_PLAY_SECTION_GET,
     CMD_PLAY_SECTION_SET,
     CMD_RESET_STATE,
+    CMD_SESSION_LOAD,
+    CMD_SESSION_NAME_GET,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -35,6 +37,8 @@ from .sysex import (
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
     RESET_DEFAULT,
+    SESSION_NAME_MAX_LEN,
+    SESSION_STATUS_NAME_TOO_LONG,
     frame,
     parse_reply,
     unpack7,
@@ -564,6 +568,61 @@ class Board:
         if payload[4] != CMD_STATUS_OK:
             raise RuntimeError(f"PATTERN_LOAD dispatch status {payload[4]:#04x}")
         return payload[3] == CMD_STATUS_OK
+
+    def session_name_get(self, timeout: float = 1.0) -> str:
+        """Return the currently-active session name (e.g. "DEFAULT", "AUTO_TEST")."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SESSION_NAME_GET))
+        payload = self.wait_for_sysex(CMD_SESSION_NAME_GET, timeout=timeout, since=since)
+        if len(payload) < 1:
+            raise RuntimeError(f"short SESSION_NAME_GET reply: {payload!r}")
+        nlen = payload[0]
+        if 1 + nlen > len(payload):
+            raise RuntimeError(
+                f"SESSION_NAME_GET reply truncated: name_len={nlen}, payload={payload!r}"
+            )
+        return payload[1 : 1 + nlen].decode("ascii", errors="replace")
+
+    def session_load(self, name: str, timeout: float = 8.0) -> str:
+        """Switch the active session by name. Mirrors the SAVE/SESSIONS menu flow.
+
+        The load chain reads B/M/S/G/BM/C across all banks for the named session,
+        so it's significantly slower than `pattern_load` — 8s default timeout.
+
+        Returns the active session name AFTER the call (which will be `name` on
+        success, or the previous name if the load failed and was rolled back).
+        Raises RuntimeError on dispatch error (empty / too-long name) and
+        RuntimeError on load failure so tests don't silently inherit the wrong
+        session.
+        """
+        if not 1 <= len(name) <= SESSION_NAME_MAX_LEN:
+            raise ValueError(
+                f"session name must be 1..{SESSION_NAME_MAX_LEN} chars, got {len(name)!r}"
+            )
+        if not all(0x20 <= ord(c) < 0x80 for c in name):
+            raise ValueError(f"session name must be 7-bit ASCII: {name!r}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SESSION_LOAD, name.encode("ascii")))
+        payload = self.wait_for_sysex(CMD_SESSION_LOAD, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short SESSION_LOAD reply: {payload!r}")
+        load_ok, dispatch_status, nlen = payload[0], payload[1], payload[2]
+        if 3 + nlen > len(payload):
+            raise RuntimeError(
+                f"SESSION_LOAD reply truncated: name_len={nlen}, payload={payload!r}"
+            )
+        active_name = payload[3 : 3 + nlen].decode("ascii", errors="replace")
+        if dispatch_status == SESSION_STATUS_NAME_TOO_LONG:
+            raise RuntimeError(f"SESSION_LOAD rejected name as too long: {name!r}")
+        if dispatch_status != CMD_STATUS_OK:
+            raise RuntimeError(
+                f"SESSION_LOAD dispatch status {dispatch_status:#04x} (name={name!r}, active={active_name!r})"
+            )
+        if load_ok != CMD_STATUS_OK:
+            raise RuntimeError(
+                f"SESSION_LOAD failed for {name!r}; firmware rolled back to {active_name!r}"
+            )
+        return active_name
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:
         """Read the current 2x80 LCD buffer from the firmware."""

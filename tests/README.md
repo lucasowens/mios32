@@ -33,9 +33,19 @@ tests/
 ├── harness/
 │   ├── board.py            # USB MIDI connection + SysEx round-trip
 │   └── sysex.py            # wire-format constants (mirror seq_testctrl.c)
+├── fixtures/AUTOTEST/
+│   └── CONTENTS.md         # contract for the dedicated test session on SD
 └── apps/seq_v4/
     └── test_smoke.py       # PING smoke test
 ```
+
+## Test session
+
+Tests that rely on specific pattern content (anything past the smoke layer)
+expect a dedicated `AUTOTEST` session on the device's SD card. See
+[`fixtures/AUTOTEST/CONTENTS.md`](fixtures/AUTOTEST/CONTENTS.md) for the
+contract and build steps. The session is opt-in via `TEST_SESSION_NAME` in
+`conftest.py` — leave it `None` to run the suite against your live session.
 
 ## Adding a command
 

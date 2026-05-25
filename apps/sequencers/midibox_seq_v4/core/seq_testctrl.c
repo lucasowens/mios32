@@ -9,6 +9,7 @@
 // other's bytes. The trailing 'OT' (0x4F 0x54) is the harness vendor tag.
 
 #include <mios32.h>
+#include <string.h>
 #include <seq_bpm.h>
 #include "tasks.h"
 #include "seq_testctrl.h"
@@ -21,6 +22,7 @@
 #include "seq_midi_port.h"
 #include "seq_capture.h"
 #include "seq_pattern.h"
+#include "seq_file.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -43,6 +45,8 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_PLAY_SECTION_SET  0x53
 #define CMD_BOUNCE            0x54
 #define CMD_PATTERN_LOAD      0x55
+#define CMD_SESSION_LOAD      0x56
+#define CMD_SESSION_NAME_GET  0x57
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -276,6 +280,10 @@ static void cmd_encoder(mios32_midi_port_t port, const u8 *payload, u8 plen)
 //   flags bit 2: reset UI track selection to G1T1 (group=0, tracks bitmask=1)
 //   flags bit 3: unmute all tracks + clear port mutes + clear solo + clear slaveclk mute
 //   flags bit 4: clear robotize state (ACTIVE/MASK1/MASK2) on all 16 tracks
+//   flags bit 5: mute tracks 1-15 (leave track 0 unmuted). For single-track
+//                tests so other tracks' patterns don't pollute the capture.
+//                Applied AFTER bit 3 if both set, so the final state is "only
+//                track 0 unmuted".
 // Reply payload: [flags] echoed back, then status 0x01.
 //
 // Deliberately does NOT clear pattern data — tests that need an empty pattern
@@ -312,6 +320,14 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
       SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_MASK1, 0);
       SEQ_CC_Set(t, SEQ_CC_ROBOTIZE_MASK2, 0);
     }
+  }
+
+  if( flags & 0x20 ) {
+    // Mute everything but track 0. Without this, tracks 1-15 fire their
+    // (possibly populated) patterns alongside the track-under-test and
+    // pollute the harness's note capture. Applied AFTER 0x08's clear so
+    // the final state is "only track 0 unmuted".
+    seq_core_trk_muted = 0xFFFE;
   }
 
   u8 reply[2] = { flags, 0x01 };
@@ -602,6 +618,77 @@ static void cmd_pattern_load(mios32_midi_port_t port, const u8 *payload, u8 plen
 }
 
 
+// CMD_SESSION_LOAD payload: [name_bytes...]   (1..12 ASCII chars, all 7-bit)
+// Reply payload: [load_ok, dispatch_status, name_len, name_bytes...]
+//   dispatch_status 0x01 = ok, 0x02 = empty payload, 0x03 = name too long.
+//   load_ok 0x01 = SEQ_FILE_LoadAllFiles succeeded; 0x00 = load failed and the
+//   previous session name was restored (matching OpenSession() in seq_ui_menu.c).
+// The active session name AFTER the call is always echoed so the harness can
+// verify state regardless of success or failure.
+//
+// Synchronous: the load chain reads B/M/S/G/BM/C across all banks for the new
+// session. SD I/O can take several seconds; harness must use a generous timeout.
+static void cmd_session_load(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 load_ok = 0x00;
+  u8 dispatch_status = 0x02;  // empty payload by default
+
+  if( plen >= 1 && plen <= 12 ) {
+    char prev_name[13];
+    strcpy(prev_name, seq_file_session_name);
+
+    for(u32 i=0; i<plen; ++i)
+      seq_file_session_name[i] = payload[i] & 0x7f;
+    seq_file_session_name[plen] = 0;
+
+    MUTEX_SDCARD_TAKE;
+    s32 status = SEQ_FILE_LoadAllFiles(0); // excluding HW config
+    MUTEX_SDCARD_GIVE;
+
+    if( status < 0 ) {
+      strcpy(seq_file_session_name, prev_name);
+      load_ok = 0x00;
+    } else {
+      MUTEX_SDCARD_TAKE;
+      SEQ_FILE_StoreSessionName();
+      MUTEX_SDCARD_GIVE;
+      load_ok = 0x01;
+    }
+    dispatch_status = 0x01;
+  } else if( plen > 12 ) {
+    dispatch_status = 0x03;
+  }
+
+  u32 nlen = strlen(seq_file_session_name);
+  if( nlen > 12 ) nlen = 12;
+
+  u8 reply[16];
+  u32 rlen = 0;
+  reply[rlen++] = load_ok;
+  reply[rlen++] = dispatch_status;
+  reply[rlen++] = (u8)nlen;
+  for(u32 i=0; i<nlen; ++i)
+    reply[rlen++] = seq_file_session_name[i] & 0x7f;
+
+  send_reply(port, CMD_SESSION_LOAD, reply, rlen);
+}
+
+
+// CMD_SESSION_NAME_GET: no payload.
+// Reply payload: [name_len, name_bytes...]
+static void cmd_session_name_get(mios32_midi_port_t port)
+{
+  u32 nlen = strlen(seq_file_session_name);
+  if( nlen > 12 ) nlen = 12;
+
+  u8 reply[14];
+  reply[0] = (u8)nlen;
+  for(u32 i=0; i<nlen; ++i)
+    reply[1+i] = seq_file_session_name[i] & 0x7f;
+  send_reply(port, CMD_SESSION_NAME_GET, reply, 1 + nlen);
+}
+
+
 // CMD_LCD_SNAPSHOT: no payload.
 // Reply payload: [lines, columns, packed_bytes...]
 // Bit 7 of each lcd_buffer byte is MBSEQ's internal "already-rendered to the
@@ -739,6 +826,12 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_PATTERN_LOAD:
             cmd_pattern_load(port, payload_buf, payload_len);
+            break;
+          case CMD_SESSION_LOAD:
+            cmd_session_load(port, payload_buf, payload_len);
+            break;
+          case CMD_SESSION_NAME_GET:
+            cmd_session_name_get(port);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

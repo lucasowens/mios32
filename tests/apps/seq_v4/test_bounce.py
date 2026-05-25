@@ -26,6 +26,7 @@ import time
 import pytest
 
 from harness import Button, CC, Encoder, MidiPort, Page
+from harness.sysex import RESET_UNMUTE_ALL
 
 # Slot we overwrite on every bounce. Bank 0, pattern 63 (the last slot in
 # bank A in MBSEQ's default layout). Keep this consistent across all tests
@@ -48,8 +49,11 @@ def _setup_track0_with_triggers(board):
     """Configure track 0 to USB1 and arm every step via Euclidean(16, 16).
 
     Mirrors the setup used in test_robotize.py so the bounce tests share the
-    same "every step plays" baseline.
+    same "every step plays" baseline. Bounce tests verify destination playback
+    on track 4 (group 1), so we opt out of the default RESET_MUTE_NON_T0 by
+    re-running reset with UNMUTE_ALL so tracks 1-15 are available too.
     """
+    board.reset(RESET_UNMUTE_ALL)
     board.track_config(track=0, midi_port=MidiPort.USB0, channel=0)
     board.page_set(Page.TRKEUCLID)
     time.sleep(0.1)

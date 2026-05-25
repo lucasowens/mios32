@@ -23,6 +23,8 @@ CMD_PLAY_SECTION_GET = 0x52
 CMD_PLAY_SECTION_SET = 0x53
 CMD_BOUNCE = 0x54
 CMD_PATTERN_LOAD = 0x55
+CMD_SESSION_LOAD = 0x56
+CMD_SESSION_NAME_GET = 0x57
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.
@@ -75,12 +77,14 @@ RESET_PAGE_TO_EDIT = 0x02
 RESET_TRACK_SELECTION = 0x04
 RESET_UNMUTE_ALL = 0x08
 RESET_CLEAR_ROBOTIZE = 0x10
+RESET_MUTE_NON_T0 = 0x20  # mute tracks 1-15; applied after UNMUTE_ALL
 RESET_DEFAULT = (
     RESET_STOP_TRANSPORT
     | RESET_PAGE_TO_EDIT
     | RESET_TRACK_SELECTION
     | RESET_UNMUTE_ALL
     | RESET_CLEAR_ROBOTIZE
+    | RESET_MUTE_NON_T0
 )
 
 
@@ -133,6 +137,12 @@ CMD_STATUS_OK = 0x01
 CMD_STATUS_BAD_PAYLOAD = 0x02
 CMD_STATUS_INVALID_TRACK = 0x03
 CMD_STATUS_UNMAPPED_CC = 0x04
+
+# CMD_SESSION_LOAD dispatch_status values (in addition to OK/BAD_PAYLOAD).
+SESSION_STATUS_NAME_TOO_LONG = 0x03
+
+# Session name length cap (mirror of seq_file_session_name[13] — 12 chars + null).
+SESSION_NAME_MAX_LEN = 12
 
 
 # CC indices (mirror of seq_cc.h). Only the ones the tests actually touch are
