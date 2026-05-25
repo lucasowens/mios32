@@ -224,12 +224,18 @@ typedef enum {
 } seq_core_loop_mode_t;
 
 
-// Processor (noun, §3). Phase B scaffolding: per-track 4-slot stack,
-// zero-initialized. Empty slots (id == SEQ_PROCESSOR_ID_NONE) are skipped
-// during render, so behavior matches phase A's identity copy. Phase C wires
-// the first real processor (chord_mask) into the dispatch.
+// Processor (noun, §3). Per-track 4-slot stack, zero-initialized. Empty slots
+// (id == SEQ_PROCESSOR_ID_NONE) are skipped during render. SEQ_CORE_RenderTrack
+// dispatches via switch(p->id).
+//
+// Phase C: chord_mask is the first real processor. It rewrites note-bearing
+// bytes in the output par buffer to snap toward the bus's currently-held
+// chord (PC-set). Because its input includes a live signal (bus chord), the
+// renderer dirties any track carrying an enabled chord_mask slot at the top
+// of every tick — see SEQ_CORE_RenderTracks.
 typedef enum {
-  SEQ_PROCESSOR_ID_NONE = 0,
+  SEQ_PROCESSOR_ID_NONE       = 0,
+  SEQ_PROCESSOR_ID_CHORD_MASK = 1,
 } seq_processor_id_t;
 
 typedef struct {
@@ -349,5 +355,9 @@ extern void SEQ_CORE_RenderDirtySet(u8 track);
 extern void SEQ_CORE_RenderDirtySetAll(void);
 extern void SEQ_CORE_RenderTrack(u8 track);
 extern void SEQ_CORE_RenderTracks(void);
+
+// Phase C bridge: keep slot 0 mirrored from tcc (playmode + strength + bus)
+// whenever the underlying CCs change. Called from SEQ_CC_Set.
+extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
 
 #endif /* _SEQ_CORE_H */

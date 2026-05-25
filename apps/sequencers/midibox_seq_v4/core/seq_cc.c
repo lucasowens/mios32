@@ -293,7 +293,10 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       SEQ_CC_LinkUpdate(track);
   } else {
     switch( cc ) {
-      case SEQ_CC_MODE: tcc->playmode = value; break;
+      case SEQ_CC_MODE:
+	tcc->playmode = value;
+	SEQ_CORE_ChordMaskSlotSync(track); // ChordMask ↔ slot 0 (phase C bridge)
+	break;
       case SEQ_CC_MODE_FLAGS: tcc->trkmode_flags.ALL = value; break;
   
       case SEQ_CC_MIDI_EVENT_MODE: 
@@ -312,7 +315,10 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_FX_MIDI_CHANNEL: tcc->fx_midi_chn = value; break;
       case SEQ_CC_FX_MIDI_NUM_CHANNELS: tcc->fx_midi_num_chn = value; break;
 
-      case SEQ_CC_BUSASG: tcc->busasg.bus = value; break;
+      case SEQ_CC_BUSASG:
+	tcc->busasg.bus = value;
+	SEQ_CORE_ChordMaskSlotSync(track); // bus follows tcc when ChordMask active
+	break;
 
       case SEQ_CC_LIMIT_LOWER: tcc->limit_lower = value; break;
       case SEQ_CC_LIMIT_UPPER: tcc->limit_upper = value; break;
@@ -421,7 +427,10 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	break;
       case SEQ_CC_ROBOTIZE_LOOP_START:  tcc->robotize_loop_start  = value & 0x0f; break;
       case SEQ_CC_ROBOTIZE_LOOP_ROTATE: tcc->robotize_loop_rotate = value & 0x0f; break;
-      case SEQ_CC_CHORDMASK_STRENGTH:   tcc->chordmask_strength   = value & 0x7f; break;
+      case SEQ_CC_CHORDMASK_STRENGTH:
+	tcc->chordmask_strength = value & 0x7f;
+	SEQ_CORE_ChordMaskSlotSync(track); // strength follows tcc when ChordMask active
+	break;
 
       default:
 	portEXIT_CRITICAL();

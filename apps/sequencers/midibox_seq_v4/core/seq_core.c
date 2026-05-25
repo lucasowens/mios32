@@ -350,6 +350,79 @@ void SEQ_CORE_RenderDirtySetAll(void)
   }
 }
 
+// Snap `note` to the nearest semitone whose pitch-class is set in `pc_mask`,
+// searching outward from d=0; on a tie (down and up both in mask at the same
+// distance) the lower side wins because it is checked first. Returns `note`
+// unchanged if no PC is reachable within 6 semitones (cannot happen when
+// pc_mask != 0, since every note has some PC ≤6 away).
+static u8 chord_mask_snap(u8 note, u16 pc_mask)
+{
+  int d;
+  for(d=0; d<=6; ++d) {
+    int down = (int)note - d;
+    if( down >= 0 && (pc_mask & (1 << (down % 12))) )
+      return (u8)down;
+    int up = (int)note + d;
+    if( up <= 127 && (pc_mask & (1 << (up % 12))) )
+      return (u8)up;
+  }
+  return note;
+}
+
+// chord_mask processor (§8 step 4, §3 spine). Rewrites note-bearing bytes in
+// the output par buffer to snap toward the bus's currently-held chord
+// (PC-set). Algorithm matches the pre-spine SEQ_CORE_Transpose ChordMask
+// branch (removed in phase C): probabilistic gate at p->strength, nearest-PC
+// search outward, lower wins on tie. 0-valued bytes are skipped — for drums
+// this preserves the "fall back to lay_const" idiom (§9 drum-Note-layer);
+// for normal tracks it avoids inventing pitch on empty steps.
+static void chord_mask_render(u8 track, const seq_processor_slot_t *p)
+{
+  if( !p->strength )
+    return;
+  u16 pc_mask = SEQ_MIDI_IN_BusPCSetGet(p->bus);
+  if( !pc_mask )
+    return;
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  u8 num_p_layers      = SEQ_PAR_NumLayersGet(track);
+  u16 num_p_steps      = SEQ_PAR_NumStepsGet(track);
+  u8 num_p_instruments = SEQ_PAR_NumInstrumentsGet(track);
+
+  if( tcc->event_mode == SEQ_EVENT_MODE_Drum ) {
+    s8 nl = tcc->link_par_layer_note;
+    if( nl < 0 )
+      return;
+    u8 drum;
+    for(drum=0; drum<num_p_instruments; ++drum) {
+      u8 *base = &seq_par_output_value[track][(u32)drum*num_p_layers*num_p_steps + (u32)nl*num_p_steps];
+      u16 step;
+      for(step=0; step<num_p_steps; ++step) {
+        u8 note = base[step];
+        if( !note )
+          continue;
+        if( (u32)SEQ_RANDOM_Gen_Range(0, 126) < p->strength )
+          base[step] = chord_mask_snap(note, pc_mask);
+      }
+    }
+  } else {
+    u8 par_layer;
+    for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
+      if( tcc->lay_const[par_layer] != SEQ_PAR_Type_Note )
+        continue;
+      u8 *base = &seq_par_output_value[track][(u32)par_layer*num_p_steps];
+      u16 step;
+      for(step=0; step<num_p_steps; ++step) {
+        u8 note = base[step];
+        if( !note )
+          continue;
+        if( (u32)SEQ_RANDOM_Gen_Range(0, 126) < p->strength )
+          base[step] = chord_mask_snap(note, pc_mask);
+      }
+    }
+  }
+}
+
 void SEQ_CORE_RenderTrack(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
@@ -359,24 +432,68 @@ void SEQ_CORE_RenderTrack(u8 track)
   memcpy(seq_par_output_value[track], seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
   memcpy(seq_trg_output_value[track], seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
 
-  // Phase B: iterate processor stack, output buffer is the substrate. Empty
-  // in phase B → every iteration skips and the function returns identity
-  // behavior. Phase C replaces the continue with an id-dispatch.
+  // Iterate processor stack: each enabled slot mutates the output buffer.
+  // Empty/disabled slots short-circuit; ordering within a track is slot index.
   u8 slot;
   for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
     const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
     if( p->id == SEQ_PROCESSOR_ID_NONE || !p->enabled )
       continue;
-    // Phase C: switch(p->id) { case SEQ_PROCESSOR_ID_CHORD_MASK: ... }
+    switch( p->id ) {
+      case SEQ_PROCESSOR_ID_CHORD_MASK:
+        chord_mask_render(track, p);
+        break;
+      default:
+        break;
+    }
   }
 
   seq_render_dirty[track] = 0;
+}
+
+// Phase C bridge: the TRKMODE_ChordMask playmode + CHORDMASK_STRENGTH +
+// BUSASG CCs remain the persistent storage (v2 pattern format unchanged) and
+// the user-facing controls (§9 known-musical shipping UX). This helper keeps
+// slot 0 mirrored from tcc whenever the relevant fields change — so the
+// renderer reads slot params, while the UI/CC layer keeps writing tcc as
+// before. When chord_mask is the only processor a track carries, slot 0 is
+// the conventional home; the proper allocator arrives with phase E.
+void SEQ_CORE_ChordMaskSlotSync(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][0];
+
+  if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask ) {
+    slot->id       = SEQ_PROCESSOR_ID_CHORD_MASK;
+    slot->enabled  = 1;
+    slot->strength = tcc->chordmask_strength;
+    slot->bus      = tcc->busasg.bus;
+  } else if( slot->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
+    slot->id       = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled  = 0;
+    slot->strength = 0;
+    slot->bus      = 0;
+  }
 }
 
 void SEQ_CORE_RenderTracks(void)
 {
   u8 track;
   for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+    // chord_mask depends on a live bus PC-set, not just source state — force
+    // a re-render every tick on any track carrying an enabled chord_mask
+    // slot, so the next emitted note reflects the current held chord. Phase D
+    // will optimize via sweep/quiet detection.
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+      const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+      if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled ) {
+        seq_render_dirty[track] = 1;
+        break;
+      }
+    }
     if( seq_render_dirty[track] )
       SEQ_CORE_RenderTrack(track);
   }
@@ -2114,28 +2231,10 @@ s32 SEQ_CORE_Transpose(u8 track, u8 instrument, seq_core_trk_t *t, seq_cc_trk_t 
       return -1; // note has been disabled
     }
   } else if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask ) {
-    // §6 chord-context playmode: snap note to nearest PC in the bus's
-    // currently-held chord, probabilistically per chordmask_strength.
-    // is_cc events bypass entirely (no pitch to snap).
-    if( !is_cc && tcc->chordmask_strength ) {
-      u16 pc_mask = SEQ_MIDI_IN_BusPCSetGet(tcc->busasg.bus);
-      if( pc_mask ) {
-        // probabilistic snap: 0 = always pass-through, 127 = always snap
-        if( (u32)SEQ_RANDOM_Gen_Range(0, 126) < tcc->chordmask_strength ) {
-          // find nearest semitone whose PC is in the mask (search outward
-          // from the current note; tie-breaker: lower wins).
-          int snapped = note;
-          int d;
-          for(d=0; d<=6; ++d) {
-            int down = note - d;
-            if( down >= 0 && (pc_mask & (1 << (down % 12))) ) { snapped = down; break; }
-            int up = note + d;
-            if( up <= 127 && (pc_mask & (1 << (up % 12))) ) { snapped = up;   break; }
-          }
-          note = snapped;
-        }
-      }
-    }
+    // §6 chord-context playmode. Phase C: the snap logic migrated to the
+    // chord_mask processor (see chord_mask_render). The TRKMODE picker +
+    // CHORDMASK_STRENGTH CC act as a UX shortcut that populates a processor
+    // slot via the SEQ_CC_Set bridge; nothing to do here.
   } else {
     // neither transpose nor arpeggiator mode: transpose based on root note if specified in parameter layer
     // TK: I think that this was a wrong assumption - we don't want to transpose, but we want to define the root note via SEQ_CORE_GetScaleAndRoot
