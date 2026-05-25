@@ -107,6 +107,7 @@ static const seq_ui_page_entry_t ui_menu_pages[SEQ_UI_PAGES] = {
   { "REMIX",        "Remix", "Pattern Remix     ", 54, (void *)&SEQ_UI_PATTERN_RMX_Init },
   { "BOOKMARKS",    "BookM", "Bookmarks         ", 51, (void *)&SEQ_UI_BOOKMARKS_Init },
   { "ABOUT",        "About", "About this MIDIbox", 52, (void *)&SEQ_UI_INFO_Init },
+  { "PITCHGEN",     "Pitch", "Pitch Gen (POC)   ", 59, (void *)&SEQ_UI_TRKPITCHGEN_Init },
 };
 
 

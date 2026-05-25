@@ -399,6 +399,7 @@ extern s32 SEQ_UI_TRKLIVE_Init(u32 mode);
 extern s32 SEQ_UI_TRKREPEAT_Init(u32 mode);
 extern s32 SEQ_UI_PATTERN_RMX_Init(u32 mode);
 extern s32 SEQ_UI_TRKEUCLID_Init(u32 mode);
+extern s32 SEQ_UI_TRKPITCHGEN_Init(u32 mode);
 
 
 extern s32 SEQ_UI_EDIT_LED_Handler(u16 *gp_leds);
