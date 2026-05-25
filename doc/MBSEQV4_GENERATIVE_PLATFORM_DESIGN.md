@@ -501,8 +501,7 @@ not running in the background. Reconstructed continuity, not literal concurrency
 ## 7. Current fork state (POC inventory: reusable vs disposable)
 
 Built in a few-day sprint. All **disposable** (§2.1) — but several pieces are
-conceptually load-bearing. Commits are authored "Michael Friedrich" (verify before
-public-facing use).
+conceptually load-bearing.
 
 ### Conceptually load-bearing (ideas survive; code may not)
 - **ROBOLOOP page** (shipped): reseed / freeze / freeze-q / reroll / master-sync,
