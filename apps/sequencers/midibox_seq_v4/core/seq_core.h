@@ -126,7 +126,8 @@ typedef enum {
   SEQ_CORE_TRKMODE_Off,
   SEQ_CORE_TRKMODE_Normal,
   SEQ_CORE_TRKMODE_Transpose,
-  SEQ_CORE_TRKMODE_Arpeggiator
+  SEQ_CORE_TRKMODE_Arpeggiator,
+  SEQ_CORE_TRKMODE_ChordMask
 } seq_core_trk_playmode_t;
 
 typedef union {

@@ -113,6 +113,7 @@ extern s32 SEQ_MIDI_IN_BusReceive(u8 bus, mios32_midi_package_t midi_package, u8
 
 extern s32 SEQ_MIDI_IN_TransposerNoteGet(u8 bus, u8 hold, u8 first_note);
 extern s32 SEQ_MIDI_IN_ArpNoteGet(u8 bus, u8 hold, u8 sorted, u8 key_num);
+extern u16 SEQ_MIDI_IN_BusPCSetGet(u8 bus);
 
 /////////////////////////////////////////////////////////////////////////////
 // Export global variables

@@ -19,23 +19,25 @@
 #include "seq_lcd.h"
 #include "seq_ui.h"
 #include "seq_cc.h"
+#include "seq_core.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
 // Local definitions
 /////////////////////////////////////////////////////////////////////////////
 
-#define NUM_OF_ITEMS       10
-#define ITEM_GXTY          0
-#define ITEM_MODE          1
-#define ITEM_BUS           2
-#define ITEM_FIRST_NOTE    3
-#define ITEM_HOLD          4
-#define ITEM_SORT          5
-#define ITEM_RESTART       6
-#define ITEM_STEP_TRG      7
-#define ITEM_FORCE_SCALE   8
-#define ITEM_SUSTAIN       9
+#define NUM_OF_ITEMS         11
+#define ITEM_GXTY            0
+#define ITEM_MODE            1
+#define ITEM_BUS             2
+#define ITEM_FIRST_NOTE      3
+#define ITEM_HOLD            4
+#define ITEM_SORT            5
+#define ITEM_RESTART         6
+#define ITEM_STEP_TRG        7
+#define ITEM_FORCE_SCALE     8
+#define ITEM_SUSTAIN         9
+#define ITEM_CHORDMASK_STR  10
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -61,6 +63,7 @@ static s32 LED_Handler(u16 *gp_leds)
     case ITEM_STEP_TRG:    *gp_leds = 0x1000; break;
     case ITEM_FORCE_SCALE: *gp_leds = 0x2000; break;
     case ITEM_SUSTAIN:     *gp_leds = 0xc000; break;
+    case ITEM_CHORDMASK_STR: *gp_leds = 0x0040; break; // GP7
   }
 
   return 0; // no error
@@ -87,13 +90,14 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
     case SEQ_UI_ENCODER_GP3:
     case SEQ_UI_ENCODER_GP4:
     case SEQ_UI_ENCODER_GP5:
+    case SEQ_UI_ENCODER_GP6:
       ui_selected_item = ITEM_MODE;
       SEQ_UI_CC_Set(SEQ_CC_MODE, encoder-1);
       return 1;
 
-    case SEQ_UI_ENCODER_GP6:
     case SEQ_UI_ENCODER_GP7:
-      return -1; // not mapped
+      ui_selected_item = ITEM_CHORDMASK_STR;
+      break;
 
     case SEQ_UI_ENCODER_GP8:
       ui_selected_item = ITEM_BUS;
@@ -135,7 +139,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       return SEQ_UI_GxTyInc(incrementer);
 
     case ITEM_MODE:
-      return SEQ_UI_CC_Inc(SEQ_CC_MODE, 0, 3, incrementer);
+      return SEQ_UI_CC_Inc(SEQ_CC_MODE, 0, 4, incrementer);
 
     case ITEM_BUS:
       return SEQ_UI_CC_Inc(SEQ_CC_BUSASG, 0, 3, incrementer);
@@ -174,6 +178,9 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       if( !incrementer ) // toggle flag
 	incrementer = (SEQ_CC_Get(visible_track, SEQ_CC_MODE_FLAGS) & (1<<4)) ? -1 : 1;
       return SEQ_UI_CC_SetFlags(SEQ_CC_MODE_FLAGS, (1<<4), (incrementer >= 0) ? (1<<4) : 0);
+
+    case ITEM_CHORDMASK_STR:
+      return SEQ_UI_CC_Inc(SEQ_CC_CHORDMASK_STRENGTH, 0, 127, incrementer);
   }
 
   return -1; // invalid or unsupported encoder
@@ -252,15 +259,16 @@ static s32 LCD_Handler(u8 high_prio)
   }
 
   ///////////////////////////////////////////////////////////////////////////
-  const char mode_names[7][14] = {
+  const char mode_names[5][14] = {
     ">off<        ",
     ">Normal<     ",
     ">Transpose<  ",
-    ">Arpeggiator<"
+    ">Arpeggiator<",
+    ">ChordMask<  "
   };
   int i;
   int selected_mode = SEQ_CC_Get(visible_track, SEQ_CC_MODE);
-  for(i=0; i<4; ++i) {
+  for(i=0; i<5; ++i) {
     u8 x = 4 + 5*i;
     SEQ_LCD_CursorSet(x, i%2);
 
@@ -286,10 +294,29 @@ static s32 LCD_Handler(u8 high_prio)
   }
 
   // additional spaces to fill LCD (avoids artefacts on page switches)
-  SEQ_LCD_CursorSet(25, 0);
-  SEQ_LCD_PrintSpaces(15);
+  // ChordMask name (mode 4) prints at x=24-34 on row 0 — don't overwrite it
+  SEQ_LCD_CursorSet(35, 0);
+  SEQ_LCD_PrintSpaces(5);
   SEQ_LCD_CursorSet(32, 1);
   SEQ_LCD_PrintSpaces(8);
+
+  // ChordMask strength overlay: when ChordMask is the active mode (or the
+  // user is editing strength), repurpose the ChordMask tile area on rows 0/1
+  // to show "ChMsk" + " Msk:NNN" — losing the > < highlight but gaining a
+  // visible live value. The mode-name loop just painted ChordMask, we
+  // overlay over it.
+  if( selected_mode == SEQ_CORE_TRKMODE_ChordMask ||
+      ui_selected_item == ITEM_CHORDMASK_STR ) {
+    SEQ_LCD_CursorSet(24, 0);
+    SEQ_LCD_PrintString(">ChMsk<    ");
+    SEQ_LCD_CursorSet(24, 1);
+    if( ui_selected_item == ITEM_CHORDMASK_STR && ui_cursor_flash ) {
+      SEQ_LCD_PrintSpaces(11);
+    } else {
+      SEQ_LCD_PrintFormattedString(" Msk:%3d   ",
+                                   SEQ_CC_Get(visible_track, SEQ_CC_CHORDMASK_STRENGTH));
+    }
+  }
 
   ///////////////////////////////////////////////////////////////////////////
   SEQ_LCD_CursorSet(35, 0);

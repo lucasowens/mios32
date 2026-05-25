@@ -70,6 +70,7 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->robotize_palette_length = 16;
     tcc->robotize_loop_start = 0;
     tcc->robotize_loop_rotate = 0;
+    tcc->chordmask_strength = 0;
 
     {
       u8 i;
@@ -217,6 +218,7 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->robotize_palette_length = 16;
   tcc->robotize_loop_start = 0;
   tcc->robotize_loop_rotate = 0;
+  tcc->chordmask_strength = 0;
   {
     u8 i;
     for(i=0; i<16; ++i)
@@ -419,6 +421,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	break;
       case SEQ_CC_ROBOTIZE_LOOP_START:  tcc->robotize_loop_start  = value & 0x0f; break;
       case SEQ_CC_ROBOTIZE_LOOP_ROTATE: tcc->robotize_loop_rotate = value & 0x0f; break;
+      case SEQ_CC_CHORDMASK_STRENGTH:   tcc->chordmask_strength   = value & 0x7f; break;
 
       default:
 	portEXIT_CRITICAL();
@@ -618,6 +621,7 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_ROBOTIZE_PALETTE_LENGTH: return tcc->robotize_palette_length;
     case SEQ_CC_ROBOTIZE_LOOP_START: return tcc->robotize_loop_start;
     case SEQ_CC_ROBOTIZE_LOOP_ROTATE: return tcc->robotize_loop_rotate;
+    case SEQ_CC_CHORDMASK_STRENGTH:   return tcc->chordmask_strength;
   }
 
   return -2; // invalid CC

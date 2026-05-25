@@ -201,6 +201,8 @@
 
 //reserve a few spots here for future additions to Robotize, plz.
 
+#define SEQ_CC_CHORDMASK_STRENGTH				0x96 // 0..127 — bus-chord mask probabilistic snap strength
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -290,6 +292,7 @@ typedef struct {
   u8		robotize_loop_cycles;  // 0=off, 1..16 = number of musical measures in the loop window
   u8		robotize_sync_to_master; // if non-zero, resync the loop phase to bar 0 every time the song-level master cycle wraps (synch_to_measure_req in song mode)
   u8		robotize_palette_length; // 1..16 - total active anchors in the palette
+  u8		chordmask_strength;      // 0..127 — bus-chord mask probabilistic snap strength (0 = bypass, 127 = hard lock)
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

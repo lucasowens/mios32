@@ -2005,6 +2005,29 @@ s32 SEQ_CORE_Transpose(u8 track, u8 instrument, seq_core_trk_t *t, seq_cc_trk_t 
       p->velocity = 0;
       return -1; // note has been disabled
     }
+  } else if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask ) {
+    // §6 chord-context playmode: snap note to nearest PC in the bus's
+    // currently-held chord, probabilistically per chordmask_strength.
+    // is_cc events bypass entirely (no pitch to snap).
+    if( !is_cc && tcc->chordmask_strength ) {
+      u16 pc_mask = SEQ_MIDI_IN_BusPCSetGet(tcc->busasg.bus);
+      if( pc_mask ) {
+        // probabilistic snap: 0 = always pass-through, 127 = always snap
+        if( (u32)SEQ_RANDOM_Gen_Range(0, 126) < tcc->chordmask_strength ) {
+          // find nearest semitone whose PC is in the mask (search outward
+          // from the current note; tie-breaker: lower wins).
+          int snapped = note;
+          int d;
+          for(d=0; d<=6; ++d) {
+            int down = note - d;
+            if( down >= 0 && (pc_mask & (1 << (down % 12))) ) { snapped = down; break; }
+            int up = note + d;
+            if( up <= 127 && (pc_mask & (1 << (up % 12))) ) { snapped = up;   break; }
+          }
+          note = snapped;
+        }
+      }
+    }
   } else {
     // neither transpose nor arpeggiator mode: transpose based on root note if specified in parameter layer
     // TK: I think that this was a wrong assumption - we don't want to transpose, but we want to define the root note via SEQ_CORE_GetScaleAndRoot

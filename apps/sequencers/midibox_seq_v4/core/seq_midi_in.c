@@ -1143,6 +1143,26 @@ static s32 SEQ_MIDI_IN_Receive_ExtCtrlPC(u8 value)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Returns the pitch-class set currently held on the bus's transposer stack
+// as a 12-bit mask (bit N = pitch class N present). Returns 0 if empty.
+// Used by ChordMask playmode (§6 bus chord-context); reads the unordered
+// PUSH_TOP transposer stack — order doesn't matter for a PC set.
+/////////////////////////////////////////////////////////////////////////////
+u16 SEQ_MIDI_IN_BusPCSetGet(u8 bus)
+{
+  if( bus >= SEQ_MIDI_IN_NUM_BUSSES )
+    return 0;
+
+  u16 pc_mask = 0;
+  notestack_t *n = &bus_notestack[bus][BUS_NOTESTACK_TRANSPOSER];
+  u8 i;
+  for(i=0; i<n->len; ++i)
+    pc_mask |= (1 << (n->note_items[i].note % 12));
+  return pc_mask;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Returns the note for transpose mode
 // if -1, the stack is empty
 /////////////////////////////////////////////////////////////////////////////
