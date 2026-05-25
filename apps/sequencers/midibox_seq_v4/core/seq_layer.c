@@ -367,7 +367,11 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 
     u8 drum;
     for(drum=0; drum<num_instruments; ++drum) {
-      u8 note = tcc->lay_const[0*16 + drum];
+      u8 note = 0;
+      if( tcc->link_par_layer_note >= 0 )
+	note = SEQ_PAR_Get(track, step, tcc->link_par_layer_note, drum);
+      if( !note )
+	note = tcc->lay_const[0*16 + drum];
       u8 velocity = 0;
 
       if( !insert_empty_notes && (layer_muted & (1 << drum)) )
