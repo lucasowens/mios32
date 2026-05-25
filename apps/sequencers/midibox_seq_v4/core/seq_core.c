@@ -303,15 +303,25 @@ s32 SEQ_CORE_Init(u32 mode)
 /////////////////////////////////////////////////////////////////////////////
 void SEQ_CORE_RenderDirtySet(u8 track)
 {
-  if( track < SEQ_CORE_NUM_TRACKS )
-    seq_render_dirty[track] = 1;
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_render_dirty[track] = 1;
+  // When transport is stopped no SEQ_CORE_Tick fires, so the prologue batch
+  // renderer never runs and UI reads (par/trg via SEQ_*_Get → output mirror)
+  // stay stale. Flush synchronously so edits, CLEAR, GP toggles, and file
+  // loads are immediately visible on the LCD.
+  if( !SEQ_BPM_IsRunning() )
+    SEQ_CORE_RenderTrack(track);
 }
 
 void SEQ_CORE_RenderDirtySetAll(void)
 {
   u8 track;
-  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track)
+  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
     seq_render_dirty[track] = 1;
+    if( !SEQ_BPM_IsRunning() )
+      SEQ_CORE_RenderTrack(track);
+  }
 }
 
 void SEQ_CORE_RenderTrack(u8 track)
