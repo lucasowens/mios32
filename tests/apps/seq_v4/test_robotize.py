@@ -27,6 +27,7 @@ import time
 import pytest
 
 from harness import Button, Encoder, MidiPort, Page
+from harness.sysex import CC
 
 PLAY_SECONDS = 2.0
 
@@ -80,18 +81,16 @@ def _disable_robotize(board):
 
 
 def _arm_all_robotize_steps(board):
-    """Hold SELECT, press every GP1..GP16, release SELECT.
+    """Set MASK1/MASK2 directly so every step is armed regardless of prior state.
 
-    This XOR-toggles all 16 step-mask bits. If the mask started at 0 (which the
-    `board` fixture's reset guarantees) every step is now armed for robotize.
+    The user-facing equivalent (hold SELECT, press GP1..GP16) XOR-toggles the
+    bits, which only lands at "all-on" if the masks started at 0. Patterns
+    loaded from disk often have masks set from prior edits, so we drive the
+    CCs directly. Two SysEx round-trips beats the SELECT+16x button dance for
+    speed too.
     """
-    board.button(Button.SELECT, depressed=False)
-    try:
-        for gp in range(1, 17):
-            board.press(Button.GP(gp), hold_seconds=0.005)
-    finally:
-        board.button(Button.SELECT, depressed=True)
-    time.sleep(0.1)
+    board.cc_set(track=0, cc=CC.ROBOTIZE_MASK1, value=0xFF)
+    board.cc_set(track=0, cc=CC.ROBOTIZE_MASK2, value=0xFF)
 
 
 @pytest.mark.hardware

@@ -25,6 +25,7 @@ CMD_BOUNCE = 0x54
 CMD_PATTERN_LOAD = 0x55
 CMD_SESSION_LOAD = 0x56
 CMD_SESSION_NAME_GET = 0x57
+CMD_TRG_BYTE_GET = 0x58
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.
@@ -170,6 +171,8 @@ class CC:
     ASG_GATE = 0x60
     ECHO_REPEATS = 0x70
     FX_MIDI_NUM_CHANNELS = 0x7B
+    ROBOTIZE_MASK1 = 0x80
+    ROBOTIZE_MASK2 = 0x81
     ROBOTIZE_ACTIVE = 0x82
     ROBOTIZE_LOOP_CYCLES = 0x91
 

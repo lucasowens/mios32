@@ -100,17 +100,6 @@ def test_euclidean_5_in_8(board):
     )
 
 
-@pytest.mark.xfail(
-    reason="LCD shows the polyrhythm gen wrote sparse triggers (3-of-8 doubled "
-    "to 5-6 gates per 16 steps), but playback fires a denser, partially-"
-    "doubled pattern. Confirmed orthogonal to multi-Note-layer contamination "
-    "(AUTOTEST has clean par-layer config) and to multi-track contamination "
-    "(RESET_MUTE_NON_T0 silences all but track 0). Likely a separate gate-"
-    "path source-of-truth issue between the editor (which the LCD reflects) "
-    "and the tick-fire path. Open puzzle, see "
-    "project-state-2026-05-25 memory.",
-    strict=False,
-)
 @pytest.mark.hardware
 def test_polyrhythm_3_in_8(board):
     """Polyrhythm(N=3, M=8): 3 evenly-spaced hits per 8 steps.

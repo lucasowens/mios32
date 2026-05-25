@@ -23,6 +23,7 @@
 #include "seq_capture.h"
 #include "seq_pattern.h"
 #include "seq_file.h"
+#include "seq_trg.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -47,6 +48,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_PATTERN_LOAD      0x55
 #define CMD_SESSION_LOAD      0x56
 #define CMD_SESSION_NAME_GET  0x57
+#define CMD_TRG_BYTE_GET      0x58
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -689,6 +691,68 @@ static void cmd_session_name_get(mios32_midi_port_t port)
 }
 
 
+// CMD_TRG_BYTE_GET payload: [track, trg_layer, trg_instrument, step8_start, step8_count]
+//   Reads a span of trigger bytes for diagnostic comparison. For each byte we
+//   return BOTH the source (seq_trg_layer_value) and the phase-A output mirror
+//   (seq_trg_output_value), so divergence between the two is detectable.
+// Reply payload: [track, trg_layer, trg_instrument, step8_start, step8_count, status, packed_pairs...]
+//   status 0x01 = ok, 0x02 = bad payload, 0x03 = invalid args (track/layer/instr/range).
+//   packed_pairs is pack7-encoded sequence of 2*step8_count bytes:
+//     layer_0, output_0, layer_1, output_1, ...
+//   step8_count is capped at 32 (64 raw bytes -> ~80 wire bytes after pack7).
+static void cmd_trg_byte_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6 + 96] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 5 ) {
+    send_reply(port, CMD_TRG_BYTE_GET, reply, 6);
+    return;
+  }
+  u8 track       = payload[0];
+  u8 trg_layer   = payload[1];
+  u8 trg_instr   = payload[2];
+  u8 step8_start = payload[3];
+  u8 step8_count = payload[4];
+
+  reply[0] = track;
+  reply[1] = trg_layer;
+  reply[2] = trg_instr;
+  reply[3] = step8_start;
+  reply[4] = step8_count;
+
+  if( track >= SEQ_CORE_NUM_TRACKS ||
+      step8_count == 0 || step8_count > 32 ) {
+    reply[5] = 0x03;
+    send_reply(port, CMD_TRG_BYTE_GET, reply, 6);
+    return;
+  }
+
+  u8 num_t_layers = (u8)SEQ_TRG_NumLayersGet(track);
+  u8 num_t_instr  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+  u8 num_t_step8  = (u8)(SEQ_TRG_NumStepsGet(track) / 8);
+  if( trg_layer >= num_t_layers || trg_instr >= num_t_instr ||
+      (u16)step8_start + step8_count > num_t_step8 ) {
+    reply[5] = 0x03;
+    send_reply(port, CMD_TRG_BYTE_GET, reply, 6);
+    return;
+  }
+
+  u16 base_ix = (u16)trg_instr * num_t_layers * num_t_step8
+              + (u16)trg_layer * num_t_step8
+              + step8_start;
+
+  // Build raw [layer,output] pairs, then pack7.
+  u8 raw[64];
+  for(u8 i=0; i<step8_count; ++i) {
+    raw[2*i]     = seq_trg_layer_value[track][base_ix + i];
+    raw[2*i + 1] = seq_trg_output_value[track][base_ix + i];
+  }
+
+  reply[5] = 0x01;
+  u32 w = 6 + pack7(raw, (u32)step8_count * 2, &reply[6]);
+  send_reply(port, CMD_TRG_BYTE_GET, reply, w);
+}
+
+
 // CMD_LCD_SNAPSHOT: no payload.
 // Reply payload: [lines, columns, packed_bytes...]
 // Bit 7 of each lcd_buffer byte is MBSEQ's internal "already-rendered to the
@@ -832,6 +896,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_SESSION_NAME_GET:
             cmd_session_name_get(port);
+            break;
+          case CMD_TRG_BYTE_GET:
+            cmd_trg_byte_get(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

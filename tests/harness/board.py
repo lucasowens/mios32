@@ -30,6 +30,7 @@ from .sysex import (
     CMD_RESET_STATE,
     CMD_SESSION_LOAD,
     CMD_SESSION_NAME_GET,
+    CMD_TRG_BYTE_GET,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -623,6 +624,59 @@ class Board:
                 f"SESSION_LOAD failed for {name!r}; firmware rolled back to {active_name!r}"
             )
         return active_name
+
+    def trg_byte_get(
+        self,
+        track: int,
+        trg_layer: int = 0,
+        instrument: int = 0,
+        step8_start: int = 0,
+        step8_count: int = 2,
+        timeout: float = 1.0,
+    ) -> tuple[bytes, bytes]:
+        """Read raw trigger bytes for diagnostic comparison.
+
+        Returns `(layer_bytes, output_bytes)` — both `step8_count` bytes long.
+        `layer_bytes` is the source buffer (`seq_trg_layer_value`); `output_bytes`
+        is the phase-A render-cache mirror (`seq_trg_output_value`) that the tick
+        path actually reads from. Divergence indicates a stale cache.
+
+        Each byte covers 8 steps, bit 0 = step (8*step8_start), bit 7 = step
+        (8*step8_start + 7). step8_count is capped at 32 on the firmware side.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= trg_layer <= 7:
+            raise ValueError(f"trg_layer out of range: {trg_layer}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        if not 1 <= step8_count <= 32:
+            raise ValueError(f"step8_count out of range: {step8_count}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(
+                CMD_TRG_BYTE_GET,
+                bytes([track, trg_layer, instrument, step8_start, step8_count]),
+            )
+        )
+        payload = self.wait_for_sysex(CMD_TRG_BYTE_GET, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short TRG_BYTE_GET reply: {payload!r}")
+        status = payload[5]
+        if status != CMD_STATUS_OK:
+            raise RuntimeError(
+                f"TRG_BYTE_GET status {status:#04x} for track={track} layer={trg_layer} "
+                f"instr={instrument} start={step8_start} count={step8_count}"
+            )
+        raw = unpack7(payload[6:])
+        expected = step8_count * 2
+        if len(raw) < expected:
+            raise RuntimeError(
+                f"TRG_BYTE_GET underflow: got {len(raw)} bytes, expected {expected}"
+            )
+        layer_bytes = bytes(raw[0:expected:2])
+        output_bytes = bytes(raw[1:expected:2])
+        return layer_bytes, output_bytes
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:
         """Read the current 2x80 LCD buffer from the firmware."""

@@ -50,10 +50,24 @@ def _board_session():
 
 @pytest.fixture
 def board(_board_session):
-    """Per-test board fixture: resets transport + page before each test."""
+    """Per-test board fixture: resets transport/page/mutes AND reloads AUTOTEST
+    pattern A1 so par/trg/CC layers start clean from disk every test.
+
+    Without the pattern reload, tests that mutate track CCs (bounce tests set
+    ECHO_REPEATS, STEPS_REPEAT, DIRECTION, etc.) contaminate later generator
+    tests — RESET_STATE doesn't touch CC bytes. ~100ms of SD I/O per test is
+    a cheap price for determinism.
+    """
     try:
         _board_session.reset()
     except TimeoutError:
         # Firmware doesn't support RESET_STATE (older build); proceed anyway.
         pass
+    if TEST_SESSION_NAME:
+        try:
+            _board_session.pattern_load(group=0, bank=0, pattern=0)
+        except (TimeoutError, RuntimeError):
+            # Firmware predates PATTERN_LOAD, or A1 isn't on the active session;
+            # let the test run with whatever's in RAM.
+            pass
     yield _board_session
