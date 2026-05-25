@@ -203,6 +203,11 @@
 
 #define SEQ_CC_CHORDMASK_STRENGTH				0x96 // 0..127 — bus-chord mask probabilistic snap strength
 
+// Phase G/step-7 polish: per-processor knobs, independent of tcc->busasg.bus.
+#define SEQ_CC_CHORDMASK_BUS					0x97 // 0..3 — bus the chord_mask reads PC-set from
+#define SEQ_CC_CHORDMASK_DRUM_L					0x98 // bits 0..7  = drum slots 0..7  in scope (1=on)
+#define SEQ_CC_CHORDMASK_DRUM_H					0x99 // bits 0..7  = drum slots 8..15 in scope (1=on)
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -293,6 +298,9 @@ typedef struct {
   u8		robotize_sync_to_master; // if non-zero, resync the loop phase to bar 0 every time the song-level master cycle wraps (synch_to_measure_req in song mode)
   u8		robotize_palette_length; // 1..16 - total active anchors in the palette
   u8		chordmask_strength;      // 0..127 — bus-chord mask probabilistic snap strength (0 = bypass, 127 = hard lock)
+  u8		chordmask_bus;           // 0..3 — per-processor bus the chord_mask listens to (independent of busasg.bus)
+  u8		chordmask_drum_l;        // drums 0..7 in scope (bit i = drum i, 0xFF default = all drums)
+  u8		chordmask_drum_h;        // drums 8..15 in scope (bit i = drum 8+i, 0xFF default = all drums)
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

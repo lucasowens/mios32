@@ -4,7 +4,9 @@ toward the bus's currently-held chord (PC-set).
 Setup:
 - AUTOTEST A3 (every gate lit, par-A defaults to MBSEQ note 0x3c = MIDI 60 a.k.a.
   "C-3" in MBSEQ notation) on track 0, routed to USB0 ch1 for capture.
-- Track 0 in TRKMODE_ChordMask listening on bus 1.
+- Track 0 in TRKMODE_ChordMask listening on bus 1 (via CHORDMASK_BUS, which is
+  the per-processor bus selector — independent of the track's own BUSASG since
+  the phase G/step-7 polish).
 - A D-major triad (D/F#/A) pushed into bus 1's transposer notestack via
   external Note Ons on channel 2 — firmware default `seq_midi_in_channel[1] = 2`,
   bus 0 is the record path (MODE_PLAY=1) so bus 1 is the cheapest target.
@@ -65,7 +67,9 @@ def _clear_chord(board, notes):
 
 def _configure_track_as_chordmask(board, *, strength: int):
     board.cc_set(0, CC.MODE, TRKMODE_CHORDMASK)
-    board.cc_set(0, CC.BUSASG, BUS_INDEX)
+    # Phase G/step-7 polish: the chord_mask listens on CHORDMASK_BUS, which is
+    # independent of the track's own BUSASG. Track BUSASG stays at default 0.
+    board.cc_set(0, CC.CHORDMASK_BUS, BUS_INDEX)
     board.cc_set(0, CC.CHORDMASK_STRENGTH, strength)
 
 
@@ -147,4 +151,115 @@ def test_chord_mask_zero_strength_passes_through(board):
     assert not bad, (
         f"strength=0 should pass through (expected note {SOURCE_NOTE}): "
         f"{[(round(e.timestamp - t0, 3), e.note) for e in bad[:8]]}"
+    )
+
+
+@pytest.mark.hardware
+def test_chord_mask_per_processor_bus_independent_of_busasg(board):
+    """Phase G/step-7 polish: chord_mask listens on CHORDMASK_BUS (not BUSASG).
+
+    Set track BUSASG to bus 3 (where no chord is held) and CHORDMASK_BUS to
+    bus 1 (where the D-major triad lives). If the processor still snaps to
+    {2,6,9}, it's reading CHORDMASK_BUS — the untangle is intact. A regression
+    that re-couples slot->bus to tcc->busasg.bus would see an empty PC-set on
+    bus 3 and pass through SOURCE_NOTE unchanged, failing the assertion.
+    """
+    board.pattern_load(group=0, bank=0, pattern=2)  # A3
+    board.track_config(track=0, midi_port=MidiPort.USB0, channel=0)
+
+    board.cc_set(0, CC.MODE, TRKMODE_CHORDMASK)
+    board.cc_set(0, CC.BUSASG, 3)                  # decoy: a bus with no chord
+    board.cc_set(0, CC.CHORDMASK_BUS, BUS_INDEX)   # the bus we'll push to
+    board.cc_set(0, CC.CHORDMASK_STRENGTH, 127)
+
+    _clear_chord(board, CHORD_DMAJ_NOTES)
+    _push_chord(board, CHORD_DMAJ_NOTES)
+
+    try:
+        notes, t0 = _play_and_capture(board)
+    finally:
+        _clear_chord(board, CHORD_DMAJ_NOTES)
+
+    assert len(notes) >= 4, (
+        f"expected gates from A3 to emit notes; saw {len(notes)} in {PLAY_SECONDS}s"
+    )
+
+    expected = 62  # snap derivation as in test_chord_mask_hard_lock_snaps...
+    bad = [e for e in notes if e.note != expected]
+    assert not bad, (
+        f"CHORDMASK_BUS={BUS_INDEX} (D-maj chord) should drive the snap even "
+        f"with BUSASG=3 (empty). Saw unsnapped notes: "
+        f"{[(round(e.timestamp - t0, 3), e.note) for e in bad[:8]]}"
+    )
+
+
+@pytest.mark.hardware
+def test_chord_mask_drum_scope_only_touches_selected_drums(board):
+    """Phase G/step-7 polish: chord_mask honors per-drum scope (CHORDMASK_DRUM_*).
+
+    Seed two drum slots with the same source pitch, configure chord_mask with
+    drum_mask = bit 0 only (drum 0). After a render with a held chord, drum 0's
+    output byte must be snapped (60 → 62) while drum 1's byte stays at the
+    source value — proving the renderer's drum-loop respects p->drum_mask.
+
+    Runs offline (no transport): each cc_set + drum_par_set goes through
+    SEQ_CORE_RenderDirtySet / RenderTouched, which synchronously re-renders
+    when BPM is stopped. The final SlotSync (triggered by setting MODE last)
+    fires the render that the assertions read.
+    """
+    track = 0
+
+    # Drum-mode track with par_layer 0 = Note (so chord_mask has a target layer
+    # to rewrite); 16 instrument slots — enough for the drum 0 / drum 1 split.
+    board.track_drum_init(track)
+
+    # Push the chord BEFORE arming the processor: the SlotSync's render needs
+    # the bus PC-set to already exist or it produces an identity copy.
+    _clear_chord(board, CHORD_DMAJ_NOTES)
+    _push_chord(board, CHORD_DMAJ_NOTES)
+
+    # Seed source: drum 0 step 0 = 60, drum 1 step 0 = 60. drum_par_set also
+    # marks render-dirty + syncs render, so the output mirror starts ≡ source.
+    board.track_drum_par_set(track, 0, 0, SOURCE_NOTE)
+    board.track_drum_par_set(track, 1, 0, SOURCE_NOTE)
+
+    # Configure chord_mask params first (slot still empty since MODE is Normal).
+    board.cc_set(track, CC.CHORDMASK_BUS, BUS_INDEX)
+    board.cc_set(track, CC.CHORDMASK_DRUM_L, 0x01)  # drum 0 in scope
+    board.cc_set(track, CC.CHORDMASK_DRUM_H, 0x00)  # drums 8..15 all out
+    board.cc_set(track, CC.CHORDMASK_STRENGTH, 127)
+
+    # Arm: SlotSync fires, RenderTouched marks the track touched. With BPM
+    # stopped the immediate sync render runs in *sweep regime* — a 4-step
+    # window starting at seq_core_trk[track].step. If the prior test left
+    # the position away from 0, the snap lands in a window that excludes
+    # step 0 and our par_get would miss it.
+    board.cc_set(track, CC.MODE, TRKMODE_CHORDMASK)
+
+    # Wait past SEQ_RENDER_SWEEP_MS (50ms) so the next render-dirty trigger
+    # falls into the *quiet regime* — full-buffer render, hits every step.
+    import time as _t; _t.sleep(0.12)
+
+    # Re-write the same source bytes: SEQ_PAR_Set marks render-dirty (without
+    # refreshing touched_ms), which now hits the quiet path and produces a
+    # whole-buffer snap pass.
+    board.track_drum_par_set(track, 0, 0, SOURCE_NOTE)
+    board.track_drum_par_set(track, 1, 0, SOURCE_NOTE)
+
+    try:
+        out_drum0 = board.track_drum_par_get(track, 0, 0)
+        out_drum1 = board.track_drum_par_get(track, 1, 0)
+    finally:
+        _clear_chord(board, CHORD_DMAJ_NOTES)
+        # Disarm so we leave the fixture clean for the next test.
+        board.cc_set(track, CC.MODE, TRKMODE_NORMAL)
+
+    expected_snapped = 62  # same snap derivation as the hard-lock test
+    assert out_drum0 == expected_snapped, (
+        f"drum 0 (in mask) should snap {SOURCE_NOTE} → {expected_snapped}, "
+        f"saw {out_drum0}"
+    )
+    assert out_drum1 == SOURCE_NOTE, (
+        f"drum 1 (NOT in mask) should pass {SOURCE_NOTE} through unchanged, "
+        f"saw {out_drum1}"
     )

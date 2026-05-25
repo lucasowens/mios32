@@ -71,6 +71,9 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->robotize_loop_start = 0;
     tcc->robotize_loop_rotate = 0;
     tcc->chordmask_strength = 0;
+    tcc->chordmask_bus      = 0;
+    tcc->chordmask_drum_l   = 0xFF;
+    tcc->chordmask_drum_h   = 0xFF;
 
     {
       u8 i;
@@ -219,6 +222,9 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->robotize_loop_start = 0;
   tcc->robotize_loop_rotate = 0;
   tcc->chordmask_strength = 0;
+  tcc->chordmask_bus      = 0;
+  tcc->chordmask_drum_l   = 0xFF;
+  tcc->chordmask_drum_h   = 0xFF;
   {
     u8 i;
     for(i=0; i<16; ++i)
@@ -317,7 +323,9 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 
       case SEQ_CC_BUSASG:
 	tcc->busasg.bus = value;
-	SEQ_CORE_ChordMaskSlotSync(track); // bus follows tcc when ChordMask active
+	// Phase G/step-7 polish: BUSASG no longer drives the chord_mask slot's
+	// bus — the processor reads tcc->chordmask_bus instead (independent of
+	// the track's own bus assignment).
 	break;
 
       case SEQ_CC_LIMIT_LOWER: tcc->limit_lower = value; break;
@@ -430,6 +438,18 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_CHORDMASK_STRENGTH:
 	tcc->chordmask_strength = value & 0x7f;
 	SEQ_CORE_ChordMaskSlotSync(track); // strength follows tcc when ChordMask active
+	break;
+      case SEQ_CC_CHORDMASK_BUS:
+	tcc->chordmask_bus = value & 0x03; // 4 buses (0..3)
+	SEQ_CORE_ChordMaskSlotSync(track);
+	break;
+      case SEQ_CC_CHORDMASK_DRUM_L:
+	tcc->chordmask_drum_l = value & 0xff;
+	SEQ_CORE_ChordMaskSlotSync(track);
+	break;
+      case SEQ_CC_CHORDMASK_DRUM_H:
+	tcc->chordmask_drum_h = value & 0xff;
+	SEQ_CORE_ChordMaskSlotSync(track);
 	break;
 
       default:
@@ -631,6 +651,9 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_ROBOTIZE_LOOP_START: return tcc->robotize_loop_start;
     case SEQ_CC_ROBOTIZE_LOOP_ROTATE: return tcc->robotize_loop_rotate;
     case SEQ_CC_CHORDMASK_STRENGTH:   return tcc->chordmask_strength;
+    case SEQ_CC_CHORDMASK_BUS:        return tcc->chordmask_bus;
+    case SEQ_CC_CHORDMASK_DRUM_L:     return tcc->chordmask_drum_l;
+    case SEQ_CC_CHORDMASK_DRUM_H:     return tcc->chordmask_drum_h;
   }
 
   return -2; // invalid CC

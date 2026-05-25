@@ -228,10 +228,11 @@ s32 SEQ_CORE_Init(u32 mode)
     u8 track, slot;
     for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
       for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
-        seq_processor_stack[track][slot].id       = SEQ_PROCESSOR_ID_NONE;
-        seq_processor_stack[track][slot].enabled  = 0;
-        seq_processor_stack[track][slot].strength = 0;
-        seq_processor_stack[track][slot].bus      = 0;
+        seq_processor_stack[track][slot].id        = SEQ_PROCESSOR_ID_NONE;
+        seq_processor_stack[track][slot].enabled   = 0;
+        seq_processor_stack[track][slot].strength  = 0;
+        seq_processor_stack[track][slot].bus       = 0;
+        seq_processor_stack[track][slot].drum_mask = 0xFFFF;
       }
     }
   }
@@ -449,6 +450,10 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
       return;
     u8 drum;
     for(drum=0; drum<num_p_instruments; ++drum) {
+      // Phase G/step-7 polish: drum_mask scopes which drums the processor
+      // touches. Bit i set = process drum i. Default 0xFFFF = all drums.
+      if( !(p->drum_mask & (1u << drum)) )
+        continue;
       u8 *base = &par_buf[(u32)drum*num_p_layers*num_p_steps + (u32)nl*num_p_steps];
       u16 step;
       for(step=step_lo; step<step_hi; ++step) {
@@ -593,13 +598,18 @@ void SEQ_CORE_RenderTrack(u8 track)
   seq_render_dirty[track] = 0;
 }
 
-// Phase C bridge: the TRKMODE_ChordMask playmode + CHORDMASK_STRENGTH +
-// BUSASG CCs remain the persistent storage (v2 pattern format unchanged) and
-// the user-facing controls (§9 known-musical shipping UX). This helper keeps
-// slot 0 mirrored from tcc whenever the relevant fields change — so the
-// renderer reads slot params, while the UI/CC layer keeps writing tcc as
-// before. When chord_mask is the only processor a track carries, slot 0 is
-// the conventional home; the proper allocator arrives with phase E.
+// Phase C bridge: the TRKMODE_ChordMask playmode + CHORDMASK_* CCs remain the
+// persistent storage (v2 pattern format unchanged) and the user-facing controls
+// (§9 known-musical shipping UX). This helper keeps slot 0 mirrored from tcc
+// whenever the relevant fields change — so the renderer reads slot params,
+// while the UI/CC layer keeps writing tcc as before. When chord_mask is the
+// only processor a track carries, slot 0 is the conventional home; the proper
+// allocator arrives with phase E.
+//
+// Phase G/step-7 polish: bus + drum_mask are per-processor (independent of
+// tcc->busasg.bus). Sourcing the bus from tcc->chordmask_bus untangles the
+// processor's chord-listening from the track's own bus assignment — a track
+// can play on bus 0 while its chord_mask reads chord context from bus 1.
 void SEQ_CORE_ChordMaskSlotSync(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
@@ -608,16 +618,18 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
   seq_processor_slot_t *slot = &seq_processor_stack[track][0];
 
   if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask ) {
-    slot->id       = SEQ_PROCESSOR_ID_CHORD_MASK;
-    slot->enabled  = 1;
-    slot->strength = tcc->chordmask_strength;
-    slot->bus      = tcc->busasg.bus;
+    slot->id        = SEQ_PROCESSOR_ID_CHORD_MASK;
+    slot->enabled   = 1;
+    slot->strength  = tcc->chordmask_strength;
+    slot->bus       = tcc->chordmask_bus;
+    slot->drum_mask = ((u16)tcc->chordmask_drum_h << 8) | (u16)tcc->chordmask_drum_l;
     SEQ_CORE_RenderTouched(track);
   } else if( slot->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
-    slot->id       = SEQ_PROCESSOR_ID_NONE;
-    slot->enabled  = 0;
-    slot->strength = 0;
-    slot->bus      = 0;
+    slot->id        = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled   = 0;
+    slot->strength  = 0;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
     SEQ_CORE_RenderTouched(track);
   }
 }
@@ -659,10 +671,11 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
 
   // Clear every slot.
   for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
-    seq_processor_stack[track][slot].id       = SEQ_PROCESSOR_ID_NONE;
-    seq_processor_stack[track][slot].enabled  = 0;
-    seq_processor_stack[track][slot].strength = 0;
-    seq_processor_stack[track][slot].bus      = 0;
+    seq_processor_stack[track][slot].id        = SEQ_PROCESSOR_ID_NONE;
+    seq_processor_stack[track][slot].enabled   = 0;
+    seq_processor_stack[track][slot].strength  = 0;
+    seq_processor_stack[track][slot].bus       = 0;
+    seq_processor_stack[track][slot].drum_mask = 0xFFFF;
   }
 
   // Untangle the chord_mask tcc mirror so the next SlotSync doesn't re-arm.
@@ -670,6 +683,9 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
   if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask )
     tcc->playmode = SEQ_CORE_TRKMODE_Normal;
   tcc->chordmask_strength = 0;
+  tcc->chordmask_bus      = 0;
+  tcc->chordmask_drum_l   = 0xFF;
+  tcc->chordmask_drum_h   = 0xFF;
 
   // Re-render so the output mirror equals the new source (identity copy).
   SEQ_CORE_RenderTouched(track);

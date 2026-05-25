@@ -239,10 +239,12 @@ typedef enum {
 } seq_processor_id_t;
 
 typedef struct {
-  u8 id;        // seq_processor_id_t; NONE = empty slot
-  u8 enabled;   // 0 = bypass (even when id != NONE)
-  u8 strength;  // 0..127 universal sweep dial; 0 = pass-through (§3)
-  u8 bus;       // bus selector; meaning depends on id
+  u8  id;        // seq_processor_id_t; NONE = empty slot
+  u8  enabled;   // 0 = bypass (even when id != NONE)
+  u8  strength;  // 0..127 universal sweep dial; 0 = pass-through (§3)
+  u8  bus;       // bus selector; meaning depends on id
+  u16 drum_mask; // drum-mode scope: bit i = process drum i. 0xFFFF = all drums
+                 // (matches legacy whole-track behavior). Unused outside drum mode.
 } seq_processor_slot_t;
 
 

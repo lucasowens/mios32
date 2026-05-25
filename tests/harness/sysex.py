@@ -184,6 +184,9 @@ class CC:
     ROBOTIZE_ACTIVE = 0x82
     ROBOTIZE_LOOP_CYCLES = 0x91
     CHORDMASK_STRENGTH = 0x96  # 0..127 ChordMask probabilistic snap strength
+    CHORDMASK_BUS = 0x97       # 0..3   per-processor bus the ChordMask reads PC-set from
+    CHORDMASK_DRUM_L = 0x98    # bit i = process drum i  (drums 0..7)
+    CHORDMASK_DRUM_H = 0x99    # bit i = process drum 8+i (drums 8..15)
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:
