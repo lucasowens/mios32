@@ -24,6 +24,8 @@
 
 #define SEQ_CORE_NUM_BPM_PRESETS       16
 
+#define SEQ_CORE_NUM_PROCESSOR_SLOTS   4
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -222,6 +224,22 @@ typedef enum {
 } seq_core_loop_mode_t;
 
 
+// Processor (noun, §3). Phase B scaffolding: per-track 4-slot stack,
+// zero-initialized. Empty slots (id == SEQ_PROCESSOR_ID_NONE) are skipped
+// during render, so behavior matches phase A's identity copy. Phase C wires
+// the first real processor (chord_mask) into the dispatch.
+typedef enum {
+  SEQ_PROCESSOR_ID_NONE = 0,
+} seq_processor_id_t;
+
+typedef struct {
+  u8 id;        // seq_processor_id_t; NONE = empty slot
+  u8 enabled;   // 0 = bypass (even when id != NONE)
+  u8 strength;  // 0..127 universal sweep dial; 0 = pass-through (§3)
+  u8 bus;       // bus selector; meaning depends on id
+} seq_processor_slot_t;
+
+
 /////////////////////////////////////////////////////////////////////////////
 // Prototypes
 /////////////////////////////////////////////////////////////////////////////
@@ -321,6 +339,11 @@ extern u8 seq_core_glb_loop_steps;
 // output mirrors declared in seq_par.h / seq_trg.h; any source-mutating site
 // must mark the track dirty so the next tick's prologue refreshes the mirror.
 extern u8 seq_render_dirty[SEQ_CORE_NUM_TRACKS];
+
+// Phase B processor stack scaffolding (see seq_core.c). Zero-initialized;
+// SEQ_CORE_RenderTrack iterates after the identity copy and skips empty
+// slots, so phase B is observably identical to phase A.
+extern seq_processor_slot_t seq_processor_stack[SEQ_CORE_NUM_TRACKS][SEQ_CORE_NUM_PROCESSOR_SLOTS];
 
 extern void SEQ_CORE_RenderDirtySet(u8 track);
 extern void SEQ_CORE_RenderDirtySetAll(void);

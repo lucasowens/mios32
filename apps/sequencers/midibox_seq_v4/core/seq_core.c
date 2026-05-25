@@ -129,6 +129,17 @@ u8 seq_core_glb_loop_steps;
 // SEQ_PAR_Init/SEQ_TRG_Init dirty all tracks on startup via SEQ_*_TrackInit.
 u8 seq_render_dirty[SEQ_CORE_NUM_TRACKS];
 
+// Phase B render cache: per-track processor stack. Empty in phase B
+// (zero-init → every slot has id == SEQ_PROCESSOR_ID_NONE), so the renderer
+// iteration is a no-op and output stays identical to source. Phase C wires
+// the first real processor (chord_mask) into SEQ_CORE_RenderTrack's dispatch.
+// CCM-placed alongside the par/trg output mirrors; the stack itself is read-
+// only on the tick path, so no cache-coherency concerns.
+#ifndef CCM_SECTION
+#define CCM_SECTION
+#endif
+seq_processor_slot_t CCM_SECTION seq_processor_stack[SEQ_CORE_NUM_TRACKS][SEQ_CORE_NUM_PROCESSOR_SLOTS];
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Local variables
@@ -196,6 +207,21 @@ s32 SEQ_CORE_Init(u32 mode)
   seq_core_glb_loop_steps = 16-1;
 
   seq_core_step_update_req = 0;
+
+  // Phase B: reset processor stacks to empty (NONE id, disabled). Explicit
+  // write defeats DCE so the bss slot survives even though phase B's
+  // renderer iteration is a no-op. Phase C will assign real ids here.
+  {
+    u8 track, slot;
+    for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+      for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+        seq_processor_stack[track][slot].id       = SEQ_PROCESSOR_ID_NONE;
+        seq_processor_stack[track][slot].enabled  = 0;
+        seq_processor_stack[track][slot].strength = 0;
+        seq_processor_stack[track][slot].bus      = 0;
+      }
+    }
+  }
 
   // set initial seed of random generator
   SEQ_RANDOM_Gen(0xdeadbabe);
@@ -286,16 +312,16 @@ s32 SEQ_CORE_Init(u32 mode)
 
 
 /////////////////////////////////////////////////////////////////////////////
-// Phase A render cache — identity renderer.
+// Render cache — identity copy + processor stack (phases A + B).
 //
 // SEQ_CORE_RenderDirtySet marks one track's output mirror stale; callers that
 // mutate seq_par_layer_value / seq_trg_layer_value invoke this so the next
 // tick refreshes the mirror.
 //
-// SEQ_CORE_RenderTrack performs the per-track identity memcpy (source → output)
-// and clears the dirty flag. Phase B/C will replace the bare memcpy with a
-// processor-stack iteration; the swap point (tick reads from *_output_value)
-// stays the same.
+// SEQ_CORE_RenderTrack copies source → output (identity, phase A), then
+// iterates the per-track processor stack (phase B; empty in B, dispatch
+// lands in C). The tick-side swap point (tick reads from *_output_value)
+// is invariant across phases.
 //
 // SEQ_CORE_RenderTracks runs at the top of every SEQ_CORE_Tick — the
 // "tick-prologue batch" trigger model. Guarantees output is current before
@@ -332,6 +358,18 @@ void SEQ_CORE_RenderTrack(u8 track)
     return;
   memcpy(seq_par_output_value[track], seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
   memcpy(seq_trg_output_value[track], seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+
+  // Phase B: iterate processor stack, output buffer is the substrate. Empty
+  // in phase B → every iteration skips and the function returns identity
+  // behavior. Phase C replaces the continue with an id-dispatch.
+  u8 slot;
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+    if( p->id == SEQ_PROCESSOR_ID_NONE || !p->enabled )
+      continue;
+    // Phase C: switch(p->id) { case SEQ_PROCESSOR_ID_CHORD_MASK: ... }
+  }
+
   seq_render_dirty[track] = 0;
 }
 
