@@ -804,13 +804,44 @@ Append-only-ish; revise an entry only with a dated note.
       deferred until phase E generators give the distinction musically-
       observable consequences. The existing 23-test harness exercises both
       paths (any CC write enters sweep; ticks after 50 ms enter quiet).
-  - **E: Generator workflow basics.** ENGAGE/DISENGAGE on PITCHGEN page (or its
-    successor) with LED state. Per-(track, instrument) generator instance from a
-    shared pool (cap 64, §A5). On ENGAGE: snapshot pre-engagement par-layer into
-    auto-undo slot; continuously rewrite source par-layer per measure boundary
-    using internal loop+lock+mutation-rate state. UNDO restores. Mutation rate +
-    range as live dials (the §5 journey). Other gestures (ROLL, SNAP, ANCHOR,
-    per-step LOCK) deferred to step 6.
+  - **E: Generator workflow basics. ✓ DONE 2026-05-25.** Spine-form Turing pitch
+    generator landed as a single phase (no E.0…E.x split). New module
+    `seq_generator.{h,c}`: cap-64 static pool in CCMRAM (refuse-with-message on
+    full; LRU deferred), per-(track, instrument) sparse index map, one-deep
+    global auto-undo slot (full 1 KB par-buffer snapshot). PITCHGEN page rewritten
+    onto the new API — GP1 ENGAGE toggle (LED mirrors engaged state), GP2 UNDO,
+    GP3/GP4 range min/max encoders, GP5 mutation rate (0–127, sweepable; §2.3
+    pass-through at 0 verified live). Per-measure-boundary mutate-then-rewrite
+    runs from a new `SEQ_GENERATOR_Tick()` prologue *before* `SEQ_CORE_RenderTracks`
+    in `SEQ_CORE_Tick`, using a per-track `last_seen_step` wrap detector (sentinel
+    0xFF means "fire on first call so measure 1 carries mutation too"). Source
+    mutation sets `seq_render_dirty[track]`; phase D's renderer picks it up in
+    the same prologue. Initial ENGAGE seeds the loop with a fresh reroll and
+    transcribes immediately so the pitched line is audible without waiting a
+    measure. *Decided sub-questions:*
+    - **Pool eviction:** refuse-with-message (UI prints "pool full"). LRU
+      deferred until play behavior demands. Closes §10 phase-E sub-decision.
+    - **DISENGAGE semantics:** stop mutating; source stays as last written.
+      Slot stays allocated (loop survives DISENGAGE→ENGAGE), so re-engage
+      without re-snapshotting undo. Matches §11 glossary.
+    - **Auto-undo scope:** one-deep, global. Most recent first-time ENGAGE
+      wins. UNDO restores the snapshot and disengages every generator on the
+      restored track so source isn't immediately overwritten next measure.
+    - **Background-render task: still deferred.** Per-measure rewrite is one
+      ≤64-byte transcribe per engaged generator per measure — single-digit µs
+      against the existing tick prologue budget. §A4 #5 will measure if a real
+      worst case appears.
+    - **Per-step LOCK / MULT / ANCHOR / SNAP / ROLL / contour shapes:**
+      explicitly NOT allocated yet (build less, §2). Phase-F (or whichever
+      phase polishes these) grows the struct from 72 B → ~184 B per slot,
+      bringing the pool toward §A5's 12 KB target as those fields land.
+    RAM cost measured: **CCMRAM +5.76 KB** (pool 4608 B + index 256 B + undo
+    slot 1026 B), bringing CCMRAM to 46.0 KB used / 18.0 KB free of 64 KB;
+    **main RAM +~100 B** (`last_seen_step[16]` + alignment, well inside §A5
+    envelope). Harness 23/23 unchanged against phase E firmware. Listen test
+    confirmed live 2026-05-25 — Turing line on drum, mutation rate sweeps from
+    locked to skittish, range narrow→wide gives detune-feel→leaps, UNDO
+    restores cleanly.
   - **F: BOUNCE verb.** Processor-stack BOUNCE: copy output→source, clear all
     enabled processors. Generator BOUNCE: disengage; source remains as last
     written. Both gestures map to one BOUNCE button; behavior depends on whether
@@ -901,9 +932,13 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   preserved: `SEQ_CC_Set` calls `SEQ_CORE_ChordMaskSlotSync` for MODE /
   CHORDMASK_STRENGTH / BUSASG. v2 pattern format unchanged; stack-editor UI
   deferred until more processors exist.
-- **Generator pool allocation strategy** (phase E): static cap-64 pool with
-  per-(track, instrument) slot allocation. Eviction policy when full: refuse new
-  ENGAGE (UI message) or LRU evict idle slots. Decide by play behavior.
+- **Generator pool allocation strategy — CLOSED 2026-05-25 (phase E).** Static
+  cap-64 pool, per-(track, instrument) sparse index map (16×16 byte table, 0xFF
+  = unallocated). Eviction policy: **refuse-with-message** on full ("pool full
+  (64/64)" via `SEQ_UI_Msg`). LRU deferred — not needed yet (the spine ships
+  with 16 max tracks × at-most-16 drums per track = 256 possible (track, instr)
+  pairs, but a realistic live session engages 4–8; pool ceiling is far above
+  observed use). Revisit only if play behavior demands.
 
 **Open bugs (pre-existing, surfaced 2026-05-25)**
 - **`SEQ_CC_CHORDMASK_STRENGTH = 0x96` is outside the v2 persisted ext-CC range
@@ -1187,6 +1222,22 @@ unmodeled headroom** — the budget must be a CCM-vs-SRAM split, not a flat numb
 | Conditional-trigger arrays | ~2B/step × track lengths (worst ~256) | ≤8KB |
 | Undo slot | 1 × ~1.5KB | ~1.5KB |
 | **Total new (CPU-only)** | | **~88KB** |
+
+**Phase-by-phase actuals (measured against base, cumulative):**
+
+| Phase | CCMRAM used | Δ | Main RAM used | Note |
+|---|---:|---:|---:|---|
+| Base (2026-05-24) | 0 | — | 95.9 KB | §A5 base measurement |
+| A (output mirror)  | 20.0 KB | +20.0 | 95.9 KB | par+trg single-buffered |
+| B (processor slots) | 20.25 KB | +0.25 | 95.9 KB | 16×4×4 B |
+| C (chord_mask)     | 20.25 KB | 0     | 95.9 KB | code only |
+| D (double-buffer)  | 40.25 KB | +20.0 | 95.92 KB | +16 B `active_buf` |
+| **E (generator)**  | **46.0 KB** | **+5.76** | **~96.0 KB** | pool 4.5 KB + index 256 B + undo 1 KB CCM; 16 B `last_seen_step` main |
+
+Phase E lands ~6 KB below the §A5 forecast (~12 KB pool) because the 64-step
+loop is the only generator state allocated for now — anchor / lock / multiplier
+fields are deferred to the §8 step-6 polish phase. CCMRAM still has ~18 KB
+headroom; the deferred fields fit trivially when they arrive.
 
 **Three corrections vs the prior draft (these were real faults):**
 

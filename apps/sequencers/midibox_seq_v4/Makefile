@@ -84,6 +84,7 @@ THUMB_SOURCE    = core/app.c \
 		core/seq_cc.c  \
 		core/seq_cc_labels.c  \
 		core/seq_core.c \
+		core/seq_generator.c \
 		core/seq_scale.c \
 		core/seq_groove.c \
 		core/seq_morph.c \

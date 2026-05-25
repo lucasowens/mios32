@@ -49,6 +49,7 @@
 #include "seq_statistics.h"
 #include "seq_ui.h"
 #include "seq_capture.h"
+#include "seq_generator.h"
 
 
 
@@ -262,6 +263,9 @@ s32 SEQ_CORE_Init(u32 mode)
 
   // reset capture/bounce ring
   SEQ_CAPTURE_Init(0);
+
+  // reset generator pool (phase E)
+  SEQ_GENERATOR_Init(0);
 
   // reset LFO module
   SEQ_LFO_Init(0);
@@ -1149,6 +1153,12 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 {
+  // Phase E generator hook: per-track measure-boundary mutate-then-rewrite
+  // runs BEFORE the renderer so any source changes mark the track dirty and
+  // the same prologue's renderer pass picks them up before the tick body
+  // reads the output mirror.
+  SEQ_GENERATOR_Tick();
+
   // Phase A render-cache prologue: refresh dirty tracks' output mirrors before
   // any tick read. Identity copy only in phase A; processor stack lands in B/C.
   SEQ_CORE_RenderTracks();
