@@ -711,10 +711,15 @@ Append-only-ish; revise an entry only with a dated note.
     KB unchanged. Harness 20/21 pass — `test_polyrhythm_3_in_8` baseline
     flake remains the only failure; `test_datawheel_changes_step_value`
     actually started passing on this run, so net zero new failures.
-  - **B: Processor stack scaffolding.** Add `processor_slot_t` (id, enabled,
-    strength, optional bus); per-track stack array (4 slots fixed for v1).
-    Renderer iterates enabled processors in order. Empty stacks → renderer stays
-    identity-copy. No behavior change.
+  - **B: Processor stack scaffolding. ✓ DONE 2026-05-25.** `seq_processor_slot_t`
+    (id, enabled, strength, bus); per-track 4-slot stack array, CCM-placed
+    alongside the phase A output mirrors (+256 B exactly = 16 × 4 × 4). Renderer
+    iterates after the identity copy; empty slots short-circuit via
+    `id == NONE || !enabled`, so observable behavior is identical to phase A.
+    Explicit zero-init loop in `SEQ_CORE_Init` is load-bearing — without it
+    `-fdata-sections` + constant-prop strips the bss section while the loop
+    has no real readers/writers. Harness 21/21 unchanged. Phase C replaces
+    the `continue` with a `switch(p->id)` dispatch.
   - **C: ChordMask migration.** Remove the `SEQ_CORE_Transpose` ChordMask branch
     added 2026-05-24. Add `chord_mask` processor function reading bus PC-set and
     rewriting output buffer. The existing TRKMODE playmode value either stays as
