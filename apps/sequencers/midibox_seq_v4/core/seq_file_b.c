@@ -593,6 +593,12 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	++trg_size_taken;
       }
 
+      // re-arm render-cache dirty: the SEQ_*_TrackInit calls above already
+      // marked the track dirty, but a tick concurrent with the FILE_ReadBuffer
+      // could have rendered the just-zeroed source into output. Mark dirty
+      // *after* the bulk load so the next tick refreshes the mirror.
+      SEQ_CORE_RenderDirtySet(track);
+
       // finally update CC links again, because some of them depend on SEQ_PAR_NumLayersGet()!!!
       SEQ_CC_LinkUpdate(track);
 

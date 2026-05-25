@@ -123,6 +123,12 @@ seq_core_loop_mode_t seq_core_glb_loop_mode;
 u8 seq_core_glb_loop_offset;
 u8 seq_core_glb_loop_steps;
 
+// Phase A render cache: per-track dirty flag. Set by any source-mutating path
+// (SEQ_PAR_Set, SEQ_TRG_Set, bulk loads, copy/paste/undo, capture, etc.).
+// Cleared by SEQ_CORE_RenderTrack after the identity memcpy. Zero-init OK —
+// SEQ_PAR_Init/SEQ_TRG_Init dirty all tracks on startup via SEQ_*_TrackInit.
+u8 seq_render_dirty[SEQ_CORE_NUM_TRACKS];
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Local variables
@@ -276,6 +282,56 @@ s32 SEQ_CORE_Init(u32 mode)
 #endif
 
   return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Phase A render cache — identity renderer.
+//
+// SEQ_CORE_RenderDirtySet marks one track's output mirror stale; callers that
+// mutate seq_par_layer_value / seq_trg_layer_value invoke this so the next
+// tick refreshes the mirror.
+//
+// SEQ_CORE_RenderTrack performs the per-track identity memcpy (source → output)
+// and clears the dirty flag. Phase B/C will replace the bare memcpy with a
+// processor-stack iteration; the swap point (tick reads from *_output_value)
+// stays the same.
+//
+// SEQ_CORE_RenderTracks runs at the top of every SEQ_CORE_Tick — the
+// "tick-prologue batch" trigger model. Guarantees output is current before
+// any tick read.
+/////////////////////////////////////////////////////////////////////////////
+void SEQ_CORE_RenderDirtySet(u8 track)
+{
+  if( track < SEQ_CORE_NUM_TRACKS )
+    seq_render_dirty[track] = 1;
+}
+
+void SEQ_CORE_RenderDirtySetAll(void)
+{
+  u8 track;
+  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track)
+    seq_render_dirty[track] = 1;
+}
+
+void SEQ_CORE_RenderTrack(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  if( !seq_render_dirty[track] )
+    return;
+  memcpy(seq_par_output_value[track], seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
+  memcpy(seq_trg_output_value[track], seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+  seq_render_dirty[track] = 0;
+}
+
+void SEQ_CORE_RenderTracks(void)
+{
+  u8 track;
+  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+    if( seq_render_dirty[track] )
+      SEQ_CORE_RenderTrack(track);
+  }
 }
 
 
@@ -716,8 +772,12 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 {
+  // Phase A render-cache prologue: refresh dirty tracks' output mirrors before
+  // any tick read. Identity copy only in phase A; processor stack lands in B/C.
+  SEQ_CORE_RenderTracks();
+
   // get MIDI File play mode (if set to SEQ_MIDPLY_MODE_Exclusive, all tracks will be muted)
-  u8 midply_solo = SEQ_MIDPLY_RunModeGet() != 0 && SEQ_MIDPLY_ModeGet() == SEQ_MIDPLY_MODE_Exclusive; 
+  u8 midply_solo = SEQ_MIDPLY_RunModeGet() != 0 && SEQ_MIDPLY_ModeGet() == SEQ_MIDPLY_MODE_Exclusive;
 
   // increment reference step on each 16th note
   // set request flag on overrun (tracks can synch to measure)

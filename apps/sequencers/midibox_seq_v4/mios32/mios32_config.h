@@ -88,6 +88,14 @@ extern void APP_SendDebugMessage(char *format, ...);
 # define AHB_SECTION
 #endif
 
+// CCM SRAM on STM32F4 (64 KB, CPU-only, no DMA). Render-cache output buffers
+// land here so the existing par/trg source allocations in main SRAM stay put.
+#if defined(MIOS32_FAMILY_STM32F4xx)
+# define CCM_SECTION __attribute__ ((section (".bss_ccm")))
+#else
+# define CCM_SECTION
+#endif
+
 
 // increased number of SRs (MBSEQ uses 16 SRs by default, but it's possible to increase the number in MBSEQ_HW.V4)
 #define MIOS32_SRIO_NUM_SR 23

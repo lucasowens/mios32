@@ -876,6 +876,7 @@ static s32 CLEAR_Track(u8 track, paste_clear_mode_t paste_clear_mode)
 
     // clear all triggers
     memset((u8 *)&seq_trg_layer_value[track], 0, SEQ_TRG_MAX_BYTES);
+    SEQ_CORE_RenderDirtySet(track);
   } break;
 
   case PASTE_CLEAR_MODE_PAR_LAYER: {
@@ -928,6 +929,7 @@ static s32 UNDO_Track(void)
   // copy layers from buffer
   memcpy((u8 *)&seq_par_layer_value[undo_track], (u8 *)undo_par_layer, SEQ_PAR_MAX_BYTES);
   memcpy((u8 *)&seq_trg_layer_value[undo_track], (u8 *)undo_trg_layer, SEQ_TRG_MAX_BYTES);
+  SEQ_CORE_RenderDirtySet(undo_track);
 
   // copy track name
   memcpy((u8 *)seq_core_trk[undo_track].name, (u8 *)undo_trk_name, 81);

@@ -104,5 +104,10 @@ extern char *SEQ_TRG_AssignedTypeStr(u8 track, u8 trg_layer);
 // use SEQ_TRG_Get/Set
 extern u8 seq_trg_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_TRG_MAX_BYTES];
 
+// Phase A render cache: identity-rendered mirror in CCM SRAM. Tick path reads
+// here; do not write directly. Callers that bulk-mutate seq_trg_layer_value
+// must SEQ_CORE_RenderDirtySet(track) so the next tick refreshes this.
+extern u8 seq_trg_output_value[SEQ_CORE_NUM_TRACKS][SEQ_TRG_MAX_BYTES];
+
 
 #endif /* _SEQ_TRG_H */

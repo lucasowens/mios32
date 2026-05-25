@@ -31,6 +31,13 @@
 // use SEQ_TRG_Get/Set
 u8 seq_trg_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_TRG_MAX_BYTES];
 
+// Phase A render cache: identity-rendered mirror in CCM SRAM. Tick path reads
+// here; writers target source above and SEQ_CORE_RenderDirtySet the track.
+#ifndef CCM_SECTION
+#define CCM_SECTION
+#endif
+u8 CCM_SECTION seq_trg_output_value[SEQ_CORE_NUM_TRACKS][SEQ_TRG_MAX_BYTES];
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Local variables
@@ -67,8 +74,10 @@ s32 SEQ_TRG_Init(u32 mode)
     SEQ_TRG_TrackInit(track, 128, 8, 1); // track, steps, trigger layers, instruments
 
     // special init value for first track: set gates on each beat
-    if( track == 0 )
+    if( track == 0 ) {
       memset((u8 *)&seq_trg_layer_value[track], 0x11, trg_layer_num_steps8[track]);
+      SEQ_CORE_RenderDirtySet(track);
+    }
   }
 #else
   // extra for MBSEQ V4L:
@@ -83,8 +92,10 @@ s32 SEQ_TRG_Init(u32 mode)
       SEQ_TRG_TrackInit(track, 256, 8, 1); // track, steps, trigger layers, instruments
 
       // all gates enabled
-      if( track == 0 )
+      if( track == 0 ) {
 	memset((u8 *)&seq_trg_layer_value[track], 0xff, trg_layer_num_steps8[track]);
+	SEQ_CORE_RenderDirtySet(track);
+      }
     }
   }
 #endif
@@ -107,6 +118,7 @@ s32 SEQ_TRG_TrackInit(u8 track, u16 steps, u8 trg_layers, u8 instruments)
 
   // init trigger layer values
   memset((u8 *)&seq_trg_layer_value[track], 0, SEQ_TRG_MAX_BYTES);
+  SEQ_CORE_RenderDirtySet(track);
 
   return 0; // no error
 }
@@ -160,7 +172,8 @@ s32 SEQ_TRG_Get(u8 track, u16 step, u8 trg_layer, u8 trg_instrument)
     return 0; // invalid step position: return 0 (trigger not set)
 
   u8 step_mask = 1 << (step % 8);
-  return (seq_trg_layer_value[track][step_ix] & step_mask) ? 1 : 0;
+  // Phase A: read from output mirror; see SEQ_PAR_Get note above.
+  return (seq_trg_output_value[track][step_ix] & step_mask) ? 1 : 0;
 }
 
 
@@ -176,7 +189,7 @@ s32 SEQ_TRG_Get8(u8 track, u8 step8, u8 trg_layer, u8 trg_instrument)
   if( step_ix >= SEQ_TRG_MAX_BYTES )
     return 0; // invalid step position: return 0 (trigger not set)
 
-  return seq_trg_layer_value[track][step_ix];
+  return seq_trg_output_value[track][step_ix];
 }
 
 
@@ -192,7 +205,7 @@ s32 SEQ_TRG_Get16(u8 track, u8 step16, u8 trg_layer, u8 trg_instrument)
   if( step_ix >= SEQ_TRG_MAX_BYTES )
     return 0; // invalid step position: return 0 (trigger not set)
 
-  u8 *values = (u8 *)&seq_trg_layer_value[track][step_ix];
+  u8 *values = (u8 *)&seq_trg_output_value[track][step_ix];
   u16 ret = *values;
   ++values;
   ret |= ((u16)*values << 8);
@@ -285,6 +298,7 @@ s32 SEQ_TRG_Set(u8 track, u16 step, u8 trg_layer, u8 trg_instrument, u8 value)
     seq_trg_layer_value[track][step_ix] |= step_mask;
   else
     seq_trg_layer_value[track][step_ix] &= ~step_mask;
+  SEQ_CORE_RenderDirtySet(track);
 
   return 0; // no error
 }
@@ -309,6 +323,7 @@ s32 SEQ_TRG_Set8(u8 track, u8 step8, u8 trg_layer, u8 trg_instrument, u8 value)
     return -4; // invalid step position
 
   seq_trg_layer_value[track][step_ix] = value;
+  SEQ_CORE_RenderDirtySet(track);
 
   return 0; // no error
 }

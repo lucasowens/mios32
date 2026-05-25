@@ -697,12 +697,20 @@ Append-only-ish; revise an entry only with a dated note.
 - **§8 step 5 (the spine) is broken into phases A–F.** User agreed 2026-05-24:
   ship the full design-doc spine as a multi-PR sequence, infrastructure first.
   Each phase is a buildable+harness-testable unit.
-  - **A: Output buffer + identity renderer.** Per-track output par/trg buffer
-    (CPU-only, CCM-placed via section attribute); per-track render-dirty flag;
-    synchronous identity renderer (output = source on dirty). Switch tick reads
-    from source-direct to output-via-renderer. *No behavior change; harness
-    regression should pass unchanged.* Single-buffer in phase A; double-buffering
-    arrives in phase D.
+  - **A: Output buffer + identity renderer. ✓ DONE 2026-05-25.** Per-track
+    output par/trg buffer (CPU-only, CCM-placed via section attribute);
+    per-track render-dirty flag; synchronous identity renderer (output =
+    source on dirty). Switch tick reads from source-direct to
+    output-via-renderer. Single-buffer in phase A; double-buffering arrives in
+    phase D. *Decided sub-questions:* `CCM_SECTION __attribute__((section
+    (".bss_ccm")))` macro added in `mios32_config.h` (mirrors `AHB_SECTION`
+    pattern). Renderer trigger = **tick-prologue batch** (one
+    `SEQ_CORE_RenderTracks()` call at the top of `SEQ_CORE_Tick`, renders any
+    dirty track via identity memcpy). RAM cost measured: **+20.0 KB in CCM
+    exactly** (1024 par + 256 trg × 16 tracks = 20480 bytes), main RAM 95.9
+    KB unchanged. Harness 20/21 pass — `test_polyrhythm_3_in_8` baseline
+    flake remains the only failure; `test_datawheel_changes_step_value`
+    actually started passing on this run, so net zero new failures.
   - **B: Processor stack scaffolding.** Add `processor_slot_t` (id, enabled,
     strength, optional bus); per-track stack array (4 slots fixed for v1).
     Renderer iterates enabled processors in order. Empty stacks → renderer stays
@@ -791,11 +799,12 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   tracks; revisit if a piece wants longer. Decides at step 5 phase E.
 
 **Step 5 sub-decisions (answer as the relevant phase lands)**
-- **CCM placement mechanism.** Existing `AHB_SECTION` macro places in main SRAM;
-  CCM-placement macro pattern not yet established in this fork. Phase A decides:
-  add a `CCM_SECTION` macro and apply to output buffers, or use direct
-  `__attribute__((section(".ccm_bss")))` on declarations. Verify linker script at
-  `etc/ld/STM32F4xx/STM32F407VG.ld` has a CCM region named accordingly.
+- **CCM placement mechanism — CLOSED 2026-05-25 (phase A).** `CCM_SECTION
+  __attribute__((section(".bss_ccm")))` macro added in `mios32_config.h`,
+  guarded on `MIOS32_FAMILY_STM32F4xx` (no-op fallback elsewhere). Mirrors
+  the existing `AHB_SECTION` pattern. Linker `.bss_ccm` / `.bss_ccm.*`
+  sections in `etc/ld/STM32F4xx/STM32F407VG.ld` route to the 64 KB CCMRAM
+  region.
 - **Render task scheduling** (phase D): low-prio FreeRTOS task vs cooperative idle.
   Sets worst-case latency and priority-inversion exposure. §A4 test #6 measures.
 - **Knob-moving detection** (phase D): encoder-changed debounce / touch sense /

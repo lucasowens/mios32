@@ -192,6 +192,7 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
 		  for(i=0; i<16; ++i)
 		    seq_trg_layer_value[track][addr_offset + i] = values[i];
 		}
+		SEQ_CORE_RenderDirtySet(track);
 	      }
 	    }
 	  } else if( strcmp(parameter, "ParInstruments") == 0 ) {

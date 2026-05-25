@@ -317,4 +317,14 @@ extern seq_core_loop_mode_t seq_core_glb_loop_mode;
 extern u8 seq_core_glb_loop_offset;
 extern u8 seq_core_glb_loop_steps;
 
+// Phase A render cache (see seq_core.c). Tick path reads from the per-track
+// output mirrors declared in seq_par.h / seq_trg.h; any source-mutating site
+// must mark the track dirty so the next tick's prologue refreshes the mirror.
+extern u8 seq_render_dirty[SEQ_CORE_NUM_TRACKS];
+
+extern void SEQ_CORE_RenderDirtySet(u8 track);
+extern void SEQ_CORE_RenderDirtySetAll(void);
+extern void SEQ_CORE_RenderTrack(u8 track);
+extern void SEQ_CORE_RenderTracks(void);
+
 #endif /* _SEQ_CORE_H */

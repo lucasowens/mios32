@@ -319,6 +319,7 @@ s32 SEQ_CAPTURE_CommitToSlot(u8 src_track, u8 dst_group, seq_pattern_t dst_patte
   //    keep all other tracks intact so the dst pattern inherits them.
   memset((u8 *)&seq_par_layer_value[src_track], 0, SEQ_PAR_MAX_BYTES);
   memset((u8 *)&seq_trg_layer_value[src_track], 0, SEQ_TRG_MAX_BYTES);
+  SEQ_CORE_RenderDirtySet(src_track);
 
   // Sanitize generative state on the in-RAM src_track config before writing
   // to dst. The dst pattern is a *frozen* capture of what was emitted; every
@@ -399,6 +400,7 @@ s32 SEQ_CAPTURE_CommitToSlot(u8 src_track, u8 dst_group, seq_pattern_t dst_patte
   memcpy(&seq_cc_trk[src_track], &bounce_cc_snapshot, sizeof(seq_cc_trk_t));
   memcpy(seq_par_layer_value[src_track], bounce_par_snapshot, SEQ_PAR_MAX_BYTES);
   memcpy(seq_trg_layer_value[src_track], bounce_trg_snapshot, SEQ_TRG_MAX_BYTES);
+  SEQ_CORE_RenderDirtySet(src_track);
   memcpy(seq_pattern_name[src_group], bounce_name_snapshot, 20);
   seq_core_trk[src_track].play_section = play_section_snapshot;
   SEQ_CC_LinkUpdate(src_track);

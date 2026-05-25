@@ -118,4 +118,9 @@ extern u8 SEQ_PAR_MaxValueGet(seq_par_layer_type_t par_type);
 // use SEQ_PAR_Get/Set
 extern u8 seq_par_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
 
+// Phase A render cache: identity-rendered mirror in CCM SRAM. Tick path reads
+// here; do not write directly. Callers that bulk-mutate seq_par_layer_value
+// must SEQ_CORE_RenderDirtySet(track) so the next tick refreshes this.
+extern u8 seq_par_output_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
+
 #endif /* _SEQ_PAR_H */

@@ -34,6 +34,14 @@
 #endif
 u8 AHB_SECTION seq_par_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
 
+// Phase A render cache: per-track output mirror. Tick path reads here; writers
+// still target source above and call SEQ_CORE_RenderDirtySet so the next tick's
+// prologue refreshes the mirror via an identity copy.
+#ifndef CCM_SECTION
+#define CCM_SECTION
+#endif
+u8 CCM_SECTION seq_par_output_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Local variables
@@ -178,6 +186,7 @@ s32 SEQ_PAR_TrackInit(u8 track, u16 steps, u8 par_layers, u8 instruments)
 
   // init parameter layer values
   memset((u8 *)&seq_par_layer_value[track], 0, SEQ_PAR_MAX_BYTES);
+  SEQ_CORE_RenderDirtySet(track);
 
   return 0; // no error
 }
@@ -246,6 +255,7 @@ s32 SEQ_PAR_Set(u8 track, u16 step, u8 par_layer, u8 par_instrument, u8 value)
     return -4; // invalid step position
 
   seq_par_layer_value[track][step_ix] = value;
+  SEQ_CORE_RenderDirtySet(track);
 
   return 0; // no error
 }
@@ -267,7 +277,10 @@ s32 SEQ_PAR_Get(u8 track, u16 step, u8 par_layer, u8 par_instrument)
   if( step_ix >= SEQ_PAR_MAX_BYTES )
     return 0; // invalid step position: return 0 (parameter not set)
 
-  return seq_par_layer_value[track][step_ix];
+  // Phase A: tick path reads through the rendered output mirror. Writers
+  // target seq_par_layer_value (source) and dirty the track; the next tick
+  // prologue runs the identity render.
+  return seq_par_output_value[track][step_ix];
 }
 
 

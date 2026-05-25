@@ -560,9 +560,10 @@ s32 SEQ_UI_PATTERN_MultiClear(u8 only_selected)
 
       // clear all triggers
       memset((u8 *)&seq_trg_layer_value[track], 0, SEQ_TRG_MAX_BYTES);
+      SEQ_CORE_RenderDirtySet(track);
 
       // cancel sustain if there are no steps played by the track anymore.
-      SEQ_CORE_CancelSustainedNotes(track);      
+      SEQ_CORE_CancelSustainedNotes(track);
     }
   }
 
