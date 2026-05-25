@@ -720,11 +720,35 @@ Append-only-ish; revise an entry only with a dated note.
     `-fdata-sections` + constant-prop strips the bss section while the loop
     has no real readers/writers. Harness 21/21 unchanged. Phase C replaces
     the `continue` with a `switch(p->id)` dispatch.
-  - **C: ChordMask migration.** Remove the `SEQ_CORE_Transpose` ChordMask branch
-    added 2026-05-24. Add `chord_mask` processor function reading bus PC-set and
-    rewriting output buffer. The existing TRKMODE playmode value either stays as
-    a UX shortcut that auto-fills a stack slot, or gets replaced by a
-    stack-editor UI. Verify by-ear behavior unchanged.
+  - **C: ChordMask migration. ✓ DONE 2026-05-25.** `SEQ_PROCESSOR_ID_CHORD_MASK`
+    + `chord_mask_render()` added; `SEQ_CORE_RenderTrack`'s phase-B `continue`
+    replaced with `switch(p->id)` dispatch. The processor rewrites note-bearing
+    bytes in the output par buffer (drum: the one `link_par_layer_note` layer
+    across all drums; normal: every `SEQ_PAR_Type_Note` layer), skipping
+    zero-valued bytes so the §9 drum-lay_const fallback survives. Snap
+    algorithm (probabilistic gate at strength, nearest-PC outward search,
+    lower wins on tie) is byte-identical to the removed `SEQ_CORE_Transpose`
+    branch. *Decided sub-questions:*
+    - **Live-chord update semantics:** per-tick implicit dirty for any track
+      carrying an enabled chord_mask slot, inside `SEQ_CORE_RenderTracks`.
+      Cheap brute-force (1.25 KB memcpy + walking only note-bearing layers ≤
+      ~16 × 32 bytes per track); phase D's sweep/quiet detection will
+      optimize. Bus-dirty-signal approach considered and rejected for phase C
+      (would touch `seq_midi_in.c` push/pop paths; overkill until measured
+      need).
+    - **TRKMODE UX migration:** kept as a shortcut → slot bridge.
+      `SEQ_CORE_ChordMaskSlotSync(track)` mirrors slot 0 from
+      `tcc->playmode` + `tcc->chordmask_strength` + `tcc->busasg.bus`; called
+      from `SEQ_CC_Set` on `SEQ_CC_MODE`, `SEQ_CC_CHORDMASK_STRENGTH`,
+      `SEQ_CC_BUSASG`. v2 pattern persistence is unchanged (tcc is the
+      persistent truth; slot is runtime mirror). The known-musical TRKMODE
+      page + GP7 strength dial work exactly as before. Stack-editor UI
+      deferred to a later phase.
+    - **Slot 0 convention:** chord_mask is the only processor in phase C, so
+      slot 0 is its conventional home. The proper allocator arrives with
+      phase E's generator pool.
+    RAM unchanged from phase B (CCM 20.25 KB, main 95.9 KB) — phase C added
+    only code. Harness 21/21 against phase C firmware on hardware.
   - **D: Sweeping regime + double-buffering.** Per-track "knob-quiet" timestamp;
     within 50ms of last change → render current step + small lookahead live,
     bypassing cache. After 50ms quiet → background render to inactive buffer
@@ -816,12 +840,24 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   per-param dirty timestamps. Verify what encoder hardware exposes in this fork.
 - **Per-step vs whole-buffer cache invalidation** (phase D): whole-buffer default
   is fine; window position is the incremental special case (deferred to v2 windowing).
-- **TRKMODE ChordMask UX migration** (phase C): keep current 5-mode picker as a
-  shortcut, or replace with a stack-editor UI. Decide by listening to the new
-  flow; existing UX is shipping and known-musical, don't break it for purity.
+- **TRKMODE ChordMask UX migration — CLOSED 2026-05-25 (phase C).** Shortcut
+  preserved: `SEQ_CC_Set` calls `SEQ_CORE_ChordMaskSlotSync` for MODE /
+  CHORDMASK_STRENGTH / BUSASG. v2 pattern format unchanged; stack-editor UI
+  deferred until more processors exist.
 - **Generator pool allocation strategy** (phase E): static cap-64 pool with
   per-(track, instrument) slot allocation. Eviction policy when full: refuse new
   ENGAGE (UI message) or LRU evict idle slots. Decide by play behavior.
+
+**Open bugs (pre-existing, surfaced 2026-05-25)**
+- **`SEQ_CC_CHORDMASK_STRENGTH = 0x96` is outside the v2 persisted ext-CC range
+  0x80–0x95** ([seq_file_b.c:62-64](../apps/sequencers/midibox_seq_v4/core/seq_file_b.c#L62-L64)).
+  Consequence: chord-mask strength resets to 0 on every reboot or pattern
+  reload — playmode persists but the dial does not, so the user sees
+  TRKMODE=ChordMask with Msk:000 after a flash. Predates phase C (regression
+  goes back to when the CC was added 2026-05-24). Fix is small: extend
+  `SEQ_FILE_B_TRK_EXT_CC_LAST` to 0x96 (or the next clean boundary) and bump
+  the v2 ext-tag — but format-bumps are a v3-format concern, so park here
+  until the v3 format work lands.
 
 **Open puzzles (surfaced 2026-05-25, not gating, revisit with a clean baseline)**
 - **EDIT-LCD vs tick-time gate read disconnect.** While diagnosing the
