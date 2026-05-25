@@ -175,6 +175,7 @@ class CC:
     ROBOTIZE_MASK2 = 0x81
     ROBOTIZE_ACTIVE = 0x82
     ROBOTIZE_LOOP_CYCLES = 0x91
+    CHORDMASK_STRENGTH = 0x96  # 0..127 ChordMask probabilistic snap strength
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:
