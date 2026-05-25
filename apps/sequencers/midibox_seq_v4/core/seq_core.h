@@ -346,6 +346,61 @@ extern u8 seq_core_glb_loop_steps;
 // must mark the track dirty so the next tick's prologue refreshes the mirror.
 extern u8 seq_render_dirty[SEQ_CORE_NUM_TRACKS];
 
+// Phase D.1 — per-track sweep/quiet timestamp (§A2 sweep regime, §10 knob-
+// detect sub-decision). Any site that mutates a processor-stack input bumps
+// the timestamp via SEQ_CORE_RenderTouched(track). SEQ_CORE_RenderSweeping()
+// returns 1 if the last touch landed within SEQ_RENDER_SWEEP_MS — used by
+// the renderer to choose between sweep (bounded current+lookahead) and quiet
+// (full whole-buffer) paths. Zero-init = "never touched" = treat as quiet.
+#define SEQ_RENDER_SWEEP_MS  50
+
+// Phase D.2 — sweep window. During sweep the renderer rewrites only this
+// many steps starting at the playhead (the bytes the tick is about to read).
+// Lower bound is 1 (just the current step); §A2 suggests 2–4. Chosen at 4
+// because at 96 BPM 32nd-notes ≈ 78 ticks/s, a 50ms sweep window covers ~4
+// ticks, so a 4-step lookahead exactly catches what the playhead reads during
+// the sweep before the quiet catch-up render fires.
+#define SEQ_RENDER_SWEEP_LOOKAHEAD  4
+
+extern u32 seq_render_touched_ms[SEQ_CORE_NUM_TRACKS];
+
+extern void SEQ_CORE_RenderTouched(u8 track);
+extern u8   SEQ_CORE_RenderSweeping(u8 track);
+
+// Phase D.3 — per-track active half-buffer index (0 or 1). Tick reads the
+// active half via SEQ_PAR_OutputActive(track)/SEQ_TRG_OutputActive(track);
+// renderer writes the inactive half during a quiet render and flips this
+// byte at end (single-byte write = atomic on Cortex-M). Sweep renders write
+// to the active half directly (no swap, tearing acceptable during knob
+// motion). Zero-init: track 0 starts reading half 0 — first quiet render
+// fills half 1 and swaps, so the tick never reads pre-init garbage.
+extern u8 seq_render_active_buf[SEQ_CORE_NUM_TRACKS];
+
+// Re-declared here (matching seq_par.h / seq_trg.h) so the inline accessors
+// below have visibility without re-including those headers (which would
+// circularly re-enter seq_core.h via their own includes).
+#ifndef SEQ_PAR_MAX_BYTES
+#define SEQ_PAR_MAX_BYTES   1024
+#endif
+#ifndef SEQ_TRG_MAX_BYTES
+#define SEQ_TRG_MAX_BYTES    256
+#endif
+extern u8 seq_par_output_value[SEQ_CORE_NUM_TRACKS][2][SEQ_PAR_MAX_BYTES];
+extern u8 seq_trg_output_value[SEQ_CORE_NUM_TRACKS][2][SEQ_TRG_MAX_BYTES];
+
+static inline u8 *SEQ_PAR_OutputActive(u8 track) {
+  return seq_par_output_value[track][seq_render_active_buf[track]];
+}
+static inline u8 *SEQ_PAR_OutputInactive(u8 track) {
+  return seq_par_output_value[track][seq_render_active_buf[track] ^ 1];
+}
+static inline u8 *SEQ_TRG_OutputActive(u8 track) {
+  return seq_trg_output_value[track][seq_render_active_buf[track]];
+}
+static inline u8 *SEQ_TRG_OutputInactive(u8 track) {
+  return seq_trg_output_value[track][seq_render_active_buf[track] ^ 1];
+}
+
 // Phase B processor stack scaffolding (see seq_core.c). Zero-initialized;
 // SEQ_CORE_RenderTrack iterates after the identity copy and skips empty
 // slots, so phase B is observably identical to phase A.

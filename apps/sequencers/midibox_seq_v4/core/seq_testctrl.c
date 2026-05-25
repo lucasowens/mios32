@@ -741,11 +741,13 @@ static void cmd_trg_byte_get(mios32_midi_port_t port, const u8 *payload, u8 plen
               + (u16)trg_layer * num_t_step8
               + step8_start;
 
-  // Build raw [layer,output] pairs, then pack7.
+  // Build raw [layer,output] pairs, then pack7. "output" reports the active
+  // half of the double-buffered mirror (what the tick currently reads).
   u8 raw[64];
+  u8 *trg_out_active = SEQ_TRG_OutputActive(track);
   for(u8 i=0; i<step8_count; ++i) {
     raw[2*i]     = seq_trg_layer_value[track][base_ix + i];
-    raw[2*i + 1] = seq_trg_output_value[track][base_ix + i];
+    raw[2*i + 1] = trg_out_active[base_ix + i];
   }
 
   reply[5] = 0x01;

@@ -129,6 +129,18 @@ u8 seq_core_glb_loop_steps;
 // SEQ_PAR_Init/SEQ_TRG_Init dirty all tracks on startup via SEQ_*_TrackInit.
 u8 seq_render_dirty[SEQ_CORE_NUM_TRACKS];
 
+// Phase D.1 — per-track touched timestamp in milliseconds (MIOS32 wall clock,
+// see MIOS32_TIMESTAMP_Get). Bumped by SEQ_CORE_RenderTouched on any change
+// that affects the processor stack's output; read by SEQ_CORE_RenderSweeping
+// to decide sweep-vs-quiet. Zero = pristine (never touched, treat as quiet).
+u32 seq_render_touched_ms[SEQ_CORE_NUM_TRACKS];
+
+// Phase D.3 — per-track active half-buffer index. Quiet render writes the
+// inactive half, then a single-byte XOR flips this — atomic on Cortex-M, so
+// the tick path never reads a half-rendered output. Sweep render writes
+// active directly (no flip; tearing during knob motion is acceptable).
+u8 seq_render_active_buf[SEQ_CORE_NUM_TRACKS];
+
 // Phase B render cache: per-track processor stack. Empty in phase B
 // (zero-init → every slot has id == SEQ_PROCESSOR_ID_NONE), so the renderer
 // iteration is a no-op and output stays identical to source. Phase C wires
@@ -327,6 +339,41 @@ s32 SEQ_CORE_Init(u32 mode)
 // "tick-prologue batch" trigger model. Guarantees output is current before
 // any tick read.
 /////////////////////////////////////////////////////////////////////////////
+// Phase D.1 — bump the touched timestamp + dirty flag for one track. Called
+// from any site that mutates the processor stack's inputs (slot params,
+// processor enable/disable, bus assignment). The touch is the signal that
+// switches the renderer into sweep regime for SEQ_RENDER_SWEEP_MS.
+void SEQ_CORE_RenderTouched(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  // u32 wraps every ~50 days; the touched-window comparison uses
+  // MIOS32_TIMESTAMP_GetDelay() which is wrap-safe via unsigned subtraction.
+  // A timestamp of 0 is reserved as "never touched" → if Get() ever returns
+  // 0 we'd misclassify a fresh touch as never-touched for one ms — clamp.
+  u32 now = (u32)MIOS32_TIMESTAMP_Get();
+  seq_render_touched_ms[track] = now ? now : 1;
+  seq_render_dirty[track] = 1;
+  if( !SEQ_BPM_IsRunning() )
+    SEQ_CORE_RenderTrack(track);
+}
+
+// Phase D.1 — sweep regime if the track was touched within the last
+// SEQ_RENDER_SWEEP_MS ms. Quiet otherwise. Called from the renderer to pick
+// between sweep (bounded current+lookahead, D.2) and quiet (whole-buffer)
+// paths. MIOS32_TIMESTAMP_GetDelay uses unsigned subtraction so the result
+// is correct across the u32 wrap.
+u8 SEQ_CORE_RenderSweeping(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return 0;
+  u32 touched = seq_render_touched_ms[track];
+  if( !touched )
+    return 0;
+  u32 delay = (u32)MIOS32_TIMESTAMP_GetDelay(touched);
+  return (delay < SEQ_RENDER_SWEEP_MS) ? 1 : 0;
+}
+
 void SEQ_CORE_RenderDirtySet(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
@@ -370,13 +417,14 @@ static u8 chord_mask_snap(u8 note, u16 pc_mask)
 }
 
 // chord_mask processor (§8 step 4, §3 spine). Rewrites note-bearing bytes in
-// the output par buffer to snap toward the bus's currently-held chord
-// (PC-set). Algorithm matches the pre-spine SEQ_CORE_Transpose ChordMask
-// branch (removed in phase C): probabilistic gate at p->strength, nearest-PC
-// search outward, lower wins on tie. 0-valued bytes are skipped — for drums
-// this preserves the "fall back to lay_const" idiom (§9 drum-Note-layer);
-// for normal tracks it avoids inventing pitch on empty steps.
-static void chord_mask_render(u8 track, const seq_processor_slot_t *p)
+// the par buffer pointed at by `par_buf` to snap toward the bus's currently-
+// held chord (PC-set). Algorithm: probabilistic gate at p->strength, nearest-
+// PC outward search, lower wins on tie. 0-valued bytes are skipped — for
+// drums this preserves the "fall back to lay_const" idiom (§9 drum-Note-
+// layer); for normal tracks it avoids inventing pitch on empty steps.
+// Phase D.2: operates on [step_lo, step_hi). Whole-buffer = (0, num_p_steps).
+static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
+                                    u8 *par_buf, u16 step_lo, u16 step_hi)
 {
   if( !p->strength )
     return;
@@ -388,6 +436,8 @@ static void chord_mask_render(u8 track, const seq_processor_slot_t *p)
   u8 num_p_layers      = SEQ_PAR_NumLayersGet(track);
   u16 num_p_steps      = SEQ_PAR_NumStepsGet(track);
   u8 num_p_instruments = SEQ_PAR_NumInstrumentsGet(track);
+  if( step_hi > num_p_steps ) step_hi = num_p_steps;
+  if( step_lo >= step_hi ) return;
 
   if( tcc->event_mode == SEQ_EVENT_MODE_Drum ) {
     s8 nl = tcc->link_par_layer_note;
@@ -395,9 +445,9 @@ static void chord_mask_render(u8 track, const seq_processor_slot_t *p)
       return;
     u8 drum;
     for(drum=0; drum<num_p_instruments; ++drum) {
-      u8 *base = &seq_par_output_value[track][(u32)drum*num_p_layers*num_p_steps + (u32)nl*num_p_steps];
+      u8 *base = &par_buf[(u32)drum*num_p_layers*num_p_steps + (u32)nl*num_p_steps];
       u16 step;
-      for(step=0; step<num_p_steps; ++step) {
+      for(step=step_lo; step<step_hi; ++step) {
         u8 note = base[step];
         if( !note )
           continue;
@@ -410,9 +460,9 @@ static void chord_mask_render(u8 track, const seq_processor_slot_t *p)
     for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
       if( tcc->lay_const[par_layer] != SEQ_PAR_Type_Note )
         continue;
-      u8 *base = &seq_par_output_value[track][(u32)par_layer*num_p_steps];
+      u8 *base = &par_buf[(u32)par_layer*num_p_steps];
       u16 step;
-      for(step=0; step<num_p_steps; ++step) {
+      for(step=step_lo; step<step_hi; ++step) {
         u8 note = base[step];
         if( !note )
           continue;
@@ -423,17 +473,63 @@ static void chord_mask_render(u8 track, const seq_processor_slot_t *p)
   }
 }
 
-void SEQ_CORE_RenderTrack(u8 track)
+// Phase D.2 — sweep-window render. Recopies source → ACTIVE output buffer
+// for a bounded [step_lo, step_hi) slice across every par/trg layer/drum,
+// then runs the processor stack on the same slice. Writes directly to the
+// active half-buffer (tearing during knob motion is acceptable; the tick
+// only reads the slice we just wrote). Dirty stays set so the next tick re-
+// evaluates: still sweeping → another slice render; quiet now → full catch-up
+// quiet render fires and clears dirty.
+static void sweep_window_render(u8 track)
 {
-  if( track >= SEQ_CORE_NUM_TRACKS )
+  u16 num_p_steps = (u16)SEQ_PAR_NumStepsGet(track);
+  if( !num_p_steps )
     return;
-  if( !seq_render_dirty[track] )
+  u16 step_lo = (u16)(seq_core_trk[track].step % num_p_steps);
+  u16 step_hi = step_lo + SEQ_RENDER_SWEEP_LOOKAHEAD;
+  if( step_hi > num_p_steps ) step_hi = num_p_steps;
+  u16 step_count = step_hi - step_lo;
+  if( !step_count )
     return;
-  memcpy(seq_par_output_value[track], seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
-  memcpy(seq_trg_output_value[track], seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
 
-  // Iterate processor stack: each enabled slot mutates the output buffer.
-  // Empty/disabled slots short-circuit; ordering within a track is slot index.
+  u8 *par_buf = SEQ_PAR_OutputActive(track);
+  u8 *trg_buf = SEQ_TRG_OutputActive(track);
+
+  // Par window copy across every (instrument, layer).
+  u8 num_p_layers = (u8)SEQ_PAR_NumLayersGet(track);
+  u8 num_p_instr  = (u8)SEQ_PAR_NumInstrumentsGet(track);
+  u8 instr, layer;
+  for(instr=0; instr<num_p_instr; ++instr) {
+    for(layer=0; layer<num_p_layers; ++layer) {
+      u32 base = (u32)instr * num_p_layers * num_p_steps + (u32)layer * num_p_steps;
+      memcpy(&par_buf[base + step_lo],
+             &seq_par_layer_value[track][base + step_lo],
+             step_count);
+    }
+  }
+
+  // Trg window copy — step_lo/step_hi project onto step8 byte addressing.
+  u16 num_t_step8 = (u16)(SEQ_TRG_NumStepsGet(track) / 8);
+  if( num_t_step8 ) {
+    u16 step8_lo = step_lo / 8;
+    u16 step8_hi = (step_hi + 7) / 8;
+    if( step8_hi > num_t_step8 ) step8_hi = num_t_step8;
+    u16 step8_count = (step8_hi > step8_lo) ? (step8_hi - step8_lo) : 0;
+    if( step8_count ) {
+      u8 num_t_layers = (u8)SEQ_TRG_NumLayersGet(track);
+      u8 num_t_instr  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+      for(instr=0; instr<num_t_instr; ++instr) {
+        for(layer=0; layer<num_t_layers; ++layer) {
+          u32 base = (u32)instr * num_t_layers * num_t_step8 + (u32)layer * num_t_step8;
+          memcpy(&trg_buf[base + step8_lo],
+                 &seq_trg_layer_value[track][base + step8_lo],
+                 step8_count);
+        }
+      }
+    }
+  }
+
+  // Processor stack on the window slice.
   u8 slot;
   for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
     const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
@@ -441,13 +537,55 @@ void SEQ_CORE_RenderTrack(u8 track)
       continue;
     switch( p->id ) {
       case SEQ_PROCESSOR_ID_CHORD_MASK:
-        chord_mask_render(track, p);
+        chord_mask_render_range(track, p, par_buf, step_lo, step_hi);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+void SEQ_CORE_RenderTrack(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  if( !seq_render_dirty[track] )
+    return;
+
+  if( SEQ_CORE_RenderSweeping(track) ) {
+    // Sweep regime — partial slice into active half, no flip, keep dirty so
+    // the next tick re-runs the sweep until the touched timestamp expires.
+    sweep_window_render(track);
+    return;
+  }
+
+  // Quiet regime — full render into the inactive half, then atomic flip.
+  u8 *par_buf = SEQ_PAR_OutputInactive(track);
+  u8 *trg_buf = SEQ_TRG_OutputInactive(track);
+  memcpy(par_buf, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
+  memcpy(trg_buf, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+
+  // Iterate processor stack on the inactive half. Empty/disabled slots
+  // short-circuit; ordering within a track is slot index.
+  u16 num_p_steps = (u16)SEQ_PAR_NumStepsGet(track);
+  u8 slot;
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+    if( p->id == SEQ_PROCESSOR_ID_NONE || !p->enabled )
+      continue;
+    switch( p->id ) {
+      case SEQ_PROCESSOR_ID_CHORD_MASK:
+        chord_mask_render_range(track, p, par_buf, 0, num_p_steps);
         break;
       default:
         break;
     }
   }
 
+  // Single-byte XOR — atomic on Cortex-M, so the tick path never sees a half-
+  // rendered output. After this point SEQ_*_OutputActive() returns the just-
+  // populated buffer.
+  seq_render_active_buf[track] ^= 1;
   seq_render_dirty[track] = 0;
 }
 
@@ -470,11 +608,13 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
     slot->enabled  = 1;
     slot->strength = tcc->chordmask_strength;
     slot->bus      = tcc->busasg.bus;
+    SEQ_CORE_RenderTouched(track);
   } else if( slot->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
     slot->id       = SEQ_PROCESSOR_ID_NONE;
     slot->enabled  = 0;
     slot->strength = 0;
     slot->bus      = 0;
+    SEQ_CORE_RenderTouched(track);
   }
 }
 

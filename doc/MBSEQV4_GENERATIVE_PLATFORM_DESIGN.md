@@ -766,6 +766,44 @@ Append-only-ish; revise an entry only with a dated note.
       (D.1); render scheduling = tick prologue + sweep-window live render,
       defer FreeRTOS background task until §A4 #5/#6 measure a real miss
       (D.2/D.3).
+    - **D.1: Per-track touched timestamp. ✓ DONE 2026-05-25.**
+      `seq_render_touched_ms[track]` bumped by `SEQ_CORE_RenderTouched()`,
+      which `SEQ_CORE_ChordMaskSlotSync` calls on every slot-relevant CC
+      write (MODE / CHORDMASK_STRENGTH / BUSASG). `SEQ_CORE_RenderSweeping()`
+      returns 1 if the last touch was within `SEQ_RENDER_SWEEP_MS = 50` ms,
+      using `MIOS32_TIMESTAMP_GetDelay()` for wrap-safe arithmetic. +64 B bss
+      (16 × u32), zero new CCM. Future processors will use the same helper.
+    - **D.2: Sweep-window live render. ✓ DONE 2026-05-25.** During sweep
+      (touch < 50 ms), the renderer copies only `[current_step,
+      current_step + 4)` from source → active output across every par/trg
+      layer, then runs the processor stack on the same slice. Dirty stays
+      set so each subsequent tick re-renders the slice until the touched
+      timestamp expires. Lookahead constant (`SEQ_RENDER_SWEEP_LOOKAHEAD = 4`)
+      chosen so a 50 ms sweep at 96 BPM 32nds covers ~4 ticks of playhead
+      travel — the playhead never reads a stale step within the sweep
+      window. `chord_mask_render_range()` is the shared body; the quiet
+      path passes `(0, num_steps)` for the whole buffer.
+    - **D.3: Double-buffered output. ✓ DONE 2026-05-25.** `seq_par_output_value`
+      and `seq_trg_output_value` gained an outer `[2]` half-buffer index;
+      `seq_render_active_buf[track]` (1 byte/track) selects which half the
+      tick reads via `SEQ_PAR_OutputActive()/SEQ_TRG_OutputActive()` inline
+      accessors. Quiet render writes the inactive half, then a single-byte
+      XOR flips `active_buf` (atomic on Cortex-M, so the tick path never
+      sees a half-rendered output). Sweep render writes to the active half
+      directly (no flip — tearing during knob motion accepted; the playhead
+      only reads the window we're actively maintaining). RAM cost: **+20 KB
+      in CCMRAM exactly** (1024 par + 256 trg × 16 tracks × 1 extra half),
+      bringing CCMRAM to 40.25 KB used / 23.75 KB free of 64 KB; +16 B main
+      bss for `seq_render_active_buf`. Matches §A5 prediction. Harness 23/23
+      unchanged against phase D firmware. *Cosmetic until phase E:* with
+      synchronous render in tick prologue the flip is functionally redundant
+      vs single-buffer, but the structure is now in place so a phase-E
+      background renderer can fill the inactive half without colliding with
+      the tick read. *Behavioral test deferral:* dedicated sweep ↔ quiet
+      transition tests would need new testctrl probes (active_buf, regime);
+      deferred until phase E generators give the distinction musically-
+      observable consequences. The existing 23-test harness exercises both
+      paths (any CC write enters sweep; ticks after 50 ms enter quiet).
   - **E: Generator workflow basics.** ENGAGE/DISENGAGE on PITCHGEN page (or its
     successor) with LED state. Per-(track, instrument) generator instance from a
     shared pool (cap 64, §A5). On ENGAGE: snapshot pre-engagement par-layer into
@@ -846,10 +884,17 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   the existing `AHB_SECTION` pattern. Linker `.bss_ccm` / `.bss_ccm.*`
   sections in `etc/ld/STM32F4xx/STM32F407VG.ld` route to the 64 KB CCMRAM
   region.
-- **Render task scheduling** (phase D): low-prio FreeRTOS task vs cooperative idle.
-  Sets worst-case latency and priority-inversion exposure. §A4 test #6 measures.
-- **Knob-moving detection** (phase D): encoder-changed debounce / touch sense /
-  per-param dirty timestamps. Verify what encoder hardware exposes in this fork.
+- **Render task scheduling — CLOSED 2026-05-25 (phase D).** Tick prologue +
+  sweep-window live render. No new FreeRTOS task. `SEQ_CORE_RenderTracks` in
+  the tick prologue picks sweep vs quiet per track based on touched timestamp.
+  FreeRTOS background task deferred until §A4 #5/#6 measure a real worst-case
+  miss; today's chord_mask render is single-digit µs so a background task
+  would buy nothing.
+- **Knob-moving detection — CLOSED 2026-05-25 (phase D).** Per-track
+  `seq_render_touched_ms` timestamp. `SEQ_CC_Set` cases for slot-relevant
+  fields call `SEQ_CORE_RenderTouched()` via `SEQ_CORE_ChordMaskSlotSync`.
+  Cheaper than encoder-input hooking; doesn't depend on hardware specifics;
+  generalizes to future processor params.
 - **Per-step vs whole-buffer cache invalidation** (phase D): whole-buffer default
   is fine; window position is the incremental special case (deferred to v2 windowing).
 - **TRKMODE ChordMask UX migration — CLOSED 2026-05-25 (phase C).** Shortcut

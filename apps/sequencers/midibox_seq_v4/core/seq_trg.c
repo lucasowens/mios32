@@ -31,12 +31,12 @@
 // use SEQ_TRG_Get/Set
 u8 seq_trg_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_TRG_MAX_BYTES];
 
-// Phase A render cache: identity-rendered mirror in CCM SRAM. Tick path reads
-// here; writers target source above and SEQ_CORE_RenderDirtySet the track.
+// Phase D.3 — double-buffered output mirror in CCM SRAM. See seq_trg.h /
+// seq_par.h for the buffer protocol; use SEQ_TRG_OutputActive/Inactive().
 #ifndef CCM_SECTION
 #define CCM_SECTION
 #endif
-u8 CCM_SECTION seq_trg_output_value[SEQ_CORE_NUM_TRACKS][SEQ_TRG_MAX_BYTES];
+u8 CCM_SECTION seq_trg_output_value[SEQ_CORE_NUM_TRACKS][2][SEQ_TRG_MAX_BYTES];
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -172,8 +172,8 @@ s32 SEQ_TRG_Get(u8 track, u16 step, u8 trg_layer, u8 trg_instrument)
     return 0; // invalid step position: return 0 (trigger not set)
 
   u8 step_mask = 1 << (step % 8);
-  // Phase A: read from output mirror; see SEQ_PAR_Get note above.
-  return (seq_trg_output_value[track][step_ix] & step_mask) ? 1 : 0;
+  // Phase D.3: read from active half of double-buffered output mirror.
+  return (SEQ_TRG_OutputActive(track)[step_ix] & step_mask) ? 1 : 0;
 }
 
 
@@ -189,7 +189,7 @@ s32 SEQ_TRG_Get8(u8 track, u8 step8, u8 trg_layer, u8 trg_instrument)
   if( step_ix >= SEQ_TRG_MAX_BYTES )
     return 0; // invalid step position: return 0 (trigger not set)
 
-  return seq_trg_output_value[track][step_ix];
+  return SEQ_TRG_OutputActive(track)[step_ix];
 }
 
 
@@ -205,7 +205,7 @@ s32 SEQ_TRG_Get16(u8 track, u8 step16, u8 trg_layer, u8 trg_instrument)
   if( step_ix >= SEQ_TRG_MAX_BYTES )
     return 0; // invalid step position: return 0 (trigger not set)
 
-  u8 *values = (u8 *)&seq_trg_output_value[track][step_ix];
+  u8 *values = &SEQ_TRG_OutputActive(track)[step_ix];
   u16 ret = *values;
   ++values;
   ret |= ((u16)*values << 8);

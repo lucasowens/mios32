@@ -118,9 +118,13 @@ extern u8 SEQ_PAR_MaxValueGet(seq_par_layer_type_t par_type);
 // use SEQ_PAR_Get/Set
 extern u8 seq_par_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
 
-// Phase A render cache: identity-rendered mirror in CCM SRAM. Tick path reads
-// here; do not write directly. Callers that bulk-mutate seq_par_layer_value
-// must SEQ_CORE_RenderDirtySet(track) so the next tick refreshes this.
-extern u8 seq_par_output_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
+// Phase D.3 — double-buffered output. Outer dim 2 is the half-buffer index:
+// seq_render_active_buf[track] (declared in seq_core.h) selects which half
+// the tick reads. The renderer writes the inactive half on a quiet render
+// and atomically flips active_buf at the end; sweep renders write to the
+// active half directly (tearing during knob motion is acceptable; no swap).
+// Do NOT index seq_par_output_value[track][...] for a step — use the
+// SEQ_PAR_OutputActive(track) accessor (seq_core.h) instead.
+extern u8 seq_par_output_value[SEQ_CORE_NUM_TRACKS][2][SEQ_PAR_MAX_BYTES];
 
 #endif /* _SEQ_PAR_H */

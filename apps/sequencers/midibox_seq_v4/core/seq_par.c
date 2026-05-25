@@ -34,13 +34,14 @@
 #endif
 u8 AHB_SECTION seq_par_layer_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
 
-// Phase A render cache: per-track output mirror. Tick path reads here; writers
-// still target source above and call SEQ_CORE_RenderDirtySet so the next tick's
-// prologue refreshes the mirror via an identity copy.
+// Phase D.3 — double-buffered output mirror. Outer dim 2: active half
+// (tick reads) vs inactive half (renderer writes during quiet renders, then
+// atomically flips). Sweep renders write to active directly. See seq_par.h
+// for the buffer protocol; use SEQ_PAR_OutputActive/Inactive() accessors.
 #ifndef CCM_SECTION
 #define CCM_SECTION
 #endif
-u8 CCM_SECTION seq_par_output_value[SEQ_CORE_NUM_TRACKS][SEQ_PAR_MAX_BYTES];
+u8 CCM_SECTION seq_par_output_value[SEQ_CORE_NUM_TRACKS][2][SEQ_PAR_MAX_BYTES];
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -277,10 +278,11 @@ s32 SEQ_PAR_Get(u8 track, u16 step, u8 par_layer, u8 par_instrument)
   if( step_ix >= SEQ_PAR_MAX_BYTES )
     return 0; // invalid step position: return 0 (parameter not set)
 
-  // Phase A: tick path reads through the rendered output mirror. Writers
-  // target seq_par_layer_value (source) and dirty the track; the next tick
-  // prologue runs the identity render.
-  return seq_par_output_value[track][step_ix];
+  // Phase D.3: tick path reads through the active half of the double-buffered
+  // output mirror. Writers target seq_par_layer_value (source) and dirty the
+  // track; the next quiet render fills the inactive half and atomically flips
+  // active_buf, so the byte read here is always a consistent commit.
+  return SEQ_PAR_OutputActive(track)[step_ix];
 }
 
 
