@@ -998,9 +998,10 @@ Append-only-ish; revise an entry only with a dated note.
       `GP1=ENGAGE/ROLL GP2=UNDO  GP8=BOUNCE`.
     - **As-built encoder layout.** GP1 ENGAGE/ROLL, GP2 UNDO, GP3/4 range
       min/max, GP5 rate, GP6 depth (button = LOCK toggle), GP7 contour,
-      GP8 BOUNCE. Datawheel = step cursor. MULT/ANCHOR/SNAP still
-      explicitly NOT allocated (no fields, no dispatch) — they come if
-      and when listen-test demands.
+      GP8 BOUNCE. Datawheel = step cursor. MULT/ANCHOR/SNAP NOT
+      allocated at phase G — listen-test demand surfaced same session
+      and they shipped as phase H below (GP3/GP4 buttons = ANCHOR/SNAP,
+      GP7 button = MULT cycle).
 
     **Harness automation (added same session).** 7 LCD-scrape dispatch
     tests + 4 behavioral tests in `tests/apps/seq_v4/test_pitchgen_step6.py`.
@@ -1017,11 +1018,11 @@ Append-only-ish; revise an entry only with a dated note.
     SD and survives a pattern-load to a different group. Full harness
     **38/38 green** against the G firmware.
 
-    **Still listen-test only (deferred):** mutate-path LOCK preservation
-    across actual measure-boundary mutation (would need a measure-trigger
-    testctrl command or a play-and-wait cycle; the ROLL path exercises
-    the same lock-respect code so coverage is partial), depth=0 freezing
-    (ROLL ignores depth), contour distribution shape (statistical).
+    **Was: still listen-test only (deferred):** mutate-path LOCK
+    preservation across actual measure-boundary mutation, depth=0
+    freezing, contour distribution shape. **Closed by phase-H coverage
+    pass (2026-05-26, commit `954af895`)** — see phase H "Coverage
+    follow-on" below.
 
   - **H: ANCHOR / SNAP / MULT — done 2026-05-26.** The three §A3 dials
     that step 6 phase G left explicitly unallocated. Shipped as one
@@ -1085,13 +1086,56 @@ Append-only-ish; revise an entry only with a dated note.
     bool` and `mult: tuple[int, ...]`. Full harness **55/55 green**
     against the H firmware.
 
-    **Still listen-test only (deferred):** MULT's effect on the
-    measure-boundary mutate path (would need the same measure-
-    trigger testctrl command phase G already deferred; ROLL ignores
-    MULT by design so it can't be used as a proxy here).
+    **Sizing.** Flash +432 B (after F.3 auto-jump withdrawal, see
+    below); CCMRAM **46.9 → 52.9 KB used / 64 KB**; main RAM unchanged.
 
-    **Sizing.** Flash +704 B; CCMRAM **46.9 → 52.9 KB used / 64 KB**;
-    main RAM unchanged.
+  - **H follow-on: F.3 auto-jump withdrawn — done 2026-05-26.** Live
+    phase-H testing surfaced that the F.3 ENGAGE auto-jump fought the
+    deliberate gesture "engage on *this* drum" by silently relocating
+    the cursor when the drum had Note content. UNDO already protects
+    accidental overwrites (it snapshots inside `SEQ_GENERATOR_Engage`
+    *before* the first source write), so the heuristic was net cost.
+    Removed: `SEQ_GENERATOR_FindFirstEmptyDrum`, the auto-jump branch
+    in PITCHGEN GP1, the dedicated auto-jump test file. See phase F.3
+    entry above for the withdrawal note.
+
+  - **H follow-on: coverage pass — done 2026-05-26 (commit
+    `954af895`).** Closes the step-6 "still listen-test only" gaps
+    that phase G and the initial phase H entry left open. The
+    production mutate path only fires on track-wrap, and ROLL bypasses
+    rate/depth/MULT — so the rate-gated mutate contracts were
+    previously faith-based. Three small testctrl commands expose the
+    math deterministically:
+    - `CMD_GENERATOR_TICK_FORCE` (0x60) — synchronous mutate cycle on
+      a target slot, equivalent to one measure boundary.
+    - `CMD_GENERATOR_DIAL_SET`   (0x61) — set range_min/max/rate/depth/
+      contour to exact values without spamming encoder events through
+      `SEQ_UI_Var8_Inc`.
+    - `CMD_GENERATOR_MULT_SET`   (0x62) — stamp any 4-bit MULT code at
+      a specific step, bypassing the GP7 cycle gesture.
+
+    Public helper `SEQ_GENERATOR_ForceMutate` exposes `mutate_loop` +
+    `write_loop_to_source` for the harness without making the static
+    helper itself public.
+
+    13 new tests in two files:
+    - `test_pitchgen_mutate_path.py` (9): rate=0 pass-through, depth=0
+      freezes (the §2.3 sweep contract), LOCK survives real measure-
+      boundary mutation (vs phase-G's ROLL-only coverage), MULT=0
+      freezes a step across 15 cycles (both even/low-nibble and odd/
+      high-nibble packed-mult paths), MULT=3 mutates harder than
+      MULT=2 (statistical 30 cycles), UNIFORM ≈ flat thirds, TRIANGLE
+      peaks at mid, LOW/HIGH skew.
+    - `test_pitchgen_lifecycle.py` (4): anchor + MULT survive
+      DISENGAGE→re-ENGAGE (SNAP after the round-trip returns to the
+      original auto-anchor, not the rolled state); anchor + MULT
+      cleared on BOUNCE-in-place slot recycle; end-to-end techno-bass
+      workflow ENGAGE → MULT pattern → force-mutate (frozen stay,
+      wild drift) → ROLL bypasses MULT → SNAP restores anchor +
+      preserves MULT → BOUNCE → source par holds snapped bytes.
+
+    Full harness **65/65 green** (52 baseline + 13 new). Flash +368 B
+    for the three new testctrl commands; no CCMRAM or main-RAM change.
 
 - **Step 5 build discipline.** Each phase ships its own harness regression test;
   the §A4 timing tests (#3 same-tick, #4 knob-to-sound, #5 worst-case tick,
