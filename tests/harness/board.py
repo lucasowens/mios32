@@ -35,6 +35,14 @@ from .sysex import (
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
     CMD_GENERATOR_QUERY,
+    CMD_GENERATOR_TICK_FORCE,
+    CMD_GENERATOR_DIAL_SET,
+    CMD_GENERATOR_MULT_SET,
+    DIAL_RANGE_MIN,
+    DIAL_RANGE_MAX,
+    DIAL_RATE,
+    DIAL_DEPTH,
+    DIAL_CONTOUR,
     CMD_UI_TRACK_SET,
     CMD_TRACK_DRUM_PAR_SET,
     CMD_TRACK_DRUM_PAR_GET,
@@ -917,6 +925,121 @@ class Board:
             locks=locks,
             mult=mult,
         )
+
+    def generator_tick_force(
+        self,
+        track: int,
+        instrument: int,
+        timeout: float = 1.0,
+    ) -> None:
+        """Force one mutate cycle on the (track, instrument) generator slot.
+
+        Equivalent to what SEQ_GENERATOR_Tick would do on a real measure-
+        boundary track wrap, but synchronous and decoupled from playback.
+        Lets behavioral tests pin mutate-path contracts (depth=0 freezing,
+        LOCK preservation, MULT scaling) deterministically — ROLL bypasses
+        rate/depth/MULT and can't substitute.
+
+        Raises ValueError if no slot is allocated for the pair.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_GENERATOR_TICK_FORCE, bytes([track, instrument]))
+        )
+        payload = self.wait_for_sysex(
+            CMD_GENERATOR_TICK_FORCE, timeout=timeout, since=since
+        )
+        if len(payload) < 3:
+            raise RuntimeError(f"short GENERATOR_TICK_FORCE reply: {payload!r}")
+        if payload[2] != CMD_STATUS_OK:
+            raise ValueError(
+                f"GENERATOR_TICK_FORCE status {payload[2]:#04x} — no slot?"
+            )
+
+    def generator_dial_set(
+        self,
+        track: int,
+        instrument: int,
+        dial_id: int,
+        value: int,
+        timeout: float = 1.0,
+    ) -> None:
+        """Set a single generator dial directly on the slot.
+
+        `dial_id` is one of DIAL_RANGE_MIN / DIAL_RANGE_MAX / DIAL_RATE /
+        DIAL_DEPTH / DIAL_CONTOUR. Bypasses SEQ_UI_Var8_Inc so behavioral
+        tests can land on exact target values (0, 127, etc.) without
+        spamming encoder events. The firmware does not range-clamp on
+        write; callers are responsible for staying inside each dial's
+        documented range.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        if not 0 <= dial_id <= 4:
+            raise ValueError(f"dial_id out of range: {dial_id}")
+        if not 0 <= value <= 127:
+            raise ValueError(f"value out of range: {value}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(
+                CMD_GENERATOR_DIAL_SET,
+                bytes([track, instrument, dial_id, value]),
+            )
+        )
+        payload = self.wait_for_sysex(
+            CMD_GENERATOR_DIAL_SET, timeout=timeout, since=since
+        )
+        if len(payload) < 4:
+            raise RuntimeError(f"short GENERATOR_DIAL_SET reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise ValueError(
+                f"GENERATOR_DIAL_SET status {payload[3]:#04x} (dial={dial_id})"
+            )
+
+    def generator_mult_set(
+        self,
+        track: int,
+        instrument: int,
+        step: int,
+        code: int,
+        timeout: float = 1.0,
+    ) -> None:
+        """Set the per-step MULT code directly (0..15; 0..3 are the live
+        cycle 0×/0.5×/1×/2×, 4..15 reserved → 1×).
+
+        Bypasses the GP7 cycle gesture so tests can stamp any exact code.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        if not 0 <= step < 64:
+            raise ValueError(f"step out of range: {step}")
+        if not 0 <= code <= 15:
+            raise ValueError(f"code out of range: {code}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(
+                CMD_GENERATOR_MULT_SET,
+                bytes([track, instrument, step, code]),
+            )
+        )
+        payload = self.wait_for_sysex(
+            CMD_GENERATOR_MULT_SET, timeout=timeout, since=since
+        )
+        if len(payload) < 4:
+            raise RuntimeError(f"short GENERATOR_MULT_SET reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise ValueError(
+                f"GENERATOR_MULT_SET status {payload[3]:#04x} "
+                f"(step={step}, code={code})"
+            )
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:
         """Read the current 2x80 LCD buffer from the firmware."""

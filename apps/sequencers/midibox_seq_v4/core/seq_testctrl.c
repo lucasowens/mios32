@@ -59,6 +59,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_UI_TRACK_SET      0x5d
 #define CMD_TRACK_DRUM_PAR_SET 0x5e
 #define CMD_TRACK_DRUM_PAR_GET 0x5f
+#define CMD_GENERATOR_TICK_FORCE 0x60
+#define CMD_GENERATOR_DIAL_SET   0x61
+#define CMD_GENERATOR_MULT_SET   0x62
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -562,6 +565,125 @@ static void cmd_track_drum_par_set(mios32_midi_port_t port, const u8 *payload, u
   seq_ui_display_update_req = 1;
   reply[3] = 0x01;
   send_reply(port, CMD_TRACK_DRUM_PAR_SET, reply, sizeof(reply));
+}
+
+
+// CMD_GENERATOR_TICK_FORCE payload: [track, instr]
+// Reply payload: [track, instr, status]
+//   status 0x01 = ok, 0x02 = bad payload, 0x03 = no allocated slot.
+//
+// Forces one synchronous mutate cycle on the generator slot at
+// (track, instr), exactly as SEQ_GENERATOR_Tick would on a real track
+// wrap. Used by behavioral tests to pin the §8 step 6 mutate-path
+// carveouts (depth=0 freezing, LOCK preservation across actual mutate,
+// MULT scaling) without orchestrating playback. ROLL doesn't cover
+// these — ROLL bypasses rate/depth/MULT — so this is the only way to
+// exercise the production mutate path under the harness.
+static void cmd_generator_tick_force(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[3] = { 0, 0, 0x02 };
+  if( plen < 2 ) {
+    send_reply(port, CMD_GENERATOR_TICK_FORCE, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+  u8 instr = payload[1] & 0x0f;
+  reply[0] = track;
+  reply[1] = instr;
+  s32 r = SEQ_GENERATOR_ForceMutate(track, instr);
+  reply[2] = (r == 0) ? 0x01 : 0x03;
+  send_reply(port, CMD_GENERATOR_TICK_FORCE, reply, sizeof(reply));
+}
+
+
+// CMD_GENERATOR_DIAL_SET payload: [track, instr, dial_id, value]
+// Reply payload: [track, instr, dial_id, status]
+//   status 0x01 = ok, 0x02 = bad payload (dial_id out of range), 0x03 = no slot.
+//
+// Dial IDs: 0=range_min, 1=range_max, 2=mutation_rate, 3=mutation_depth,
+// 4=contour_shape. Value is the raw 7-bit dial value; the firmware does
+// not range-clamp here (tests are responsible for staying inside the
+// dial's documented range), but does normalize on read via the existing
+// helpers. Lets behavioral tests set exact dial values without spamming
+// encoder events through SEQ_UI_Var8_Inc.
+#define DIAL_RANGE_MIN  0
+#define DIAL_RANGE_MAX  1
+#define DIAL_RATE       2
+#define DIAL_DEPTH      3
+#define DIAL_CONTOUR    4
+static void cmd_generator_dial_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_GENERATOR_DIAL_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track    = payload[0] & 0x0f;
+  u8 instr    = payload[1] & 0x0f;
+  u8 dial_id  = payload[2];
+  u8 value    = payload[3] & 0x7f;
+  reply[0] = track;
+  reply[1] = instr;
+  reply[2] = dial_id;
+
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+  if( g == NULL ) {
+    reply[3] = 0x03;
+    send_reply(port, CMD_GENERATOR_DIAL_SET, reply, sizeof(reply));
+    return;
+  }
+
+  switch( dial_id ) {
+    case DIAL_RANGE_MIN: g->range_min      = value; break;
+    case DIAL_RANGE_MAX: g->range_max      = value; break;
+    case DIAL_RATE:      g->mutation_rate  = value; break;
+    case DIAL_DEPTH:     g->mutation_depth = value; break;
+    case DIAL_CONTOUR:   g->contour_shape  = value; break;
+    default:
+      send_reply(port, CMD_GENERATOR_DIAL_SET, reply, sizeof(reply));
+      return;
+  }
+  reply[3] = 0x01;
+  send_reply(port, CMD_GENERATOR_DIAL_SET, reply, sizeof(reply));
+}
+
+
+// CMD_GENERATOR_MULT_SET payload: [track, instr, step, code]
+// Reply payload: [track, instr, step, status]
+//   status 0x01 = ok, 0x02 = bad payload (step ≥ LOOP_LEN), 0x03 = no slot.
+//
+// Sets the per-step MULT code directly. Code is masked to 4 bits; the
+// mutate path interprets 0..3 as {0×, 0.5×, 1×, 2×} and treats codes
+// 4..15 as the default (1×). The MultCycle gesture wraps at MULT_NUM,
+// but this command lets tests stamp any 4-bit value (including reserved
+// codes) for compatibility coverage.
+static void cmd_generator_mult_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_GENERATOR_MULT_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+  u8 instr = payload[1] & 0x0f;
+  u8 step  = payload[2];
+  u8 code  = payload[3] & 0x0f;
+  reply[0] = track;
+  reply[1] = instr;
+  reply[2] = step;
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) {
+    send_reply(port, CMD_GENERATOR_MULT_SET, reply, sizeof(reply));
+    return;
+  }
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+  if( g == NULL ) {
+    reply[3] = 0x03;
+    send_reply(port, CMD_GENERATOR_MULT_SET, reply, sizeof(reply));
+    return;
+  }
+  SEQ_GENERATOR_MultSet(g, step, code);
+  reply[3] = 0x01;
+  send_reply(port, CMD_GENERATOR_MULT_SET, reply, sizeof(reply));
 }
 
 
@@ -1185,6 +1307,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRACK_DRUM_PAR_GET:
             cmd_track_drum_par_get(port, payload_buf, payload_len);
+            break;
+          case CMD_GENERATOR_TICK_FORCE:
+            cmd_generator_tick_force(port, payload_buf, payload_len);
+            break;
+          case CMD_GENERATOR_DIAL_SET:
+            cmd_generator_dial_set(port, payload_buf, payload_len);
+            break;
+          case CMD_GENERATOR_MULT_SET:
+            cmd_generator_mult_set(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

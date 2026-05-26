@@ -588,6 +588,16 @@ s32 SEQ_GENERATOR_MultCycle(u8 track, u8 instrument, u8 step)
 }
 
 
+s32 SEQ_GENERATOR_ForceMutate(u8 track, u8 instrument)
+{
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
+  if( g == NULL ) return -1;
+  mutate_loop(g);
+  write_loop_to_source(g);
+  return 0;
+}
+
+
 /////////////////////////////////////////////////////////////////////////////
 // Tick prologue — called from SEQ_CORE_Tick BEFORE SEQ_CORE_RenderTracks.
 /////////////////////////////////////////////////////////////////////////////

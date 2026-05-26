@@ -33,6 +33,16 @@ CMD_GENERATOR_QUERY = 0x5c
 CMD_UI_TRACK_SET = 0x5d
 CMD_TRACK_DRUM_PAR_SET = 0x5e
 CMD_TRACK_DRUM_PAR_GET = 0x5f
+CMD_GENERATOR_TICK_FORCE = 0x60
+CMD_GENERATOR_DIAL_SET = 0x61
+CMD_GENERATOR_MULT_SET = 0x62
+
+# Dial IDs for CMD_GENERATOR_DIAL_SET — keep in sync with seq_testctrl.c.
+DIAL_RANGE_MIN = 0
+DIAL_RANGE_MAX = 1
+DIAL_RATE = 2
+DIAL_DEPTH = 3
+DIAL_CONTOUR = 4
 
 
 # Mirror of seq_ui_page_t (from seq_ui_pages.h). Add as needed.

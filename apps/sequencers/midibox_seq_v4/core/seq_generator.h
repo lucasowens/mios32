@@ -267,6 +267,15 @@ extern s32 SEQ_GENERATOR_Snap(u8 track, u8 instrument);
 // it (ROLL is the on-demand override that bypasses rate, depth, and MULT).
 extern s32 SEQ_GENERATOR_MultCycle(u8 track, u8 instrument, u8 step);
 
+// Test/harness hook — force one mutate cycle on a specific slot,
+// equivalent to what SEQ_GENERATOR_Tick runs when the track wraps to
+// step 0, but synchronous and decoupled from playback. Lets the harness
+// pin mutate-path contracts (depth=0 freezing, LOCK preservation across
+// real mutation, MULT scaling) deterministically without orchestrating
+// a real measure boundary. Returns 0 on success, -1 if no slot is
+// allocated for (track, instrument).
+extern s32 SEQ_GENERATOR_ForceMutate(u8 track, u8 instrument);
+
 // Tick prologue hook. Call BEFORE SEQ_CORE_RenderTracks() each tick: if a
 // track just wrapped to step 0, mutate every engaged generator on that track
 // and write the loop into the source par-layer. Sets render-dirty so phase D
