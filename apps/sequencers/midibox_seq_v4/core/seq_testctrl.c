@@ -418,19 +418,26 @@ static void cmd_track_drum_init(mios32_midi_port_t port, const u8 *payload, u8 p
 // CMD_GENERATOR_QUERY payload: [track, instrument]
 // Reply payload (status 0x01 = ok):
 //   [track, instr, status, range_min, range_max, mutation_rate,
-//    mutation_depth, contour_shape, engaged,
-//    pack7(loop[64] | locks[8])]    // 72 raw bytes -> 88 wire bytes
+//    mutation_depth, contour_shape, engaged, anchor_valid,
+//    pack7(loop[64] | locks[8] | mult[32])]    // 104 raw bytes -> 120 wire bytes
 // Reply payload (status 0x02 bad / 0x03 no slot):
 //   [track, instr, status]
 //
 // Lets harness tests pin behavioral contracts (LOCK survives mutation, ROLL
-// only touches unlocked steps, depth=0 freezes) without resorting to MIDI
-// capture. Returns raw loop bytes + lock bitmap; callers reconstruct via
-// unpack7. Engaged byte is 0/1 so a single query covers both "slot exists"
-// and "currently mutating".
+// only touches unlocked steps, depth=0 freezes, ANCHOR/SNAP round-trip, MULT
+// scales the rate-gated mutate decision) without resorting to MIDI capture.
+// Returns raw loop bytes + lock bitmap + MULT nibbles; callers reconstruct
+// via unpack7. Engaged byte is 0/1 so a single query covers both "slot
+// exists" and "currently mutating"; anchor_valid is 0/1.
+//
+// NOTE: anchor[] itself is NOT shipped — testing SNAP only requires comparing
+// loop[] before-anchor vs after-snap, and anchor_valid is enough to confirm
+// the auto-anchor at ENGAGE fired. Skipping anchor[] keeps the wire payload
+// under the comfortable SysEx single-frame budget.
 static void cmd_generator_query(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
-  u8 reply[3 + 6 + 96] = { 0, 0, 0x02 };
+  // 10 fixed-header bytes + pack7(104) ≈ 130 bytes; round up for safety.
+  u8 reply[3 + 7 + 128] = { 0, 0, 0x02 };
   if( plen < 2 ) {
     send_reply(port, CMD_GENERATOR_QUERY, reply, 3);
     return;
@@ -454,13 +461,17 @@ static void cmd_generator_query(mios32_midi_port_t port, const u8 *payload, u8 p
   reply[6] = g->mutation_depth;
   reply[7] = g->contour_shape;
   reply[8] = g->engaged ? 1 : 0;
+  reply[9] = g->anchor_valid ? 1 : 0;
 
-  // Bundle loop[64] + locks[8] into 72 raw bytes, pack7 to wire.
-  u8 raw[SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_LOCKS_BYTES];
+  // Bundle loop[64] + locks[8] + mult[32] into 104 raw bytes, pack7 to wire.
+  u8 raw[SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_LOCKS_BYTES
+         + SEQ_GENERATOR_MULT_BYTES];
   memcpy(raw, g->loop, SEQ_GENERATOR_LOOP_LEN);
   memcpy(raw + SEQ_GENERATOR_LOOP_LEN, g->locks, SEQ_GENERATOR_LOCKS_BYTES);
+  memcpy(raw + SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_LOCKS_BYTES,
+         g->mult, SEQ_GENERATOR_MULT_BYTES);
 
-  u32 w = 9 + pack7(raw, sizeof(raw), &reply[9]);
+  u32 w = 10 + pack7(raw, sizeof(raw), &reply[10]);
   send_reply(port, CMD_GENERATOR_QUERY, reply, w);
 }
 
@@ -522,9 +533,9 @@ static void cmd_ui_track_set(mios32_midi_port_t port, const u8 *payload, u8 plen
 // CMD_TRACK_DRUM_PAR_SET payload: [track, instr, step, value]
 // Reply payload: [track, instr, step, status]   status 0x01 = set, 0x02 = bad.
 //
-// Direct write to a drum-slot Note par-layer step. Used by the auto-jump
-// harness to seed a drum with content without going through ENGAGE
-// (which would itself trigger the auto-jump logic under test).
+// Direct write to a drum-slot Note par-layer step. Lets the harness seed
+// a drum with content without going through ENGAGE — useful for tests
+// that need to set up specific par-buffer state ahead of a UI gesture.
 static void cmd_track_drum_par_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
   u8 reply[4] = { 0, 0, 0, 0x02 };

@@ -1,6 +1,6 @@
 // $Id$
 /*
- * Pitch Generator page — phase E + F + G (§8 step 6 polish).
+ * Pitch Generator page — phase E + F + G + H (§8 step 6 polish + follow-on).
  *
  * GP1 ENGAGE / ROLL / DISENGAGE (LED reflects engaged state).
  *       - disengaged          → ENGAGE (alloc slot, snapshot par, seed loop)
@@ -13,13 +13,16 @@
  * GP2 UNDO (restores pre-engage par snapshot, disengages every gen on that
  *     track).
  * GP3 Range min   (encoder; clamped to <= range_max).
+ *     Button press: ANCHOR — re-snapshot current loop as new identity (H).
  * GP4 Range max   (encoder; clamped to >= range_min).
+ *     Button press: SNAP — restore loop from anchor (hard return, H).
  * GP5 Mutation rate 0..127 (encoder; the §5 journey dial, sweepable live).
  * GP6 Mutation depth 0..127 (encoder; 0=frozen, 127=full reroll, between =
  *     ±depth semitone perturb around existing value). Phase G.
- *     Button press: toggle per-step LOCK at cursor step (phase G.4 — TODO).
+ *     Button press: toggle per-step LOCK at cursor step (phase G.4).
  * GP7 Contour shape (encoder cycles UNIFORM/LOW_BIAS/HIGH_BIAS/TRIANGLE).
  *     Biases the full-reroll distribution. Phase G.
+ *     Button press: cycle per-step MULT at cursor (0×/0.5×/1×/2×). Phase H.
  * GP8 BOUNCE — phase F. Dual semantics on one button:
  *       - generator engaged on (track, instr)  → freeze + free the slot
  *         (SEQ_GENERATOR_Bounce). Loop is discarded; source stays as last
@@ -157,52 +160,27 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
       return 1;
     }
 
-    // disengaged → ENGAGE
+    // disengaged → ENGAGE on the cursor drum, unconditionally.
     //
-    // §3 default-destination rule: "first empty legal layer in the
-    // current track." If the cursor sits on a drum that already has
-    // Note content AND no existing gen slot, jump to the first empty
-    // legal drum before engaging — protects user-authored material from
-    // the gen's first source-write. If every drum has content, fall
-    // through to in-place engage (the UNDO snapshot is the safety net).
-    u8 auto_jumped = 0;
-    if( SEQ_GENERATOR_Get(track, instr) == NULL ) {
-      seq_cc_trk_t *tcc = &seq_cc_trk[track];
-      if( tcc->event_mode == SEQ_EVENT_MODE_Drum &&
-          tcc->link_par_layer_note >= 0 ) {
-        u8 par_layer = (u8)tcc->link_par_layer_note;
-        s32 nps_s = SEQ_PAR_NumStepsGet(track);
-        if( nps_s > 0 ) {
-          u16 nps = (u16)nps_s;
-          u16 s;
-          u8  cursor_has_content = 0;
-          for(s=0; s<nps; ++s) {
-            if( SEQ_PAR_Get(track, s, par_layer, instr) != 0 ) {
-              cursor_has_content = 1;
-              break;
-            }
-          }
-          u8 candidate;
-          if( cursor_has_content &&
-              SEQ_GENERATOR_FindFirstEmptyDrum(track, &candidate) ) {
-            ui_selected_instrument = candidate;
-            instr = candidate;
-            auto_jumped = 1;
-          }
-        }
-      }
-    }
+    // Earlier (phase F.3) this branch implemented a "first empty legal
+    // layer" auto-jump: if the cursor drum had Note content and no
+    // existing gen slot, the cursor was moved to the first empty drum
+    // before engaging. Intent: protect user-authored material from the
+    // gen's first source-write. In live use that fought the deliberate
+    // gesture "I want the gen on *this* drum" — selecting a drum then
+    // pressing ENGAGE silently landed elsewhere. The UNDO snapshot
+    // (taken inside SEQ_GENERATOR_Engage *before* the first source
+    // write) already protects against accidental overwrites, so the
+    // auto-jump is removed: user pick always wins. §3 "default
+    // destination = first empty legal layer" still applies in spirit —
+    // "default" means "absent a deliberate cursor placement," but we
+    // can't reliably detect that, so deferring to the cursor is the
+    // right call.
 
     s32 r = SEQ_GENERATOR_Engage(track, instr);
     switch( r ) {
       case 0:
-        if( auto_jumped ) {
-          char line2[21];
-          sprintf(line2, "ENGAGED on D%2d", instr + 1);
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", line2);
-        } else {
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
-        }
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
         break;
       case -1:
         SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "pool full (64/64)");
@@ -320,7 +298,48 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
     return 1;
   }
 
-  if( button >= SEQ_UI_BUTTON_GP3 && button <= SEQ_UI_BUTTON_GP7 ) {
+  // Phase H gestures. GP3/GP4/GP7 button-presses (previously no-ops that
+  // fell through into Encoder_Handler with incrementer 0) now dispatch
+  // ANCHOR/SNAP/MULT. Encoder rotation on those same GPs still tunes
+  // range_min / range_max / contour as before — button vs. encoder are
+  // distinct events at this layer.
+  if( button == SEQ_UI_BUTTON_GP3 ) {
+    s32 r = SEQ_GENERATOR_Anchor(track, instr);
+    if( r < 0 )
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "ENGAGE first to ANCHOR");
+    else
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ANCHORED");
+    return 1;
+  }
+
+  if( button == SEQ_UI_BUTTON_GP4 ) {
+    s32 r = SEQ_GENERATOR_Snap(track, instr);
+    switch( r ) {
+      case 0:  SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "SNAPPED");      break;
+      case -2: SEQ_UI_Msg(SEQ_UI_MSG_USER, 1500, "Pitch Gen:", "no anchor yet"); break;
+      default: SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "ENGAGE first to SNAP");
+    }
+    return 1;
+  }
+
+  if( button == SEQ_UI_BUTTON_GP7 ) {
+    s32 r = SEQ_GENERATOR_MultCycle(track, instr, ui_selected_step);
+    if( r < 0 ) {
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "ENGAGE first to MULT");
+    } else {
+      // SEQ_UI_Msg takes `char *` (no const) on its line args; keep the
+      // table mutable so we don't need a cast at the call site.
+      static char *mult_name[SEQ_GENERATOR_MULT_NUM] = {
+        "MULT 0x  (mute)",  "MULT 0.5x",  "MULT 1x",  "MULT 2x"
+      };
+      static char fallback[] = "MULT ?";
+      char *line2 = (r < SEQ_GENERATOR_MULT_NUM) ? mult_name[r] : fallback;
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 600, "Pitch Gen:", line2);
+    }
+    return 1;
+  }
+
+  if( button == SEQ_UI_BUTTON_GP5 ) {
     return Encoder_Handler((seq_ui_encoder_t)button, 0);
   }
 
@@ -334,8 +353,8 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 // 00000000001111111111222222222233333333330000000000111111111122222222223333333333
 // 01234567890123456789012345678901234567890123456789012345678901234567890123456789
 // <--------------------------------------><-------------------------------------->
-// PITCH GEN  Trk 1.D 3   state:ENGAGED      GP1=ENGAGE/ROLL GP2=UNDO  GP8=BOUNCE
-// Lo:C 2 Hi:C 6 R:008 D:127 Ct:Uni          Stp:03 [L] GP6=LOCK SEL+GP1=disengage
+// PITCH GEN  Trk 1.D 3   state:ENGAGED      G1=EN/RL G2=UN G3=ANC G4=SNP G8=BNC
+// Lo:C 2 Hi:C 6 R:008 D:127 Ct:Uni          Stp:03 [L] M:1x   G6=LCK G7=MULT
 /////////////////////////////////////////////////////////////////////////////
 static const char *contour_name(u8 shape)
 {
@@ -344,6 +363,20 @@ static const char *contour_name(u8 shape)
     case SEQ_GENERATOR_CONTOUR_HIGH_BIAS: return "Hi ";
     case SEQ_GENERATOR_CONTOUR_TRIANGLE:  return "Tri";
     default:                              return "Uni";
+  }
+}
+
+// MULT label for the engaged-hint row. Padded to a fixed 4-char width so the
+// surrounding LCD slots line up regardless of code (the cursor scroll shouldn't
+// reflow the rest of the row).
+static const char *mult_label(u8 code)
+{
+  switch( code ) {
+    case SEQ_GENERATOR_MULT_MUTE:   return "0x  ";
+    case SEQ_GENERATOR_MULT_HALF:   return "0.5x";
+    case SEQ_GENERATOR_MULT_DEFAULT:return "1x  ";
+    case SEQ_GENERATOR_MULT_DOUBLE: return "2x  ";
+    default:                       return "??  ";
   }
 }
 
@@ -386,7 +419,7 @@ static s32 LCD_Handler(u8 high_prio)
   else                 SEQ_LCD_PrintString("state:--          ");
 
   SEQ_LCD_CursorSet(40, 0);
-  SEQ_LCD_PrintString("GP1=ENGAGE/ROLL GP2=UNDO  GP8=BOUNCE    ");
+  SEQ_LCD_PrintString("G1=EN/RL G2=UN G3=ANC G4=SNP G8=BNC     ");
 
   // Row 1 LHS: dials. Phase G adds depth (D:) and contour (Ct:).
   SEQ_LCD_CursorSet(0, 1);
@@ -409,10 +442,13 @@ static s32 LCD_Handler(u8 high_prio)
   else if( tcc->link_par_layer_note < 0 )
     SEQ_LCD_PrintString("(assign Note in PAR-ASG first)          ");
   else if( engaged ) {
-    // Show cursor + its lock state + key gestures.
+    // Show cursor + its lock state + per-step MULT + key gestures.
     u8 locked = SEQ_GENERATOR_LockGet(g, ui_selected_step);
-    SEQ_LCD_PrintFormattedString("Stp:%02d %s GP6=LOCK SEL+GP1=disen ",
-                                 ui_selected_step + 1, locked ? "[L]" : "[ ]");
+    u8 mc     = SEQ_GENERATOR_MultGet(g, ui_selected_step);
+    SEQ_LCD_PrintFormattedString("Stp:%02d %s M:%s G6=LCK G7=MULT        ",
+                                 ui_selected_step + 1,
+                                 locked ? "[L]" : "[ ]",
+                                 mult_label(mc));
   } else if( has_other_engaged ) {
     SEQ_LCD_PrintFormattedString("GEN on D%2d  GP8 relocates here       ",
                                  other_engaged_instr + 1);

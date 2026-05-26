@@ -32,7 +32,6 @@ GP_ENC_7 = Encoder.GP(7)
 # overlays the page LCD; sleep through it before reading the LCD.
 SETTLE = 0.15
 ENGAGE_MSG_MS = 750
-ENGAGE_JUMPED_MSG_MS = 1000  # phase F.3 auto-jumped popup is "ENGAGED on Dnn"
 ROLL_MSG_MS = 500
 LOCK_MSG_MS = 500
 DISENGAGE_MSG_MS = 750
@@ -198,8 +197,8 @@ def test_depth_encoder_changes_lcd_value(board):
     _engage(board)
 
     text = _lcd_text(board)
-    assert "D:127" in text, (
-        f"default depth should be 127 (full-reroll = phase E behavior):\n{text}"
+    assert "D:120" in text, (
+        f"default depth should be 120 (techno default tuned 2026-05-26):\n{text}"
     )
 
     # Dial down.
@@ -207,9 +206,9 @@ def test_depth_encoder_changes_lcd_value(board):
         board.encoder(GP_ENC_6, -3)
     time.sleep(SETTLE)
     text = _lcd_text(board)
-    # The exact value isn't important — what matters is it's not 127.
-    assert "D:127" not in text, (
-        f"after dialing GP6 down, depth should no longer be 127:\n{text}"
+    # The exact value isn't important — what matters is it's not 120.
+    assert "D:120" not in text, (
+        f"after dialing GP6 down, depth should no longer be 120:\n{text}"
     )
 
 
@@ -217,27 +216,31 @@ def test_depth_encoder_changes_lcd_value(board):
 def test_contour_encoder_cycles_shape(board):
     """GP7 encoder cycles through UNIFORM/LOW/HIGH/TRIANGLE; LCD 'Ct:'
     field flips between the 3-char shape names.
+
+    Default is TRIANGLE (techno-tuned 2026-05-26), the top of the
+    enum range. SEQ_UI_Var8_Inc clamps (no wrap), so we dial DOWN to
+    walk the cycle.
     """
     _setup_pitchgen(board)
     _engage(board)
 
     text = _lcd_text(board)
-    assert "Ct:Uni" in text, (
-        f"default contour should be UNIFORM:\n{text}"
-    )
-
-    board.encoder(GP_ENC_7, +1)
-    time.sleep(SETTLE)
-    text = _lcd_text(board)
-    assert "Ct:Lo" in text, (
-        f"after +1 GP7 turn, contour should advance to LOW_BIAS:\n{text}"
-    )
-
-    board.encoder(GP_ENC_7, +2)
-    time.sleep(SETTLE)
-    text = _lcd_text(board)
     assert "Ct:Tri" in text, (
-        f"after another +2, contour should reach TRIANGLE:\n{text}"
+        f"default contour should be TRIANGLE:\n{text}"
+    )
+
+    board.encoder(GP_ENC_7, -1)
+    time.sleep(SETTLE)
+    text = _lcd_text(board)
+    assert "Ct:Hi" in text, (
+        f"after -1 GP7 turn, contour should drop to HIGH_BIAS:\n{text}"
+    )
+
+    board.encoder(GP_ENC_7, -2)
+    time.sleep(SETTLE)
+    text = _lcd_text(board)
+    assert "Ct:Uni" in text, (
+        f"after another -2, contour should reach UNIFORM:\n{text}"
     )
 
 
@@ -385,12 +388,12 @@ def test_bounce_clears_locks_for_next_slot(board):
     (or shared lock storage across slot lifetimes) would leak the old lock
     bitmap into the new gen — silently breaking the "fresh" contract.
 
-    Phase F.3 detail: after BOUNCE-in-place the bounced drum's source par-
-    layer still holds the gen's last loop notes (BOUNCE freezes the gen by
-    leaving its written source intact). So re-ENGAGE triggers the §3
-    "first empty legal layer" auto-jump — the fresh slot lands on D2
-    (instrument index 1), not back on D0. Query wherever the new slot ends
-    up via FindEngagedOnTrack-style scan.
+    The phase F.3 ENGAGE auto-jump was withdrawn in phase H — user pick
+    always wins. So after BOUNCE-in-place the cursor stays on D0, and a
+    second GP1 press allocates a fresh slot at D0 (the bounced loop's
+    par bytes don't gate ENGAGE; only the lock bitmap of the previous
+    slot matters here). UNDO is the documented safety net for the
+    par-buffer overwrite this triggers.
     """
     _setup_pitchgen(board)
     _engage(board)
@@ -413,27 +416,14 @@ def test_bounce_clears_locks_for_next_slot(board):
     queried = board.generator_query(PITCHGEN_TRACK, 0)
     assert queried is None, "BOUNCE-in-place should free the pool slot at D0"
 
-    # Re-ENGAGE — auto-jump moves cursor past the (now-populated) D0 to
-    # the first empty drum, D1. Verify the fresh slot exists somewhere on
-    # the track and has clean locks.
+    # Re-ENGAGE — cursor still on D0, so the fresh slot lands at D0
+    # (post-phase-H: no auto-jump).
     board.press(GP1)
-    _wait_msg_clear(ENGAGE_JUMPED_MSG_MS)
+    _wait_msg_clear(ENGAGE_MSG_MS)
 
-    fresh = None
-    fresh_instr = -1
-    for instr in range(16):
-        candidate = board.generator_query(PITCHGEN_TRACK, instr)
-        if candidate is not None and candidate.engaged:
-            fresh = candidate
-            fresh_instr = instr
-            break
-    assert fresh is not None, (
-        "fresh ENGAGE after BOUNCE should have allocated a slot somewhere "
-        "on the track"
-    )
-    assert fresh_instr != 0, (
-        f"auto-jump should have skipped D0 (still has the bounced loop "
-        f"notes); fresh slot landed at D{fresh_instr+1}"
+    fresh = board.generator_query(PITCHGEN_TRACK, 0)
+    assert fresh is not None and fresh.engaged, (
+        "re-ENGAGE on cursor D0 should allocate a fresh slot there"
     )
     assert not any(fresh.locks), (
         f"fresh ENGAGE after BOUNCE should produce a slot with no locks; "

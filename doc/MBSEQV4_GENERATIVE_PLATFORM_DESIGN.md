@@ -908,15 +908,22 @@ Append-only-ish; revise an entry only with a dated note.
     2026-05-26.** The two phase-F deferred items, shipped together.
     - **ENGAGE auto-jump.** §3 "default destination = first empty legal
       layer in the current track." `SEQ_GENERATOR_FindFirstEmptyDrum`
-      scans drums 0..15 for "no engaged gen + Note par-layer all-zero."
-      GP1 disengaged branch checks if cursor drum has any non-zero Note
-      step AND no allocated slot — if so, jumps `ui_selected_instrument`
-      to the first empty before engaging. Popup is `"ENGAGED on D 5"`
-      vs the plain `"ENGAGED"` when no jump fires. Existing test
-      `test_bounce_clears_locks_for_next_slot` was updated: after
-      BOUNCE-in-place the bounced drum's source still holds the gen's
-      loop notes, so re-ENGAGE now auto-jumps to D2 — the §3-literal
-      behavior, not a regression.
+      scanned drums 0..15 for "no engaged gen + Note par-layer all-zero";
+      GP1 disengaged branch jumped `ui_selected_instrument` to the first
+      empty before engaging when the cursor drum had Note content. Popup
+      was `"ENGAGED on D 5"` vs plain `"ENGAGED"`.
+
+      **Withdrawn 2026-05-26** during phase H listen-testing — the
+      auto-jump fought the deliberate gesture "I want the gen on *this*
+      drum" by silently landing elsewhere. The UNDO snapshot taken inside
+      `SEQ_GENERATOR_Engage` *before* the first source write already
+      protects against accidental overwrites, so the heuristic was net
+      cost. Replaced with: GP1 always engages on the cursor drum, user
+      pick always wins. `SEQ_GENERATOR_FindFirstEmptyDrum` removed; the
+      auto-jump test file (`test_pitchgen_engage_autojump.py`) deleted.
+      §3 "default = first empty" still applies in spirit — "default"
+      means "absent a deliberate cursor placement," which we can't
+      reliably detect, so deferring to the cursor is the right call.
     - **Cross-track processor capture.** `SEQ_CORE_ProcessorBounceCapture`
       copies src's post-processor output → dst's source par+trg, leaves
       src untouched (processor stack + tcc preserved). The §3 "empty
@@ -1015,6 +1022,76 @@ Append-only-ish; revise an entry only with a dated note.
     testctrl command or a play-and-wait cycle; the ROLL path exercises
     the same lock-respect code so coverage is partial), depth=0 freezing
     (ROLL ignores depth), contour distribution shape (statistical).
+
+  - **H: ANCHOR / SNAP / MULT — done 2026-05-26.** The three §A3 dials
+    that step 6 phase G left explicitly unallocated. Shipped as one
+    follow-on commit on top of phase G (no listen-test gating between —
+    they share the same slot growth and live in the same UI surface).
+    - **Slot growth.** `seq_generator_t` 84 → 180 B: header gains
+      `anchor_valid` (1 B; reserved pad shrinks 3→2 B), payload gains
+      `anchor[64]` + `mult[32]` (packed 4-bit nibbles, low=even step,
+      high=odd). Pool: 64 slots × 96 B delta = **+6.0 KB CCMRAM**
+      (46.9 → 52.9 KB used / 64 KB; ~11.1 KB headroom).
+    - **Auto-anchor at ENGAGE.** First-engage path copies seeded loop
+      into `anchor[]` and stamps `anchor_valid = 1`, then memset's
+      `mult[]` to `MULT_PACKED_DEFAULT` (0x22 = code 2 both nibbles =
+      1× = no scaling). Re-engage on a disengaged slot leaves the
+      anchor untouched (the captured identity survives DISENGAGE →
+      ENGAGE). Slot recycle (BOUNCE, relocate, pool re-init) memset's
+      everything to 0.
+    - **SNAP gesture.** `SEQ_GENERATOR_Snap` restores `loop[]` from
+      `anchor[]` and rewrites source so the snap is audible without
+      waiting for the next wrap. Refuses with -2 if the slot has
+      never been anchored (which only happens via a future code path
+      that allocates without seeding — current code paths always
+      anchor at seed). Does NOT disengage (orthogonal to mutation
+      state, per §5.3). Bound to **GP4 button** on the PITCHGEN page.
+    - **ANCHOR gesture.** `SEQ_GENERATOR_Anchor` copies current
+      `loop[]` into `anchor[]` — refresh the captured identity to
+      "what's playing right now." After ANCHOR, subsequent SNAPs
+      return here, not to the original ENGAGE seed. Bound to **GP3
+      button**.
+    - **MULT per-step multiplier.** 4-bit code per step in
+      `mult[32]`. Codes 0..3 cycled by **GP7 button** at the
+      datawheel-cursor step: 0 = 0× (mute mutation), 1 = 0.5×,
+      2 = 1× (default), 3 = 2×. Codes 4..15 reserved (treated as
+      1× by the mutate path) so future expansion is non-breaking.
+      Mutate threshold becomes `mult_threshold(rate, code)` —
+      MULT=0 short-circuits via `continue`, MULT=3 saturates the
+      threshold at 255. **ROLL ignores MULT** (matches the existing
+      ROLL-ignores-rate-and-depth shape; ROLL is the on-demand
+      override that bypasses gating).
+    - **GP button layout (final for step 6).** GP1 ENGAGE/ROLL,
+      GP2 UNDO, GP3 enc=range_min / btn=ANCHOR, GP4 enc=range_max /
+      btn=SNAP, GP5 enc=rate, GP6 enc=depth / btn=LOCK, GP7
+      enc=contour / btn=MULT cycle, GP8 BOUNCE. Datawheel = step
+      cursor.
+    - **LCD.** Row 0 RHS now reads
+      `G1=EN/RL G2=UN G3=ANC G4=SNP G8=BNC`. Engaged-state row 1 RHS:
+      `Stp:NN [L] M:1x   G6=LCK G7=MULT` — adds the per-step MULT
+      label alongside the lock indicator at the cursor.
+
+    **Harness automation (added same session).** 9 tests in
+    `tests/apps/seq_v4/test_pitchgen_step6h.py`: 5 LCD-scrape
+    dispatch tests (GP3/GP4/GP7 popups, GP4 / GP3 no-slot guidance,
+    M:label LCD field flips through full 0→1→2→3→0 cycle) + 4
+    behavioral tests via the extended `CMD_GENERATOR_QUERY`
+    (auto-anchor + mult defaults at ENGAGE, SNAP restores loop[] to
+    anchor bytes after ROLL, ANCHOR refresh changes the snap target,
+    MULT cycle touches only the cursor step with packed-nibble
+    addressing). `CMD_GENERATOR_QUERY` extends by 1 header byte
+    (`anchor_valid`) + 32 raw bytes (`mult[]`) → 104 raw bytes
+    pack7→120 wire; harness `GeneratorState` gains `anchor_valid:
+    bool` and `mult: tuple[int, ...]`. Full harness **55/55 green**
+    against the H firmware.
+
+    **Still listen-test only (deferred):** MULT's effect on the
+    measure-boundary mutate path (would need the same measure-
+    trigger testctrl command phase G already deferred; ROLL ignores
+    MULT by design so it can't be used as a proxy here).
+
+    **Sizing.** Flash +704 B; CCMRAM **46.9 → 52.9 KB used / 64 KB**;
+    main RAM unchanged.
 
 - **Step 5 build discipline.** Each phase ships its own harness regression test;
   the §A4 timing tests (#3 same-tick, #4 knob-to-sound, #5 worst-case tick,
@@ -1307,14 +1384,16 @@ modifier → per-step mutation multiplier, 4-level LED brightness). Step LEDs de
 to a pitch-as-brightness gradient with a play cursor. LCD: DEST + param strip;
 lower LCD a loop-content visualization.
 
-**As-built through phase G (2026-05-25):** GP1 ENGAGE/ROLL (LED reflects
+**As-built through phase H (2026-05-26):** GP1 ENGAGE/ROLL (LED reflects
 engaged; second-press = ROLL when engaged, SEL+GP1 = DISENGAGE), GP2 UNDO,
-GP3/GP4 range min/max, GP5 mutation rate, GP6 mutation depth (encoder)
-+ LOCK toggle (button-press for cursor step), GP7 contour shape cycle
-(UNIFORM/LOW/HIGH/TRIANGLE), GP8 BOUNCE (cursor-aware — see §8 step 5
-phase F). Datawheel scrolls the LOCK cursor across loop steps 0..63.
-MULT / ANCHOR / SNAP still **not allocated** (no fields, no dispatch) —
-they come if and when listen-test demands.
+GP3 range min (encoder) + ANCHOR (button), GP4 range max (encoder) + SNAP
+(button), GP5 mutation rate, GP6 mutation depth (encoder) + LOCK toggle
+(button-press for cursor step), GP7 contour shape cycle (UNIFORM/LOW/
+HIGH/TRIANGLE, encoder) + MULT cycle 0×/0.5×/1×/2× at cursor (button),
+GP8 BOUNCE (cursor-aware — see §8 step 5 phase F). Datawheel scrolls
+the LOCK/MULT cursor across loop steps 0..63. **All step-6 dials shipped
+(phase G + phase H)** — anchor[64], packed mult[32], and the auto-anchor
+at ENGAGE are live; per-step LOCK and per-step MULT share the cursor.
 
 The BOUNCE control is the first place the §3 destination semantic is wired in
 the UI: cursor IS the destination, occupancy decides additive-vs-replace.

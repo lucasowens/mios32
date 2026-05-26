@@ -112,6 +112,12 @@ class GeneratorState:
     Returned by Board.generator_query(). `loop` is the 64-byte Turing array
     (pitch per step, the source the gen writes into the Note par-layer).
     `locks` is a 64-tuple of bools (True = step locked, survives mutation).
+    `mult` is a 64-tuple of ints (each 0..15, 4-bit MULT code per step;
+    0=mute, 1=0.5×, 2=1×/default, 3=2×).
+    `anchor_valid` is True once anchor[] holds a captured snapshot (set at
+    auto-anchor on ENGAGE seed and on the ANCHOR gesture). The anchor bytes
+    themselves are not transferred — the wire saves space, and round-tripping
+    SNAP can be verified by comparing loop[] before vs after the gesture.
     """
 
     track: int
@@ -122,8 +128,10 @@ class GeneratorState:
     mutation_depth: int
     contour_shape: int
     engaged: bool
+    anchor_valid: bool
     loop: bytes              # 64 bytes
     locks: tuple[bool, ...]  # 64 entries
+    mult: tuple[int, ...]    # 64 entries, each 0..15
 
 
 @dataclass
@@ -875,17 +883,25 @@ class Board:
             return None
         if status != CMD_STATUS_OK:
             raise RuntimeError(f"GENERATOR_QUERY status {status:#04x}")
-        if len(payload) < 9:
+        if len(payload) < 10:
             raise RuntimeError(f"short GENERATOR_QUERY ok-reply: {payload!r}")
-        raw = unpack7(payload[9:])
-        if len(raw) < 72:
+        raw = unpack7(payload[10:])
+        if len(raw) < 104:
             raise RuntimeError(
-                f"GENERATOR_QUERY raw underflow: {len(raw)} bytes, need 72"
+                f"GENERATOR_QUERY raw underflow: {len(raw)} bytes, need 104"
             )
         loop = bytes(raw[:64])
         locks_bitmap = bytes(raw[64:72])
+        mult_packed = bytes(raw[72:104])
         locks = tuple(
             bool((locks_bitmap[s >> 3] >> (s & 7)) & 1) for s in range(64)
+        )
+        # MULT is 4 bits per step, packed two-per-byte: low nibble even,
+        # high nibble odd. Matches SEQ_GENERATOR_MultGet on the firmware side.
+        mult = tuple(
+            (mult_packed[s >> 1] >> 4) & 0x0f if (s & 1)
+            else mult_packed[s >> 1] & 0x0f
+            for s in range(64)
         )
         return GeneratorState(
             track=payload[0],
@@ -896,8 +912,10 @@ class Board:
             mutation_depth=payload[6],
             contour_shape=payload[7],
             engaged=bool(payload[8]),
+            anchor_valid=bool(payload[9]),
             loop=loop,
             locks=locks,
+            mult=mult,
         )
 
     def lcd_snapshot(self, timeout: float = 1.0) -> LCDSnapshot:

@@ -3,6 +3,8 @@
  * Phase E — generator workflow (Turing-style pitch generator per drum slot).
  * Phase G (§8 step 6 polish) — per-step LOCK, ROLL gesture, mutation depth,
  * contour shapes.
+ * Phase H (§8 step 6 follow-on) — ANCHOR/SNAP frozen-identity gesture and
+ * per-step MULT multiplier.
  *
  * §3 noun. A generator deposits material into a *source* buffer, always
  * overwrites at its destination, and stays engaged across measures — the §5
@@ -34,7 +36,16 @@
  *     "freeze the music" (rate=0 + locks held) and trigger fresh variations
  *     on demand.
  *
- * Still deferred: MULT, ANCHOR, SNAP (no fields allocated yet).
+ * Phase H (§8 step 6 follow-on; §11 glossary lines 1199–1202) adds:
+ *   - anchor[]: 64-byte frozen snapshot of loop[]. Auto-captured at first
+ *     ENGAGE seed; refreshable via the ANCHOR gesture. SNAP restores
+ *     loop[] from anchor[] (hard return to identity, the §5.3 "identifiable
+ *     yet unexpected return" mechanism). Does not disengage.
+ *   - mult[]: 64 packed 4-bit codes (32 B) — per-step multiplier on the
+ *     touch probability. Codes: 0 = 0× (mute mutation), 1 = 0.5×,
+ *     2 = 1× (default — phase G behavior), 3 = 2×. ROLL ignores MULT
+ *     (it's the on-demand override). Stored 0x22 (= code 2 both nibbles)
+ *     by default at ENGAGE so existing behavior is preserved.
  *
  * ==========================================================================
  */
@@ -54,12 +65,29 @@
 #define SEQ_GENERATOR_INSTRUMENTS    16   // max drum slots per track
 
 #define SEQ_GENERATOR_LOCKS_BYTES    (SEQ_GENERATOR_LOOP_LEN / 8)  // 8 — bitmap
+#define SEQ_GENERATOR_MULT_BYTES     (SEQ_GENERATOR_LOOP_LEN / 2)  // 32 — 4 bits/step
 
-#define SEQ_GENERATOR_DEFAULT_RANGE_MIN  36   // C2
-#define SEQ_GENERATOR_DEFAULT_RANGE_MAX  84   // C6
-#define SEQ_GENERATOR_DEFAULT_RATE        8   // gentle mutation
-#define SEQ_GENERATOR_DEFAULT_DEPTH     127   // full reroll (= phase E behavior)
-#define SEQ_GENERATOR_DEFAULT_CONTOUR     0   // UNIFORM (= phase E behavior)
+// Defaults tuned 2026-05-26 for the techno bass-line use case: narrow
+// one-octave bass range, aggressive mutation, near-full reroll, triangle
+// contour (clusters notes around mid-range). The original phase-E
+// defaults (4-octave range, gentle rate, full reroll, uniform contour)
+// were preserved for backward compatibility through phase G but never
+// matched the actual live use — every ENGAGE got immediately re-dialed.
+#define SEQ_GENERATOR_DEFAULT_RANGE_MIN  36   // LCD "C-1" (one octave below mid-C)
+#define SEQ_GENERATOR_DEFAULT_RANGE_MAX  48   // LCD "C-2" (one octave above min)
+#define SEQ_GENERATOR_DEFAULT_RATE      100   // aggressive mutation
+#define SEQ_GENERATOR_DEFAULT_DEPTH     120   // near-full reroll
+#define SEQ_GENERATOR_DEFAULT_CONTOUR     3   // TRIANGLE (mid-biased)
+
+// MULT codes (4-bit). Codes 0..3 are the live UI cycle; 4..15 are reserved
+// (treated as default 1× by the mutate path) so future expansion is non-
+// breaking. Default = 2 (1× — phase G behavior preserved).
+#define SEQ_GENERATOR_MULT_MUTE     0   // 0×  — step frozen in the rate path
+#define SEQ_GENERATOR_MULT_HALF     1   // 0.5×
+#define SEQ_GENERATOR_MULT_DEFAULT  2   // 1×  — no scaling (default)
+#define SEQ_GENERATOR_MULT_DOUBLE   3   // 2×
+#define SEQ_GENERATOR_MULT_NUM      4   // cycle length
+#define SEQ_GENERATOR_MULT_PACKED_DEFAULT  0x22  // both nibbles = MULT_DEFAULT
 
 // Contour shape codes. The reroll path uses this to bias the distribution
 // (full-reroll path only — depth=127). Perturb path ignores contour.
@@ -89,9 +117,12 @@ typedef struct {
                      //   127 = full reroll (= phase E behavior)
                      //   N   = perturb existing by ±N semitones, clamped
   u8 contour_shape;  // seq_generator_contour_t — biases full-reroll only
-  u8 reserved[3];    // pad — keep header 12B aligned to follow the loop
+  u8 anchor_valid;   // 1 = anchor[] holds a captured snapshot (phase H)
+  u8 reserved[2];    // pad — keep header 12B aligned to follow the loop
   u8 loop[SEQ_GENERATOR_LOOP_LEN];        // Turing loop array — pitch per step
   u8 locks[SEQ_GENERATOR_LOCKS_BYTES];    // bitmap; bit set => step locked
+  u8 anchor[SEQ_GENERATOR_LOOP_LEN];      // phase H — frozen identity (SNAP target)
+  u8 mult[SEQ_GENERATOR_MULT_BYTES];      // phase H — 4-bit per-step multiplier
 } seq_generator_t;
 
 
@@ -108,6 +139,27 @@ static inline void SEQ_GENERATOR_LockSet(seq_generator_t *g, u8 step, u8 on)
   if( step >= SEQ_GENERATOR_LOOP_LEN ) return;
   if( on ) g->locks[step >> 3] |=  (1 << (step & 7));
   else     g->locks[step >> 3] &= ~(1 << (step & 7));
+}
+
+
+// Phase H — per-step MULT helpers. 4 bits per step, packed two-per-byte
+// (low nibble = even step, high nibble = odd step). Returns the raw 4-bit
+// code; mutate-path maps 0..3 to {0×, 0.5×, 1×, 2×} (codes 4..15 fall
+// through to 1× as a forward-compatible reserved range).
+static inline u8 SEQ_GENERATOR_MultGet(const seq_generator_t *g, u8 step)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return SEQ_GENERATOR_MULT_DEFAULT;
+  u8 byte = g->mult[step >> 1];
+  return (step & 1) ? (u8)(byte >> 4) : (u8)(byte & 0x0f);
+}
+
+static inline void SEQ_GENERATOR_MultSet(seq_generator_t *g, u8 step, u8 code)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return;
+  code &= 0x0f;
+  u8 *p = &g->mult[step >> 1];
+  if( step & 1 ) *p = (u8)((*p & 0x0f) | (code << 4));
+  else           *p = (u8)((*p & 0xf0) | code);
 }
 
 
@@ -164,12 +216,6 @@ extern s32 SEQ_GENERATOR_BounceRelocate(u8 src_track, u8 src_instr,
 // different drum slot than the engaged gen.
 extern s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr);
 
-// Phase F.3 ENGAGE auto-jump. Returns 1 + writes the first drum
-// instrument on `track` whose Note par-layer is all-zero AND has no
-// engaged gen. Returns 0 if the track is not drum-mode, has no Note
-// par-layer, or every drum already has content / an engaged gen.
-extern s32 SEQ_GENERATOR_FindFirstEmptyDrum(u8 track, u8 *out_instr);
-
 // Restore the par-buffer from the auto-undo slot and disengage every
 // generator on the snapshot's track. One-deep, global — most recent ENGAGE
 // wins. Returns -1 if no snapshot is held.
@@ -200,6 +246,26 @@ extern u8 SEQ_GENERATOR_Roll(u8 track);
 // range. Locks survive both perturb and reroll; they're cleared when the slot
 // is freed (BOUNCE-in-place, relocate, or pool re-init).
 extern s32 SEQ_GENERATOR_LockToggle(u8 track, u8 instrument, u8 step);
+
+// Phase H ANCHOR — re-snapshot current loop[] into anchor[]. Marks the slot's
+// anchor as valid (auto-anchor at ENGAGE already sets this; ANCHOR refreshes
+// the captured identity to "what's playing right now"). Returns 0 on success,
+// -1 if no allocated slot exists for (track, instrument).
+extern s32 SEQ_GENERATOR_Anchor(u8 track, u8 instrument);
+
+// Phase H SNAP — restore loop[] from anchor[] and rewrite source. Hard return
+// to the frozen identity (§5.3 mechanism). Does NOT disengage. Returns 0 on
+// success, -1 if no slot, -2 if the slot has never been anchored. Locked
+// steps are NOT special-cased: SNAP is unconditional. Per-step MULT settings
+// are unchanged (they live on top of the anchor's loop).
+extern s32 SEQ_GENERATOR_Snap(u8 track, u8 instrument);
+
+// Phase H MULT cycle — advance the per-step multiplier code at `step` by one
+// position (0→1→2→3→0). Returns the new code on success or -1 if no slot /
+// step out of range. Codes ≥ MULT_NUM (reserved) wrap back to 0 on the next
+// press. MULT participates in the rate-gated mutate path only; ROLL ignores
+// it (ROLL is the on-demand override that bypasses rate, depth, and MULT).
+extern s32 SEQ_GENERATOR_MultCycle(u8 track, u8 instrument, u8 step);
 
 // Tick prologue hook. Call BEFORE SEQ_CORE_RenderTracks() each tick: if a
 // track just wrapped to step 0, mutate every engaged generator on that track

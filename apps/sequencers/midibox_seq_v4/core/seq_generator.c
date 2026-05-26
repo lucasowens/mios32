@@ -2,12 +2,15 @@
 /*
  * Phase E — generator workflow.
  * Phase G — §8 step 6 polish (per-step LOCK, ROLL, depth, contour).
+ * Phase H — §8 step 6 follow-on (ANCHOR/SNAP frozen-identity, per-step MULT).
  * See seq_generator.h for the model. This file implements:
  *   - the cap-64 pool + per-(track, instrument) sparse lookup
  *   - one-deep global auto-undo
  *   - per-measure-boundary mutate-then-rewrite (Turing loop → source par)
  *   - phase G: lock-aware mutation, depth-controlled perturb vs reroll,
  *     contour-biased reroll distribution, on-demand ROLL gesture
+ *   - phase H: auto-anchor at ENGAGE seed, ANCHOR refresh, SNAP restore,
+ *     per-step MULT multiplier scaling the rate-gated mutate decision
  *
  * Measure-boundary detection: per-track last_seen_step. SEQ_GENERATOR_Tick
  * fires when t->step == 0 AND last_seen != 0 (or on the first call after
@@ -135,12 +138,31 @@ static u8 perturb_pitch(u8 existing, u8 lo, u8 hi, u8 depth)
 }
 
 
+// Phase H — map a 4-bit MULT code to the rate-gate threshold. Comparison in
+// mutate_loop is `r >= threshold` with r ∈ [0, 254]. MULT_DEFAULT (code 2)
+// gives the phase G threshold rate*2 unchanged; codes 0 / 1 / 3 give the
+// 0× / 0.5× / 2× sweeps; codes 4..15 are reserved (treated as 1×).
+static u32 mult_threshold(u8 rate, u8 mult_code)
+{
+  switch( mult_code ) {
+    case SEQ_GENERATOR_MULT_MUTE:   return 0;
+    case SEQ_GENERATOR_MULT_HALF:   return (u32)rate;
+    case SEQ_GENERATOR_MULT_DOUBLE: {
+      u32 t = (u32)rate * 4;
+      return t > 255 ? 255 : t;
+    }
+    default: /* DEFAULT + reserved */ return (u32)rate * 2;
+  }
+}
+
+
 // Mutate the loop in place. Phase G upgrades phase E's pure-reroll path:
 //   - locked steps are never touched (LOCK survives any mutation)
 //   - rate gates "is this step touched at all?" (per-step probability)
 //   - depth selects perturb-vs-reroll: 0 = no-op, 127 = full reroll
 //     (phase E behavior), in between = perturb by ±depth around existing
 //   - contour biases the reroll path only
+// Phase H multiplies the rate-gate per step via MULT (codes 0..3).
 static void mutate_loop(seq_generator_t *g)
 {
   if( g->mutation_rate == 0 )
@@ -153,10 +175,14 @@ static void mutate_loop(seq_generator_t *g)
     if( SEQ_GENERATOR_LockGet(g, i) )
       continue; // §G LOCK — preserved verbatim
 
-    // SEQ_RANDOM_Gen_Range(0, 254) gives a uniform u8 in [0,254]; comparing
-    // against rate*2 maps rate 0..127 → ~0..100% touch probability per cell.
+    // SEQ_RANDOM_Gen_Range(0, 254) gives a uniform u8 in [0,254]; the
+    // threshold is rate*2 scaled by the per-step MULT code (phase H).
+    u32 threshold = mult_threshold(g->mutation_rate, SEQ_GENERATOR_MultGet(g, i));
+    if( threshold == 0 )
+      continue; // MULT_MUTE — step frozen in the rate-gated path
+
     u32 r = SEQ_RANDOM_Gen_Range(0, 254);
-    if( r >= (u32)(g->mutation_rate * 2) )
+    if( r >= threshold )
       continue;
 
     if( g->mutation_depth >= 127 ) {
@@ -322,6 +348,14 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument)
   // explicit clear needed (slots are also memset-cleared at free).
   seed_loop(g);
 
+  // Phase H — auto-anchor the seeded loop as the slot's initial frozen
+  // identity. SNAP returns here until the user re-anchors. Also stamp
+  // mult[] to MULT_DEFAULT for every step (memset gave us 0x00 = MUTE
+  // which would silently freeze the loop — wrong default).
+  memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
+  g->anchor_valid = 1;
+  memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
+
   pool_index[track][instrument] = (u8)(g - pool);
 
   // Snapshot the track's par-buffer for one-deep auto-undo BEFORE we write.
@@ -455,41 +489,6 @@ s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr)
 }
 
 
-// Phase F.3 ENGAGE auto-jump support. "Empty drum slot" = no engaged gen
-// AND every step of the drum's Note par-layer is 0. Scans instruments in
-// ascending order; the §3 "first empty legal layer" rule. Returns 1 +
-// writes out_instr if found, 0 otherwise. Caller is responsible for the
-// track-mode + Note-layer gating (a non-drum track or a track without a
-// Note par-layer assignment trivially has no legal empty drum — returns 0).
-s32 SEQ_GENERATOR_FindFirstEmptyDrum(u8 track, u8 *out_instr)
-{
-  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
-  seq_cc_trk_t *tcc = &seq_cc_trk[track];
-  if( tcc->event_mode != SEQ_EVENT_MODE_Drum ) return 0;
-  if( tcc->link_par_layer_note < 0 ) return 0;
-
-  u8  par_layer    = (u8)tcc->link_par_layer_note;
-  s32 num_p_steps_s = SEQ_PAR_NumStepsGet(track);
-  if( num_p_steps_s <= 0 ) return 0;
-  u16 num_p_steps  = (u16)num_p_steps_s;
-
-  u8 instr;
-  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS; ++instr) {
-    if( SEQ_GENERATOR_IsEngaged(track, instr) ) continue;
-    u16 step;
-    u8 empty = 1;
-    for(step=0; step<num_p_steps; ++step) {
-      if( SEQ_PAR_Get(track, step, par_layer, instr) != 0 ) { empty = 0; break; }
-    }
-    if( empty ) {
-      if( out_instr ) *out_instr = instr;
-      return 1;
-    }
-  }
-  return 0;
-}
-
-
 s32 SEQ_GENERATOR_Undo(void)
 {
   if( !undo_slot.valid ) return -1;
@@ -546,6 +545,45 @@ s32 SEQ_GENERATOR_LockToggle(u8 track, u8 instrument, u8 step)
   if( g == NULL ) return -1;
   u8 next = SEQ_GENERATOR_LockGet(g, step) ? 0 : 1;
   SEQ_GENERATOR_LockSet(g, step, next);
+  return next;
+}
+
+
+s32 SEQ_GENERATOR_Anchor(u8 track, u8 instrument)
+{
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
+  if( g == NULL ) return -1;
+  memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
+  g->anchor_valid = 1;
+  return 0;
+}
+
+
+s32 SEQ_GENERATOR_Snap(u8 track, u8 instrument)
+{
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
+  if( g == NULL ) return -1;
+  if( !g->anchor_valid ) return -2;
+  memcpy(g->loop, g->anchor, SEQ_GENERATOR_LOOP_LEN);
+  // Rewrite source so the snap is audible immediately, not on the next wrap.
+  // SNAP works whether or not the slot is currently engaged — both halves
+  // make sense (engaged + snap = pull back to identity during play;
+  // disengaged + snap = restore the loop for inspection / re-engage).
+  write_loop_to_source(g);
+  return 0;
+}
+
+
+s32 SEQ_GENERATOR_MultCycle(u8 track, u8 instrument, u8 step)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return -1;
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
+  if( g == NULL ) return -1;
+  u8 cur = SEQ_GENERATOR_MultGet(g, step);
+  // Wrap reserved codes (≥ NUM) back to 0 on the next press so a stale
+  // pattern load (or future-codes set by something else) recovers cleanly.
+  u8 next = (cur + 1) >= SEQ_GENERATOR_MULT_NUM ? 0 : (u8)(cur + 1);
+  SEQ_GENERATOR_MultSet(g, step, next);
   return next;
 }
 
