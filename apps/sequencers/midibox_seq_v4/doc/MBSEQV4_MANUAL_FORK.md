@@ -6,7 +6,7 @@ Three features are documented here:
 
 1. **Robotize Loop** — bar-anchor PRNG control over the Robotizer Fx (sculpt randomness one measure at a time)
 2. **GENERATE Page** — the former EUCLID page expanded into five generator types (Euclidean, Cellular, Polyrhythm, Subdivide, L-System)
-3. **Bounce-in-Place** — capture the live MIDI output of a track into a pattern slot via the PATTERN button
+3. **Capture / Bounce** — freeze a track's computed output (lossless) into a pattern via the PATTERN-hold gesture; build variation libraries and multitimbral canvases
 
 For developer-facing topics (the testctrl SysEx interface, the Python hardware-in-the-loop pytest harness, the top-level orchestration Makefile, and the source-level design catalog) see `MBSEQV4_REFERENCE.md` and `tests/README.md`.
 
@@ -49,8 +49,9 @@ GP16 on either side jumps to the other; the label flips between **`Loop`** (on F
 * **GP6 — Resd** reseed the palette with fresh independent randoms
 * **GP7 — Frz** freeze: copy the last K live snapshots into the palette starting at Strt (jump-now — takes effect immediately)
 * **GP8 — FrzQ** freeze, quantized — same as Frz, but the swap happens at the next measure boundary (gap-free)
-* **GP9 — Bnc** bounce-in-place to the next free pattern slot (see Bounce-in-Place section)
 * **GP16 — CCs** jump to the FX_ROBOTIZE page
+
+(The old GP9 "Bnc" shortcut was removed when bounce was unified onto the PATTERN-hold gesture — see the Capture / Bounce section. GP9–GP15 are now unused on this page.)
 
 SELECT+GP1..16 = reroll anchor 0..15 (replace one anchor with a fresh random while leaving every other anchor locked).
 
@@ -266,107 +267,56 @@ The expansion uses two ping-pong 512-byte buffers; iterations halt early if the 
 
 ---
 
-## Bounce-in-Place
+## Capture / Bounce
 
-Live tweaks on a sequencer are non-destructive by design — you can morph, robotize, echo, and duplicate without ever modifying the underlying pattern. The trade-off is that good takes can disappear the moment the playhead wraps.
+Live tweaks are non-destructive by design — you can run generators and processors, morph, echo, robotize, and duplicate without ever modifying the underlying pattern. The trade-off is that a good take vanishes the moment the playhead wraps. **Capture** (bounce) freezes a track's *computed output* — the exact rendered notes, velocities, lengths, and CC of the loop, lossless — into a pattern on the SD card, so you can keep it, recall it, and build with it.
 
-Bounce-in-Place captures the actual live MIDI output of the current track — *after* all Fx — into a pattern slot. The captured slot is a frozen take with the Fx stripped; further morph/robotize/echo on the original track no longer modify the bounce.
+This is the unified, lossless capture model; it replaced an earlier lossy "emission tape". What you capture is the post-processor render — the loop as the engine computes it each tick — taken *before* the emission stage, so loopback / echo / global-transpose applied at output are not baked in. The captured slot is the editable computed loop, with its generative modulation neutralized so it plays back deterministically.
 
 ### Usecases
 
-* Audition robotize on a track until it lands somewhere magical, then bounce that take into a free pattern slot and recall it later un-randomized.
-* Build complex layered output from echo + duplicate + LFO, then bounce the result into a clean track that doesn't need the Fx chain.
-* Capture an improvised solo (live recording into a track with morph) as a static pattern.
+* Run a generator or processor on a track until it lands somewhere magical, then capture that take into a pattern and recall it un-randomized later.
+* Build a **variation library**: keep a live "generator" track running, tweak it, and bounce snapshots into new patterns — *without ever disturbing the live track* — then load a variation when you want it.
+* Build a **multitimbral canvas**: bounce successive takes onto the tracks of another group, each track on its own MIDI port/channel, layering a full pattern that drops in locked to the beat.
 
-### How the Capture Works
+### The PATTERN-hold gesture
 
-A small in-RAM ring buffer per track tracks every emitted MIDI event (note on/off, CC, pitch bend, program change, aftertouch) at the moment they go out the wire. The buffer is always armed — there is no warm-up button.
+The capture trigger. **Source = the visible track.** While playing:
 
-When you trigger a bounce, the firmware:
+1. **Hold PATTERN.** The LCD overlays the capture prompt (`CAPTURE Tn -> Tm`).
+2. *(optional)* **Tap a select-row button** to pick the **destination track** — which track of the destination pattern receives the capture. Default = the source's own track index.
+3. **Tap GP1..GP8** — destination **group letter** (A..H). Default = the destination group's current letter.
+4. **Tap GP9..GP16** — destination **pattern number** (1..8). This **commits** the capture, saved to SD.
 
-1. Takes an in-RAM snapshot of the source track (CC config, layer/trigger arrays, pattern name, `play_section`) so the source can be restored byte-for-byte after the write.
-2. Strips every generative setting (Fx, direction shaping, bus/transposer mode, groove, transpose, morph, per-step Probability/Nth/etc.) on the in-RAM copy so the bounce is a deterministic playback of the captured tape.
-3. Writes the mutated copy to the destination pattern slot.
-4. Restores the source from the snapshot. Source state — including subsection selection — is identical to pre-bounce.
+A confirmation flashes (e.g. `saved A C5.T3`). A bare PATTERN tap with no GP opens the Pattern page — the original behavior, preserved.
 
-The capture tap is one branch on a `u8` flag in the hot path when no track is armed, and one packed write when armed; commit work runs in user-task context, not the tick path.
+What the commit does is decided by **one rule**, steered purely by which destination track you aimed at:
 
-### One-Step Bounce: PATTERN + GP
+* **Destination in the SOURCE's own group** (including the default — no select-row press): **save only.** The capture is merged into the chosen pattern on SD; your live source keeps playing, untouched. The variation-library move — *tweak → bounce → tweak → bounce* to bank takes without disturbing what you're tweaking. Select a variation deliberately (Pattern page) to play it.
+* **Destination in a DIFFERENT group:** the capture is written into the **destination group's own bank**, and that group is **auto-loaded on the next bar** (locked to the master), so the take drops in immediately and plays — for auditioning a variation in a spare group, or building a canvas. Your source group is never the one loaded, so it never jumps.
 
-The fast path. While playing:
+In every case the capture **merges** into the destination pattern: it replaces only the one track-position you aimed at and keeps the pattern's other three tracks. So you can bounce different takes into T1, T2, T3, T4 of the *same* pattern and build it up over several bounces.
 
-1. **Hold PATTERN** — the LCD overlays a hold prompt.
-2. **Tap GP1..GP8** — selects the destination letter (A..H within the current group).
-3. **Release PATTERN** — the bounce fires into the chosen letter's currently selected number.
+### In-place freeze (GP8 on the PITCHGEN page)
 
-A confirmation flashes on the LCD:
+A separate, simpler verb for freezing a generator/processor onto the track it is already running on, with no destination pick. On the PITCHGEN page, **GP8** freezes an engaged generator — or, failing that, an enabled processor's output — directly into the visible track's own source layers (the dial returns to zero and the frozen notes *are* the buffer). With nothing engaged, the LCD shows "nothing to bounce here".
 
-```
-                                                                          > A3  OK
-```
+### What Gets Captured
 
-(meaning: bounced into group A, pattern 3).
+* **Notes, velocity, length, and all CC** — the exact rendered output of the loop, lossless. (The earlier emission-tape model dropped CC and grid-snapped onsets; this does not.)
+* **Note and drum tracks capture identically** — the capture/render path is mode-agnostic. For a drum track the per-instrument output is captured.
 
-If you release PATTERN without tapping any GP, the bare press is interpreted as a navigation request and the Pattern page opens — the original V4.0beta1 behavior, preserved.
+### What Is Neutralized
 
-### Two-Step Bounce: PATTERN + GP1..8 + GP9..16
-
-For an explicit letter + number choice:
-
-1. **Hold PATTERN.**
-2. **Tap GP1..GP8** — stash the letter (A..H).
-3. **Tap GP9..GP16** — pick the number (1..8). Bounce fires immediately on this press.
-4. **Release PATTERN.**
-
-The two-step form is useful for live performance: you can pre-arm the letter, then pick a number when the music tells you to.
-
-### Bounce From the ROBOLOOP Page
-
-The ROBOLOOP page (see Robotize Loop section above) also has a GP9 shortcut labeled **Bnc**:
-
-```
- ...  Resd Frz  FrzQ Bnc                                                        ...
-```
-
-Pressing GP9 picks the next free slot in the current pattern group's bank automatically. If no slot is free, the LCD overlays a picker:
-
-```
-                       PICK SLOT  GP1-8 (any other GP cancels)
-                                  press GP1..GP8 to write into pattern 1..8
-```
-
-Press GP1..GP8 to select the destination; press any other GP (or EXIT) to cancel.
-
-The default bounce length from this shortcut is whatever was last configured by the two-step UX — usually 1 measure.
-
-### What Gets Bounced
-
-* **Notes** — note on / note off events including the velocity emitted at the moment of playback (so robotized velocities are captured as fixed values).
-* **CC** — all CC messages, including LFO-modulated CCs.
-* **Pitch bend, program change, aftertouch.**
-* For **drum tracks**, the bounce captures the per-instrument output (BD, SD, CH, …) and writes each instrument back to its drum slot in the destination.
-
-### What Does *Not* Get Bounced
-
-* All generative track config is neutralized on the destination — the bounce is the *output* of those generators, not their config. Specifically:
-  * **Fx parameters** — robotize probabilities, echo settings, humanize amounts, LFO, scale/limit, FX-MIDI duplicate.
-  * **Direction page** — direction mode (Forward/Backward/PingPong/Random/etc.), steps forward, jump back, replay, repeat, skip, RS interval. The destination plays linear-forward.
-  * **play_section** — the A–H subsection loop is dropped; the destination plays the full track length from step 1.
-  * **Bus / track mode** — Transposer/Arpeggiator modes are reset to Normal and the MIDI In bus assignment is cleared, so the destination won't re-transpose its own captured notes from a held chord.
-  * **Groove, global transpose, morph** — all baked into the captured timing/pitch already.
-  * **Generative parameter-layer types** — any Probability/Delay/Roll/Roll2/Nth1/Nth2/Root/Scale layer on the source is converted to an unused (None) slot on the destination. Note/Chord/Velocity/Length layers are preserved (they carry the captured tape).
-  * **Trigger assignments** — Accent/Glide/Roll/Skip/Random/no-Fx/Roll-Gate are all unassigned on the destination.
-* Anything that wasn't actually emitted during the captured window. A note that should have played but was suppressed by robotize-SKIP will be missing.
-* MIDI events received over loopback into bus tracks; the capture tap is on emission, not on the bus.
-
-The canonical list of what gets reset lives in `SEQ_CC_ResetGenerativeForBounce()` in [seq_cc.c](../core/seq_cc.c). When a new generative Fx or modulation feature lands, that function gets extended in the same review.
+So the frozen take plays back deterministically, generative modulation on the captured copy is reset via `SEQ_CC_ResetGenerativeForBounce()` ([seq_cc.c](../core/seq_cc.c)) — the genuinely-generative bits (e.g. `random_gate` / `random_value`) and the generator/processor configuration. **Structural** assignments are *preserved*: which trigger layer is the Gate/Accent/Glide/Roll/Skip, and the par-layer *type* assignments. (Preserving the gate assignment is essential — a captured pattern keeps its gate layer and plays the captured rhythm, rather than firing a note on every step.) When a new generative feature lands, extend that function in the same review.
 
 ### Tips & Tricks
 
-* The capture ring is fixed-size and rolls over silently. If you bounce after a long quiet period, the captured window may be partially stale — bounce promptly after the take you want.
-* The bounce strips Fx, so you can bounce a robotized take into a slot, then bounce the bounce again with a different Fx configuration without compounding.
-* If you've armed a long bounce length (8+ measures), expect the commit to take noticeably longer than a one-measure bounce — the work is hoisted out of the tick path so playback doesn't stall, but the destination won't be playable until commit completes (~100ms scale).
-* The bounce shortcut on ROBOLOOP is the fastest path during a live set: one GP9 tap and the current robotized take is locked into the next free slot, no menu navigation.
+* Same group = build a library (save-only, the source is never disturbed); different group = audition / canvas (auto-loads on the bar). You choose which purely by where you aim the destination track.
+* A cross-group capture lands in the **destination group's own bank** — navigate that group to find it; it persists across pattern switches.
+* The capture is non-destructive to the source in every case — the live track you're tweaking is never replaced by a bounce.
+* A canvas track keeps its own MIDI port/channel across re-bounces (capture leaves the port/channel CCs alone), so set the routing once and bounce notes into it repeatedly.
+* It's the same lossless capture whether the source is a hand-drawn line, a running generator, or a processed track — *bounce → tweak → bounce* to accumulate a set of patterns to perform with.
 
 ---
 

@@ -271,9 +271,11 @@ The fork captures the **computed output** of a track, never an emission tape. Th
   and the only one on a UI gesture). Read-modify-write of the slot file: `PatternRead`
   (remix_map=0) into the dst group → replace `dst_track` → `PatternWrite` → restore the
   dst group's live RAM (src captured first in case it shares the dst group). `seq_pattern[]`
-  is never touched and **no group is auto-loaded** — the capture only lands on SD; the
-  live performance is undisturbed (the gesture is capture-only / no-jump, see design §9).
-  Unlike RAM-only `CaptureToTrack`, it survives switching the dst group's pattern away.
+  is never touched and **no group is auto-loaded by the verb itself** — it only lands on SD.
+  (The PATTERN-hold gesture that calls it decides the load separately: a same-group destination
+  → no load, the source keeps playing; a cross-group destination → loads the *destination
+  group's own bank*, bar-aligned via `SEQ_CORE_ManualSynchToMeasure` — see design §9.) Unlike
+  RAM-only `CaptureToTrack`, it survives switching the dst group's pattern away.
 
 Because a track can be both a source (via loopback) and a sink (via `tcc->busasg`), the
 capture point matters: these verbs capture the **post-processor render** (`OutputActive`),

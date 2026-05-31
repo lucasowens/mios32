@@ -510,9 +510,13 @@ conceptually load-bearing.
   scale-aware robotize. *The freeze-edit-regenerate symbiosis loop.* FREEZE/REROLL are
   the human-takes-the-wheel handoffs; the locked-content + mutation idea maps to the
   seed+transform model (§5).
-- **Bounce-in-place** (shipped, RAM-snapshot hardened): *generators-as-layer-authors /
-  commit-to-buffer* — the **bounce verb** (§3) in embryo. The capture half of the
-  pilot loop exists; **live recall into a running process** is the missing complement.
+- **Capture / bounce** (shipped + matured 2026-05-31, see §9): the **bounce verb** (§3),
+  now a unified lossless computed-output model on a deliberate PATTERN-hold gesture —
+  same-group = save a variation (source untouched); cross-group = merge into the dst
+  group's own bank + auto-load it on the bar. The capture half of the pilot loop is
+  solid, and cross-group auto-load gives live recall *at the destination*; **recall back
+  into the source's running generative process** (§5 sculpt→capture→travel→return) is
+  the missing complement.
 - **Python HIL harness + testctrl SysEx**: enables safe surgery on timing paths
   (§2.5). Keep and extend (§A4).
 - **Drum-pitch unlock** (shipped 2026-05-24, §8 step 1): `link_par_layer_note` wired
@@ -839,8 +843,9 @@ Append-only-ish; revise an entry only with a dated note.
   - **Sizing:** the 16 KB ring + hot-path tap removed from `.bss`/`SEQ_CORE_Tick`
     (replaced by ~1.3 KB of capture snapshot buffers); CCM unchanged at 52.9/64 KB
     (the ring was main-SRAM, not CCM). **Verified on device 2026-05-31: full HIL
-    suite 72/72 green** (incl. the never-auto-load gesture, slot-persistence,
-    computed-output, and note/drum parity tests below); by-ear confirmed.
+    suite 73/73 green** (incl. the final bounce gesture — same-group save-only /
+    cross-group auto-load, see below — slot-persistence, computed-output, and
+    note/drum parity tests); by-ear confirmed.
 - **Note vs drum tracks: bounce/render parity confirmed; the differences are
   essential, not bugs (2026-05-31).** Investigated "why do note and drum tracks
   perform differently" via a 4-subsystem adversarial map (data model / capture-bounce
