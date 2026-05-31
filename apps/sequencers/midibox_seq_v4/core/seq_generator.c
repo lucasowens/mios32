@@ -210,20 +210,20 @@ static void roll_loop(seq_generator_t *g)
 }
 
 
-// Transcribe loop[] → Note par-layer of the *target* (track, instrument)
-// drum slot. Tiles when num_p_steps > LOOP_LEN. Sets render-dirty on the
-// target track. Returns 0 on success, -1 if the target isn't drum-mode /
-// missing a Note par-layer (or has zero steps).
-static s32 write_loop_to(const seq_generator_t *g, u8 dst_track, u8 dst_instr)
+// Transcribe loop[] → Note par-layer `par_layer` of the *target* (track,
+// instrument). Track-type-agnostic: on a drum track dst_instr selects the drum
+// line and par_layer is the shared link_par_layer_note; on a normal track
+// dst_instr is 0 and par_layer is the cursor's chosen Note layer — SEQ_PAR
+// addressing is the same (track, step, par_layer, instrument). Tiles when
+// num_p_steps > LOOP_LEN. Sets render-dirty on the target track. Returns 0 on
+// success, -1 if par_layer is out of range (or the track has zero steps).
+static s32 write_loop_to(const seq_generator_t *g, u8 dst_track, u8 dst_instr,
+                         u8 par_layer)
 {
   if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( dst_instr >= SEQ_GENERATOR_INSTRUMENTS ) return -1;
+  if( par_layer >= SEQ_PAR_NumLayersGet(dst_track) ) return -1;
 
-  seq_cc_trk_t *tcc = &seq_cc_trk[dst_track];
-  if( tcc->event_mode != SEQ_EVENT_MODE_Drum ) return -1;
-  if( tcc->link_par_layer_note < 0 ) return -1;
-
-  u8  par_layer = (u8)tcc->link_par_layer_note;
   s32 num_p_steps_s = SEQ_PAR_NumStepsGet(dst_track);
   if( num_p_steps_s <= 0 ) return -1;
   u16 num_p_steps = (u16)num_p_steps_s;
@@ -239,12 +239,12 @@ static s32 write_loop_to(const seq_generator_t *g, u8 dst_track, u8 dst_instr)
 }
 
 
-// Convenience wrapper: write to the gen's own (track, instrument) — the
-// engage / measure-boundary path. Failures here are by construction the
+// Convenience wrapper: write to the gen's own (track, instrument, par_layer) —
+// the engage / measure-boundary path. Failures here are by construction the
 // "track misconfigured" case which the engage path already screens for.
 static void write_loop_to_source(const seq_generator_t *g)
 {
-  (void)write_loop_to(g, g->track, g->instrument);
+  (void)write_loop_to(g, g->track, g->instrument, g->par_layer);
 }
 
 
@@ -314,19 +314,29 @@ seq_generator_t *SEQ_GENERATOR_Get(u8 track, u8 instrument)
 }
 
 
-s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument)
+s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
 {
   if( track >= SEQ_CORE_NUM_TRACKS ) return -2;
   if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
 
+  // Track-type-agnostic: the only requirement is a Note par-layer to write
+  // into (set on drum AND normal tracks by the seq_cc.c link scan). On a
+  // normal track the caller passes instrument 0 (the single melodic line).
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
-  if( tcc->event_mode != SEQ_EVENT_MODE_Drum ) return -2;
   if( tcc->link_par_layer_note < 0 ) return -3;
+
+  // Defensive: an out-of-range par_layer (e.g. the UI's 255 fallback when the
+  // cursor wasn't on a Note layer) collapses to the track's linked Note layer,
+  // which is valid here (link >= 0 checked above).
+  if( par_layer >= SEQ_PAR_NumLayersGet(track) )
+    par_layer = (u8)tcc->link_par_layer_note;
 
   u8 ix = pool_index[track][instrument];
   if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
-    // Re-engage: keep loop content; flip engaged on; force a rewrite so the
-    // current (possibly UNDO-restored or paused-out-of-sync) source matches.
+    // Re-engage: keep loop content; adopt the (possibly new) cursor target so
+    // cursor still wins; flip engaged on; force a rewrite so the current
+    // (possibly UNDO-restored or paused-out-of-sync) source matches.
+    pool[ix].par_layer = par_layer;
     pool[ix].engaged = 1;
     write_loop_to_source(&pool[ix]);
     return 0;
@@ -337,6 +347,7 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument)
 
   g->track          = track;
   g->instrument     = instrument;
+  g->par_layer      = par_layer;
   g->range_min      = SEQ_GENERATOR_DEFAULT_RANGE_MIN;
   g->range_max      = SEQ_GENERATOR_DEFAULT_RANGE_MAX;
   g->mutation_rate  = SEQ_GENERATOR_DEFAULT_RATE;
@@ -393,98 +404,6 @@ s32 SEQ_GENERATOR_Bounce(u8 track, u8 instrument)
   // back to pre-engagement (§3 live-safety net).
   memset(&pool[ix], 0, sizeof(pool[ix]));
   pool_index[track][instrument] = 0xFF;
-  return 0;
-}
-
-
-s32 SEQ_GENERATOR_BounceRelocate(u8 src_track, u8 src_instr,
-                                 u8 dst_track, u8 dst_instr)
-{
-  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -2;
-  if( src_instr >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
-  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -2;
-  if( dst_instr >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
-
-  u8 ix = pool_index[src_track][src_instr];
-  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return -1;
-  if( !pool[ix].engaged ) return -1;
-
-  // The §3 destination semantic with whole-track surgical undo: relocate is
-  // only safe when the global undo slot still describes the gen's track.
-  // Otherwise we'd restore stale state on src; refuse instead and let the
-  // user UNDO+ENGAGE again.
-  if( !undo_slot.valid || undo_slot.track != src_track )
-    return -3;
-
-  // Order is critical: restore src par-buffer FIRST (whole-track from undo),
-  // THEN transcribe the gen's loop into dst. If dst lives on the same track
-  // as src the restore-then-write order means dst lands with the loop after
-  // the original drum content is back in place; if dst lives on a different
-  // track entirely, the order is academic but harmless.
-  seq_generator_t *g = &pool[ix];
-
-  // Write target validation before mutating anything (so a bad dst doesn't
-  // leave src half-restored).
-  {
-    seq_cc_trk_t *dtcc = &seq_cc_trk[dst_track];
-    if( dtcc->event_mode != SEQ_EVENT_MODE_Drum ) return -2;
-    if( dtcc->link_par_layer_note < 0 ) return -2;
-    s32 nps = SEQ_PAR_NumStepsGet(dst_track);
-    if( nps <= 0 ) return -2;
-  }
-
-  memcpy(seq_par_layer_value[src_track], undo_slot.par_snapshot, SEQ_PAR_MAX_BYTES);
-  seq_render_dirty[src_track] = 1;
-
-  // Transcribe to dst. If dst==src track, this writes after the restore so
-  // dst_instr ends up holding the bounced loop (the rest of src track is
-  // back to pre-engage).
-  if( write_loop_to(g, dst_track, dst_instr) < 0 ) {
-    // Validation passed above, so this should not fire — but if it does,
-    // src has already been restored and we'd best not leave the gen in a
-    // weird state. Free the slot and undo, report success-ish: src is
-    // restored, dst write failed silently.
-    memset(&pool[ix], 0, sizeof(pool[ix]));
-    pool_index[src_track][src_instr] = 0xFF;
-    undo_slot.valid = 0;
-    return -2;
-  }
-
-  // Disengage every gen on src track (the whole-track restore wiped out the
-  // material their loops were transcribing into; the relocated gen is freed
-  // entirely; other gens would otherwise immediately re-transcribe stale
-  // loop contents into the restored buffer on the next measure boundary).
-  // Trade-off documented in the header: this is the "live-safety not
-  // transactional history" property — single-snapshot undo can't preserve
-  // independent gens on the same track. Workflow: bounce-relocate is a
-  // one-gen-per-track gesture.
-  u8 i;
-  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
-    if( pool[i].in_use && pool[i].track == src_track )
-      pool[i].engaged = 0;
-  }
-
-  // Free the relocated gen's slot.
-  memset(&pool[ix], 0, sizeof(pool[ix]));
-  pool_index[src_track][src_instr] = 0xFF;
-  undo_slot.valid = 0;
-
-  if( dst_track != src_track )
-    seq_render_dirty[dst_track] = 1;
-  return 0;
-}
-
-
-s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr)
-{
-  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
-  u8 i;
-  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
-    if( pool[i].in_use && pool[i].engaged && pool[i].track == track ) {
-      if( out_instr ) *out_instr = pool[i].instrument;
-      return 1;
-    }
-  }
   return 0;
 }
 

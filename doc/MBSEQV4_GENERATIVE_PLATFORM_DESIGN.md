@@ -477,7 +477,9 @@ not running in the background. Reconstructed continuity, not literal concurrency
 
 ### Normal vs drum track (pitch-vs-rhythm tradeoff)
 - **Normal track:** one rhythm, full pitch/velocity/length depth (melody, or a chord
-  sharing one gate). Density costs one track per line.
+  sharing one gate). Density costs one track per line. *The pitch generator now runs
+  here too (mono, shipped + GO 2026-05-26 — see §9); the engine was nearly track-
+  agnostic already.*
 - **Drum track:** up to 16 instruments = independent gate timelines (cheap polyrhythm,
   one group slot), but **note is hardcoded to the per-instrument constant**
   `note = tcc->lay_const[0*16 + drum]` ([seq_layer.c:370](../core/seq_layer.c#L370)).
@@ -694,6 +696,116 @@ Append-only-ish; revise an entry only with a dated note.
   Today's incidental ordering — FTS in `SEQ_CORE_Transpose`'s post-trim, ChordMask
   inside the playmode dispatch — happens to give the right feel; preserve when the
   spine migrates these into processors.*
+- **Normal-track pitch gen (mono) — shipped + GO (2026-05-26).** The whole
+  phase E–H generator stack (Turing loop, ENGAGE/ROLL/BOUNCE, ANCHOR/SNAP/MULT,
+  LOCK, contour) generalized from drum-only to **normal (melodic) tracks**.
+  Scope was "mono line first" (one generator → the track's single Note line =
+  generative melody/bassline); per-voice polyphony deferred. **Confirmed
+  musically real by ear** — a generative line on a normal track reads as a
+  *line*, and the range dial sweeps detune-feel → leaps as predicted (§8 step 3
+  finding transfers).
+  - **As-built — it was nearly free.** The generator write path was already
+    track-agnostic: it transcribes `loop[]` via `SEQ_PAR_Set(track, step,
+    link_par_layer_note, instr, v)`, and `link_par_layer_note` is set on normal
+    tracks too (the `seq_cc.c` link scan, last Note layer wins). The only
+    blockers were **two `event_mode == SEQ_EVENT_MODE_Drum` guards** (in
+    `SEQ_GENERATOR_Engage` and the static `write_loop_to`) — both replaced with
+    the existing `link_par_layer_note >= 0` check. New UI helper `gen_instr()`
+    in `seq_ui_trkpitchgen.c` returns `ui_selected_instrument` on drum tracks,
+    `0` on normal (the single line; drum cursor would be stale). LCD row 0 reads
+    `Trk N Note` on normal vs `Trk N.D nn` on drum. The relocate / find-empty-
+    drum BOUNCE branches never fire on a normal track (only instr 0 exists), so
+    BOUNCE is in-place freeze there — correct for a single melodic line.
+  - **value-0 edge is already safe** — `normalize_range` clamps loop values to
+    ≥1, so the generator never emits the note that means "no note" on a normal
+    track (it would on drums fall back to `lay_const`).
+  - **Sizing:** flash **+408 B**; CCMRAM and main RAM **unchanged** (no slot
+    growth, no pool re-key, no new state). Harness **65/65 green** — drum path
+    untouched.
+  - **Deferred (post-listen refinements):** (1) **cursor-aware target** —
+    ENGAGE into the Note layer named by `ui_selected_par_layer` if Note-type,
+    instead of always `link_par_layer_note` (which picks the *last* Note layer,
+    wrong on a hand-authored multi-voice chord track); squares with the
+    cursor-wins principle from the F.3 auto-jump withdrawal. (2) **per-voice
+    polyphony** — one generator per Note layer = generative chords/counterpoint
+    on one track; needs the pool re-keyed from instrument→line-index. (3)
+    **normal-track harness coverage** — the drum-init testctrl setup has no
+    normal-track sibling yet; add a `CMD_TRACK_NORMAL_INIT` before pinning the
+    normal path in the HIL suite.
+- **Bounce unification — one lossless capture model (2026-05-30).** Two competing
+  "bounce" mechanisms had grown up in parallel: (A) an **emission tape** —
+  `seq_capture.c`, a 16 KB/16-track ring tapped on the MIDI hot path in
+  `SEQ_CORE_ScheduleEvent`, replayed into a pattern slot — *lossy* (notes+vel+len
+  only; CC/PB dropped; NoteOff-match heuristic length; grid-snapped onsets) and
+  with an unsynchronized producer/consumer race on the ring walk; and (B) the
+  **computed-output bounce** (`SEQ_GENERATOR_Bounce`, `SEQ_CORE_ProcessorBounce`,
+  `…BounceRelocate`, `…ProcessorBounceCapture`) which freezes the rendered
+  `OutputActive` (exact par/trg, CC included). **Decided: unify on B, delete A
+  entirely.** Rationale: the thing the user actually wants to capture — a
+  *generative sequence* — lives losslessly in `OutputActive`, already computed
+  each tick; the tape's only unique catch (echo/transpose baked at emission) it
+  loses anyway by grid-snapping, and it carried the race + the RAM + the hot-path
+  branch.
+  - **Engine:** one shared primitive `SEQ_CORE_CaptureTrackOutput(track, par_dst,
+    trg_dst)` forces a full *quiet* render (sweep-safe — see below) then snapshots
+    the post-processor par/trg. Two verbs on it: `SEQ_CORE_CaptureToSlot` (reuses
+    the proven snapshot/restore-source skeleton, sourced from the primitive instead
+    of the ring) and `SEQ_CORE_CaptureToTrack` (mirrors COPY/PASTE-TRACK: inherits
+    src event-mode/geometry/lower-48 CCs onto dst, so the raw layer copy reads back
+    correctly across mismatched configs — the decisive correctness item).
+  - **Sweep-staleness bug fixed by construction.** The old in-place
+    `SEQ_CORE_ProcessorBounce` read `OutputActive` without forcing a render — in
+    sweep regime only a ~4-step slice is fresh, so a bounce right after a dial touch
+    froze a partially-stale buffer. Routing it through the primitive (which
+    force-renders) eliminates the bug; the cross-track path already had the guard.
+  - **GP8 collapsed to in-place freeze only** (gen freeze / processor freeze /
+    guidance). The cursor-aware *auto-find* relocate + cross-track-capture branches
+    were deleted — they guessed a destination, which violates the
+    deliberate-destination / no-smart-default rule (see the F.3 auto-jump
+    withdrawal). Destination captures are now explicit gestures.
+  - **Trigger: the PATTERN-hold gesture** (midiphy V4+ layout, confirmed +
+    refined with the user, by-ear). **Source = visible track**; while PATTERN is
+    held you pick a destination **slot** via the top row (**GP1-8 = group A-H**,
+    default current; **GP9-16 = pattern number → COMMITs**, persisted to SD), and
+    optionally a destination **track within that slot** via the **lower select
+    row** (the 16 `DirectTrack` buttons stash a dst track). On the GP9-16 commit:
+    with a dst track picked → `SEQ_CORE_CaptureToSlotTrack(src, dstTrk, bank, pat)`
+    (render source into just that track of the slot, other slot tracks preserved,
+    **saved to SD**); without one → `SEQ_CORE_CaptureToSlot` (whole source group →
+    slot). Bare PATTERN tap → Pattern page. This is the arrangement-building move:
+    render generative tracks into specific slots' tracks, persisted.
+    - **Why CaptureToSlotTrack and not the RAM-only CaptureToTrack:** found by
+      ear — `CaptureToTrack` writes a track's *live RAM* only; switching that
+      group's pattern away **loses it** (not on SD). `CaptureToSlotTrack` does a
+      read-modify-write of the target slot file (reads it into the dst group with
+      `PatternRead(remix_map=0)`, replaces track N, `PatternWrite`s it back,
+      restores the dst group's live RAM so playback isn't disturbed; src captured
+      first in case it shares the dst group). +~6 KB main SRAM for the 4-track dst
+      group snapshot; CCM unchanged. `CaptureToTrack` (RAM) is retained as an
+      engine/testctrl verb but no longer on the gesture. src==dst freeze is GP8.
+      Robomold's bounce action removed (page kept). NOTE: still **no UNDO** for an
+      overwrite (the dst slot's track N is overwritten on SD; UNDO is a follow-on).
+  - **`num_measures` dropped** — a capability change, not just a refactor: the
+    computed-output model captures one full rendered loop (the loop is the unit),
+    which has no multi-measure-tape analogue. Correct for a loop instrument.
+  - **No `CaptureToTrack` undo yet** — flagged: the deferred UI must snapshot dst
+    before calling (UNDO is the live safety net; no global per-track undo covers an
+    arbitrary dst overwrite today).
+  - **Bugfix (2026-05-30, found by ear):** `SEQ_CC_ResetGenerativeForBounce` was
+    clearing `trg_assignments.ALL = 0`, which wiped the **GATE** trigger-layer
+    assignment too. A track with no gate-layer assignment plays *every* step
+    (MBSEQ's gate-defaults-to-on), so bounced patterns fired a note on every step
+    — gates appeared unset, CLEAR had no effect. The trigger assignments are
+    **structural** (which layer is Gate/Accent/Glide/Roll/Skip), like the
+    Note/Velocity/Length par-layer assignments the function already preserves, so
+    only the genuinely-generative `random_gate`/`random_value` are now neutralized;
+    the rest are preserved. HIL coverage extended (`test_capture_to_slot_preserves_
+    gate_assignment`) — the prior round-trip test checked trigger-layer *bytes*
+    (which round-tripped) but not the gate *assignment*, so it missed this.
+  - **Sizing:** the 16 KB ring + hot-path tap removed from `.bss`/`SEQ_CORE_Tick`
+    (replaced by ~1.3 KB of capture snapshot buffers); CCM unchanged at 52.9/64 KB
+    (the ring was main-SRAM, not CCM). Firmware builds clean; full HIL collection
+    green (61 tests). Hardware/by-ear verification pending flash.
 - **§8 step 5 (the spine) is broken into phases A–F.** User agreed 2026-05-24:
   ship the full design-doc spine as a multi-PR sequence, infrastructure first.
   Each phase is a buildable+harness-testable unit.

@@ -118,7 +118,10 @@ typedef struct {
                      //   N   = perturb existing by ±N semitones, clamped
   u8 contour_shape;  // seq_generator_contour_t — biases full-reroll only
   u8 anchor_valid;   // 1 = anchor[] holds a captured snapshot (phase H)
-  u8 reserved[2];    // pad — keep header 12B aligned to follow the loop
+  u8 par_layer;      // target Note par-layer this gen writes into. Drum track:
+                     //   the shared link_par_layer_note. Normal track: the
+                     //   cursor's Note layer at ENGAGE (cursor-aware target).
+  u8 reserved[1];    // pad — keep header 12B aligned to follow the loop
   u8 loop[SEQ_GENERATOR_LOOP_LEN];        // Turing loop array — pitch per step
   u8 locks[SEQ_GENERATOR_LOCKS_BYTES];    // bitmap; bit set => step locked
   u8 anchor[SEQ_GENERATOR_LOOP_LEN];      // phase H — frozen identity (SNAP target)
@@ -169,13 +172,16 @@ static inline void SEQ_GENERATOR_MultSet(seq_generator_t *g, u8 step, u8 code)
 
 extern s32 SEQ_GENERATOR_Init(u32 mode);
 
-// Allocate (or re-engage) a generator slot for (track, instrument).
-// Returns 0 on success, -1 if pool is full, -2 if the track is not in drum
-// mode, -3 if no Note par-layer is assigned. On first ENGAGE for a given
+// Allocate (or re-engage) a generator slot for (track, instrument), writing
+// into Note par-layer `par_layer` (the cursor-aware target — the UI passes the
+// shared note layer on drum tracks, the cursor's Note layer on normal tracks).
+// Returns 0 on success, -1 if pool is full, -2 on bad track/instr index, -3 if
+// no Note par-layer is assigned on the track. On first ENGAGE for a given
 // (track, instrument), snapshots the track's par-buffer into the auto-undo
 // slot and seeds the loop with an initial reroll; subsequent re-engages flip
-// engaged back on without re-snapshotting.
-extern s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument);
+// engaged back on (adopting the passed par_layer — cursor still wins) without
+// re-snapshotting.
+extern s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer);
 
 // Stop mutating; source stays as last written. Slot remains allocated so the
 // loop survives DISENGAGE→ENGAGE without re-snapshotting undo.
@@ -188,33 +194,6 @@ extern s32 SEQ_GENERATOR_Disengage(u8 track, u8 instrument);
 // which is the live-safety net (§3 "live-safety" rule). Returns 0 if a slot
 // was freed, -1 if no slot existed.
 extern s32 SEQ_GENERATOR_Bounce(u8 track, u8 instrument);
-
-// Phase F.2 BOUNCE-relocate: deliver the §3 destination semantic for BOUNCE.
-// Transcribes the engaged gen's loop into the destination's Note par-layer
-// (additive at dst — original dst content overwritten by the bounce), then
-// restores the src track's whole par-buffer from the global one-deep undo
-// slot so the source is back to pre-engagement (the user's iterate-and-stack
-// workflow). Frees the gen slot and invalidates the undo (it has been spent).
-//
-// Returns:
-//   0  on success
-//  -1  no gen engaged at (src_track, src_instr)
-//  -2  bad track/instr indices, or dst is not drum-mode / missing Note layer
-//  -3  undo slot doesn't cover this gen's track (e.g. another gen on a
-//      different track was the most-recent first-ENGAGE) — refuse rather
-//      than restore stale state. Caller should UNDO + re-ENGAGE first.
-//
-// Caveat: whole-track restore on src wipes any edits to *other* drum slots
-// on the src track made since this gen's first ENGAGE. The one-deep undo
-// is a live-safety net, not a transactional history (§3 wording).
-extern s32 SEQ_GENERATOR_BounceRelocate(u8 src_track, u8 src_instr,
-                                        u8 dst_track, u8 dst_instr);
-
-// Returns 1 if any pool slot is in_use && engaged on `track`, writing the
-// instrument coordinate to *out_instr. Returns 0 if none. Used by PITCHGEN
-// BOUNCE to find the gen to relocate when the cursor has moved to a
-// different drum slot than the engaged gen.
-extern s32 SEQ_GENERATOR_FindEngagedOnTrack(u8 track, u8 *out_instr);
 
 // Restore the par-buffer from the auto-undo slot and disengage every
 // generator on the snapshot's track. One-deep, global — most recent ENGAGE

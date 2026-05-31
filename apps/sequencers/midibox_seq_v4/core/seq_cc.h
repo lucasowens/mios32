@@ -333,9 +333,9 @@ extern s32 SEQ_CC_Init(u32 mode);
 
 // Neutralizes every generative CC on a track (FX, direction, bus, groove,
 // transpose, morph, trigger assignments, generative par-layer types). Used by
-// the bounce-in-place capture (seq_capture.c) on the in-RAM source CC right
-// before writing the destination pattern slot, so the bounced pattern plays
-// the frozen tape without re-applying modulation on top. Identity (MIDI port/
+// the capture verbs (SEQ_CORE_CaptureToSlot / SEQ_CORE_CaptureToTrack) on the
+// destination CC after the computed output is written, so the captured pattern
+// plays the frozen tape without re-applying modulation on top. Identity (MIDI port/
 // channel, event mode, drum mapping, layer step data) and structural fields
 // (length, loop, clock divider) are preserved. When you add a new generative
 // SEQ_CC_*, extend this function in the same review.

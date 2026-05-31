@@ -116,10 +116,11 @@ s32 SEQ_CC_Init(u32 mode)
 
 /////////////////////////////////////////////////////////////////////////////
 // Reset every generative CC on a track to its neutral default (matching
-// SEQ_CC_Init). Called by the bounce-in-place capture (seq_capture.c) on the
-// in-RAM source CC right before writing the destination pattern slot — so the
-// bounced pattern plays the frozen captured tape without re-applying
-// robotize / echo / direction / bus / groove / par-layer modulation on top.
+// SEQ_CC_Init). Called by the capture verbs (SEQ_CORE_CaptureToSlot /
+// SEQ_CORE_CaptureToTrack, seq_core.c) on the destination CC after the
+// computed output is written — so the captured pattern plays the frozen tape
+// without re-applying robotize / echo / direction / bus / groove / par-layer
+// modulation on top.
 //
 // Preserved (identity + structural + step-data carriers):
 //   - MIDI port/channel, event_mode, MIDI bank/PC, name
@@ -173,8 +174,16 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->humanize_value = 0;
   tcc->humanize_mode = 0;
 
-  // Trigger assignments: gate/accent/glide/roll/skip/random*/no_fx/roll_gate all unassigned.
-  tcc->trg_assignments.ALL = 0;
+  // Trigger assignments: neutralize ONLY the generative trigger functions
+  // (random gate / random value) so the frozen capture plays deterministically.
+  // PRESERVE the structural assignments (gate/accent/glide/roll/skip/no_fx/
+  // roll_gate) — these map functions to trigger LAYERS and are structural, like
+  // the Note/Velocity/Length par-layer assignments preserved below. Clearing the
+  // GATE assignment leaves the track with no gate layer, which MBSEQ plays as
+  // "every step on" — the bug that filled bounced patterns with a note on every
+  // step (gates appeared unset yet every step fired, CLEAR had no effect).
+  tcc->trg_assignments.random_gate = 0;
+  tcc->trg_assignments.random_value = 0;
 
   // Echo off.
   tcc->echo_repeats = 0;

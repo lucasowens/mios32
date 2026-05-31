@@ -39,7 +39,6 @@
 #include "seq_layer.h"
 #include "seq_cc.h"
 #include "seq_record.h"
-#include "seq_capture.h"
 #include "seq_pattern.h"
 #include "seq_midi_sysex.h"
 #include "seq_midi_port.h"
@@ -169,18 +168,20 @@ static u16 ui_delayed_action_ctr;
 static u8 seq_ui_track_setup_visible_track;
 static seq_ui_track_setup_t seq_ui_track_setup[SEQ_CORE_NUM_TRACKS];
 
-// Set to 1 when a GP press fired while PATTERN was held. Used by the PATTERN
-// button release handler to suppress the bare-press navigation (so a
-// PATTERN+GP bounce doesn't also navigate to the Pattern page).
-static u8 pattern_held_gp_consumed;
-
-// Two-step bounce gesture state, set when GP1..GP8 is pressed during a
-// PATTERN hold. Stores the chosen pattern-letter (0..7 = A..H).
-// 0xff = nothing stashed (no GP1-8 pressed yet during the current hold).
-// On PATTERN release: if stashed but no GP9-16 fired, perform a one-step
-// bounce to (current group's letter, stashed_letter as num). On GP9-16
-// press: perform a two-step bounce to (stashed_letter as letter, gp as num).
-static u8 pattern_stashed_letter = 0xff;
+// PATTERN-hold capture gesture state. SOURCE is always the visible track (the
+// one you navigated to). While PATTERN is held you pick a DESTINATION slot via
+// the top row, optionally a destination TRACK via the lower select row, and the
+// GP9-16 pattern press COMMITs (capture is persisted to SD):
+//   GP1-8  (top row)  -> destination group letter (A..H); default current
+//   GP9-16 (top row)  -> destination pattern number (1..8) -> COMMIT
+//   select row (DirectTrack, 16 btns) -> destination track WITHIN that slot
+// With a destination track picked: render source → track N of slot (other slot
+// tracks preserved) via SEQ_CORE_CaptureToSlotTrack. Without one: capture the
+// whole source group → slot via SEQ_CORE_CaptureToSlot. The select-row stash
+// lives in SEQ_UI_Button_DirectTrack.
+static u8 pattern_held_gp_consumed;       // 1 if any capture button fired during the hold (suppress bare-tap nav)
+static u8 pattern_capture_group = 0xff;   // chosen dest group letter, 0xff = current group
+static u8 pattern_capture_dst_track = 0xff; // chosen dest track (select row), 0xff = none (whole-group slot capture)
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -544,74 +545,90 @@ void SEQ_UI_Msg_LivePattern(char *line2)
 // Mapped to physical buttons in SEQ_UI_Button_Handler()
 // Will also be mapped to MIDI keys later (for MIDI remote function)
 /////////////////////////////////////////////////////////////////////////////
+// Print the OK/fail message for a capture-to-slot result (visible track →
+// pattern slot). Fired by the GP9-16 commit during a PATTERN hold.
+static void pattern_capture_msg(s32 status, seq_pattern_t dst)
+{
+  if( status < 0 ) {
+    SEQ_UI_Msg_Track("capture failed");
+  } else {
+    char msg[8];
+    msg[0] = '>';
+    msg[1] = 'A' + (dst.group & 0x07);
+    msg[2] = '1' + (dst.num & 0x07);
+    msg[3] = ' ';
+    msg[4] = 'O';
+    msg[5] = 'K';
+    msg[6] = 0;
+    SEQ_UI_Msg_Track(msg);
+  }
+}
+
+// Print the result of a capture → track-in-slot (visible track → dst_track of a
+// pattern slot, persisted). status >=0 ok, else failure. Shows ">A3.Tnn".
+static void pattern_capture_slottrack_msg(s32 status, seq_pattern_t dst, u8 dst_track)
+{
+  if( status < 0 ) {
+    SEQ_UI_Msg_Track("capture failed");
+  } else {
+    char msg[12];
+    int n = 0;
+    msg[n++] = '>';
+    msg[n++] = 'A' + (dst.group & 0x07);
+    msg[n++] = '1' + (dst.num & 0x07);
+    msg[n++] = '.';
+    msg[n++] = 'T';
+    if( (dst_track + 1) >= 10 )
+      msg[n++] = '0' + ((dst_track + 1) / 10);
+    msg[n++] = '0' + ((dst_track + 1) % 10);
+    msg[n] = 0;
+    SEQ_UI_Msg_Track(msg);
+  }
+}
+
 static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
 {
   if( !depressed ) // selection button has been pressed while Bookm/Step/Track/Param/Trigger/Instr/Mute/Phrase button pressed: don't take over new sel view anymore
     seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
 
-  // Global bounce gesture (PATTERN held).
-  //
-  // Two-step gesture mirroring the Pattern page's selection layout:
-  //   GP1..GP8  = pick the pattern letter (A..H, sets seq_pattern_t.group).
-  //   GP9..GP16 = pick the pattern number (1..8, sets seq_pattern_t.num) and
-  //               fire the bounce immediately.
-  //
-  // One-step shortcut: press GP1..GP8 alone, release PATTERN without ever
-  // pressing GP9..GP16. The PATTERN release handler then fires a bounce to
-  // (current letter, stashed_letter as num). Same as pressing GP1-8 + the
-  // matching GP9-16 for the current group's letter.
-  //
-  // Both fire in the same direction (low-latency from press), differ only
-  // in whether the deferred one-step bounce gets to fire or gets replaced
-  // by the explicit two-step.
+  // Capture gesture (PATTERN held): freeze the VISIBLE track's computed output
+  // into a destination slot. Top rows pick the slot:
+  //   GP1-8  (top row, left)  -> destination group letter (A..H); default current
+  //   GP9-16 (top row, right) -> destination pattern number (1..8) -> commit
+  // The lower select row optionally picks a destination TRACK within that slot
+  // (stashed in SEQ_UI_Button_DirectTrack). With one picked, the commit renders
+  // the source into just that track of the slot; without one, the whole source
+  // group is captured to the slot.
 
   if( !depressed && seq_ui_button_state.PATTERN_PRESSED && gp < 8 ) {
-    // first press of two-step (or one-step shortcut): stash the letter, do
-    // nothing else yet. The PATTERN release path or a subsequent GP9-16
-    // press will resolve what to do.
-    pattern_stashed_letter = (u8)gp;
+    // top row left: destination group (stash; pattern press commits).
+    pattern_capture_group = (u8)gp;
     pattern_held_gp_consumed = 1;
-    // overlay is drawn by the LCD dispatcher and reflects the new state.
     return 0;
   }
 
   if( !depressed && seq_ui_button_state.PATTERN_PRESSED && gp >= 8 && gp < 16 ) {
-    // second press: requires a stashed letter (from a prior GP1-8 during the
-    // same PATTERN hold). Without it, ignore - we don't want a stray GP9-16
-    // alone to fire bounces into ambiguous letters.
-    if( pattern_stashed_letter == 0xff )
-      return 0;
-
+    // top row right: destination pattern number -> commit, persisted to SD.
     pattern_held_gp_consumed = 1;
-    u8 visible_track = SEQ_UI_VisibleTrackGet();
-    u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    u8 src_track = SEQ_UI_VisibleTrackGet();
+    u8 src_group = src_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
     seq_pattern_t dst = seq_pattern[src_group];
-    dst.group = pattern_stashed_letter & 0x07;
-    dst.num   = (gp - 8) & 0x07;
+    if( pattern_capture_group != 0xff )
+      dst.group = pattern_capture_group & 0x07; // else keep the current group
+    dst.num   = (u8)(gp - 8) & 0x07;
     dst.lower = 0;
 
-    MIOS32_MIDI_SendDebugMessage("[BOUNCE-2] src_trk=%d -> %c%d (tick=%d)\n",
-                                 visible_track, 'A' + dst.group, dst.num + 1,
-                                 (int)SEQ_BPM_TickGet());
-
-    s32 status = SEQ_CAPTURE_CommitToSlot(visible_track, src_group, dst, 1);
-    if( status < 0 ) {
-      MIOS32_MIDI_SendDebugMessage("[BOUNCE-2] failed status=%d\n", (int)status);
-      SEQ_UI_Msg_Track("bounce failed");
+    if( pattern_capture_dst_track != 0xff ) {
+      // a destination track was picked -> render source → that track of the
+      // slot, preserving the slot's other tracks, persisted.
+      pattern_capture_slottrack_msg(
+        SEQ_CORE_CaptureToSlotTrack(src_track, pattern_capture_dst_track, dst.bank, dst.pattern),
+        dst, pattern_capture_dst_track);
     } else {
-      char msg[8];
-      msg[0] = '>';
-      msg[1] = 'A' + dst.group;
-      msg[2] = '1' + dst.num;
-      msg[3] = ' ';
-      msg[4] = 'O';
-      msg[5] = 'K';
-      msg[6] = 0;
-      SEQ_UI_Msg_Track(msg);
+      // no destination track -> capture the whole source group to the slot.
+      pattern_capture_msg(SEQ_CORE_CaptureToSlot(src_track, src_group, dst.bank, dst.pattern), dst);
     }
-
-    // letter stays stashed for the rest of the hold so the user can rapid-
-    // fire bounces to multiple numbers without re-picking the letter.
+    // group + dst track stay set so the user can rapid-fire to more patterns.
     return 0;
   }
 
@@ -1572,70 +1589,35 @@ static s32 SEQ_UI_Button_Mute(s32 depressed)
 static s32 SEQ_UI_Button_Pattern(s32 depressed)
 {
   if( !depressed ) {
-    // PATTERN pressed: arm the modifier; don't navigate yet. If the user
-    // hits a GP while holding, the GP intercept stashes the letter (GP1-8)
-    // or fires the two-step bounce (GP9-16). The release handler below
-    // resolves whatever's left. The held-overlay is drawn by the LCD
-    // dispatcher (search for PATTERN_PRESSED branch) so we don't need a
-    // SEQ_UI_Msg here.
+    // PATTERN pressed: arm the modifier; don't navigate yet. Source = visible
+    // track. While held, GP1-8 pick the destination group, GP9-16 pick the
+    // pattern and COMMIT capture → slot, and the lower select row commits
+    // capture → that track (SEQ_UI_Button_DirectTrack). The release handler
+    // below only handles the bare-tap navigation. The held-overlay is drawn by
+    // the LCD dispatcher (search for PATTERN_PRESSED branch).
     seq_ui_button_state.PATTERN_PRESSED = 1;
     pattern_held_gp_consumed = 0;
-    pattern_stashed_letter = 0xff;
+    pattern_capture_group = 0xff;
+    pattern_capture_dst_track = 0xff;
     return 0;
   }
 
-  // PATTERN released. Three cases:
-  //   1. No GP pressed during hold      -> bare tap; navigate to Pattern page.
-  //   2. GP1-8 stashed, no GP9-16 fired -> one-step bounce (current letter,
-  //                                        stashed_letter as the number).
-  //   3. GP9-16 fired (with letter)     -> bounce already happened; nothing
-  //                                        more to do here.
+  // PATTERN released.
+  //   - No capture button touched during the hold -> bare tap; navigate to the
+  //     Pattern page.
+  //   - Otherwise a capture already committed on the GP9-16 / select-row press
+  //     (or the user picked only a group, i.e. aborted) -> nothing to do.
   seq_ui_button_state.PATTERN_PRESSED = 0;
 
-  u8 letter = pattern_stashed_letter;
   u8 gp_consumed = pattern_held_gp_consumed;
-  pattern_stashed_letter = 0xff;
+  pattern_capture_group = 0xff;
+  pattern_capture_dst_track = 0xff;
   pattern_held_gp_consumed = 0;
 
   if( !gp_consumed ) {
-    // Case 1: no GP at all - bare tap.
     SEQ_UI_MsgStop();
     SEQ_UI_PageSet(SEQ_UI_PAGE_PATTERN);
-    return 0;
   }
-
-  if( letter != 0xff ) {
-    // Case 2: letter stashed but the user never hit GP9-16. Treat the GP1-8
-    // press as a one-step bounce into the current letter's slot N.
-    u8 visible_track = SEQ_UI_VisibleTrackGet();
-    u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
-    seq_pattern_t dst = seq_pattern[src_group];
-    dst.num = letter & 0x07; // keep current letter+lower; only the number changes
-
-    MIOS32_MIDI_SendDebugMessage("[BOUNCE-1] src_trk=%d -> %c%d (tick=%d)\n",
-                                 visible_track, 'A' + dst.group, dst.num + 1,
-                                 (int)SEQ_BPM_TickGet());
-
-    s32 status = SEQ_CAPTURE_CommitToSlot(visible_track, src_group, dst, 1);
-    if( status < 0 ) {
-      MIOS32_MIDI_SendDebugMessage("[BOUNCE-1] failed status=%d\n", (int)status);
-      SEQ_UI_Msg_Track("bounce failed");
-    } else {
-      char msg[8];
-      msg[0] = '>';
-      msg[1] = 'A' + dst.group;
-      msg[2] = '1' + dst.num;
-      msg[3] = ' ';
-      msg[4] = 'O';
-      msg[5] = 'K';
-      msg[6] = 0;
-      SEQ_UI_Msg_Track(msg);
-    }
-    return 0;
-  }
-
-  // Case 3: bounce already ran from a two-step gesture. Leave its own
-  // success/fail message visible; nothing to do here.
   return 0;
 }
 
@@ -1962,6 +1944,18 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
   static u16 button_state = 0xffff; // all 16 buttons depressed
 
   if( sel_button >= 16 ) return -2; // max. 16 direct track buttons
+
+  // Capture gesture (PATTERN held): the select row picks a DESTINATION track
+  // within the slot — stash it; the GP9-16 pattern press commits the capture
+  // into that track of the chosen slot (persisted). Swallow the button while
+  // held so the normal track-select / sel-view behavior doesn't also fire.
+  if( seq_ui_button_state.PATTERN_PRESSED ) {
+    if( !depressed ) {
+      pattern_capture_dst_track = (u8)sel_button;
+      pattern_held_gp_consumed = 1;
+    }
+    return 0;
+  }
 
   u8 selbuttons_available = seq_hwcfg_blm8x8.dout_gp_mapping == 3;
 
@@ -3228,52 +3222,50 @@ s32 SEQ_UI_LCD_Handler(void)
       SEQ_LCD_PrintString(SEQ_UI_PAGES_MenuShortcutNameGet(i));
     }
   } else if( seq_ui_button_state.PATTERN_PRESSED ) {
-    // BOUNCE picker overlay: LCD 1 (cols 0-39) shows the letter row
-    // (GP1-8 = A..H), LCD 2 (cols 40-79) shows the slot row (GP9-16 = 1..8).
-    // The currently-stashed letter (if any) is bracketed.
-    u8 visible_track = SEQ_UI_VisibleTrackGet();
-    u8 src_group = visible_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    // Capture gesture overlay. Source = visible track. GP1-8 = destination group,
+    // GP9-16 = destination pattern (commits, persisted), lower select row = an
+    // optional destination track WITHIN the slot. Group defaults to current.
+    u8 src_track = SEQ_UI_VisibleTrackGet();
+    u8 src_group = src_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
     u8 cur_letter = seq_pattern[src_group].group;
 
-    // LCD 1 row 0: title (40 chars)
+    // LCD 1 row 0: title — source track + the destination track (if picked).
     SEQ_LCD_CursorSet(0, 0);
-    //                   "1234567890123456789012345678901234567890"
-    SEQ_LCD_PrintString("BOUNCE -> letter (GP1-8)                ");
+    //                                "1234567890123456789012345678901234567890"
+    if( pattern_capture_dst_track != 0xff )
+      SEQ_LCD_PrintFormattedString("CAPTURE T%-2d -> dest trk T%-2d           ",
+                                   src_track + 1, pattern_capture_dst_track + 1);
+    else
+      SEQ_LCD_PrintFormattedString("CAPTURE T%-2d  (sel row = dest trk)      ", src_track + 1);
 
-    // LCD 1 row 1: letter values, 5 chars per slot. Stashed letter has
-    // square brackets; current playing letter shows a small dot prefix.
+    // LCD 1 row 1: destination group letters A..H (GP1-8). Picked group
+    // bracketed; current playing letter shows a dot prefix.
     SEQ_LCD_CursorSet(0, 1);
     {
       int i;
       for(i=0; i<8; ++i) {
         char letter = 'A' + i;
         char prefix = (i == cur_letter) ? '.' : ' ';
-        if( i == pattern_stashed_letter )
+        if( i == pattern_capture_group )
           SEQ_LCD_PrintFormattedString("%c[%c] ", prefix, letter);
         else
           SEQ_LCD_PrintFormattedString("%c %c  ", prefix, letter);
       }
     }
 
-    // LCD 2 row 0: title (40 chars)
+    // LCD 2 row 0: the destination layout reminder.
     SEQ_LCD_CursorSet(40, 0);
-    //                   "1234567890123456789012345678901234567890"
-    if( pattern_stashed_letter == 0xff )
-      SEQ_LCD_PrintString("       (release for current letter)     ");
-    else
-      SEQ_LCD_PrintString("BOUNCE -> slot 1-8 (GP9-16)             ");
+    SEQ_LCD_PrintString("GP1-8 grp GP9-16 pat  sel=trk           ");
 
-    // LCD 2 row 1: slot 1..8, 5 chars per slot. The "one-step release"
-    // target slot (which equals stashed_letter+1 in 1-indexed terms) is
-    // bracketed so the user can preview what RELEASE would bounce to.
+    // LCD 2 row 1: destination pattern numbers 1..8 (GP9-16). The group's
+    // currently-loaded pattern number is dotted as a reference.
     SEQ_LCD_CursorSet(40, 1);
     {
+      u8 cur_num = seq_pattern[src_group].num;
       int i;
       for(i=0; i<8; ++i) {
-        if( i == pattern_stashed_letter )
-          SEQ_LCD_PrintFormattedString("[%d]  ", i + 1);
-        else
-          SEQ_LCD_PrintFormattedString(" %d   ", i + 1);
+        char prefix = (i == cur_num) ? '.' : ' ';
+        SEQ_LCD_PrintFormattedString("%c%d   ", prefix, i + 1);
       }
     }
   } else {

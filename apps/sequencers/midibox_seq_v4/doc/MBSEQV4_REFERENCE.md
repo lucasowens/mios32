@@ -245,13 +245,50 @@ Per CHANGELOG.txt V4.097: a loopback track assigned to Bus1..4 can drive the glo
 - Limit Fx applies *after* the transpose/arp pass ([seq_core.c:1347](../core/seq_core.c#L1347)).
 - BLM Live/Jam page also writes to buses — search for `SEQ_MIDI_IN_NUM_BUSSES` to see all writers.
 
-### Implications for bounce-in-place design
+### Capture / bounce (unified 2026-05-30 — design doc §9 "Bounce unification")
 
-Because a track can be both a source (via loopback) and a sink (via `tcc->busasg`), any generic bounce-capture API needs an explicit "what am I capturing?" — the live MIDI output of a track, *before* loopback emission, *after* robotize / echo / etc. The natural shape is `SEQ_BOUNCE_Capture(target_track, source_descriptor)` where the source descriptor names a specific point in the per-step pipeline. The second-generator trigger condition still stands: don't design the API around robotize alone.
+The fork captures the **computed output** of a track, never an emission tape. The old
+`seq_capture.c` ring-buffer tape (lossy; raced; 16 KB; hot-path tap in
+`SEQ_CORE_ScheduleEvent`) was **deleted**. One shared primitive plus two verbs, all in
+[seq_core.c](../core/seq_core.c):
 
-The companion concern is destination-side modulation: the bounced pattern inherits the source track's CC config, and any generative setting on the destination would re-modulate the captured tape on playback (FX, direction shaping, bus mode, groove, per-step Probability/Nth/etc.). Centralized in `SEQ_CC_ResetGenerativeForBounce()` ([seq_cc.c](../core/seq_cc.c)) — called from `SEQ_CAPTURE_CommitToSlot()` after the layer clear and before the destination write. Extend that function in the same review when a new generative CC is added; the alternative — a growing inline disable list in `seq_capture.c` — silently drifts behind new features.
+- `SEQ_CORE_CaptureTrackOutput(track, par_dst, trg_dst)` — forces a full *quiet* render
+  then snapshots `OutputActive` par/trg into caller buffers. The forced render is what
+  makes capture **sweep-safe**: in sweep regime only a ~4-step slice of `OutputActive`
+  is fresh, so any capture that reads it directly must force a whole-buffer render
+  first (the old in-place `SEQ_CORE_ProcessorBounce` lacked this — fixed by routing
+  through the primitive).
+- `SEQ_CORE_CaptureToSlot(src_track, dst_group, dst_bank, dst_pattern)` — capture →
+  pattern slot. (`dst_group` is vestigial — the write source-group is derived from
+  `src_track`; kept for the testctrl payload shape.)
+- `SEQ_CORE_CaptureToTrack(src_track, dst_track)` — capture → another track in the
+  current pattern (RAM only). dst **inherits** src's event-mode + geometry + lower-48
+  CCs (mirroring COPY/PASTE-TRACK in `seq_ui_util.c`) before the raw layer copy,
+  because par/trg geometry lives in `seq_par.c`/`seq_trg.c`, **not** `seq_cc_trk` — a
+  raw copy across mismatched geometry reads back as garbage.
 
-Source-state preservation across the bounce uses an **in-RAM snapshot** of `seq_cc_trk[src_track]` + layer/trigger buffers + pattern name + `play_section`, restored after `PatternWrite`. The earlier SD-based round-trip (`SEQ_PATTERN_Save` → mutate → `SEQ_PATTERN_Load`) had two failure modes: a non-zero `seq_pattern_remix_map` silently skipped the source track on reload (leaving the sanitized RAM in place), and `play_section` lives in `seq_core_trk_t` runtime state — never in the pattern file — so the SD reload couldn't restore it at all. The snapshot path makes source byte-identical after the bounce regardless.
+Because a track can be both a source (via loopback) and a sink (via `tcc->busasg`), the
+capture point matters: these verbs capture the **post-processor render** (`OutputActive`),
+which is *before* emission — so loopback/echo/global-transpose applied at emission are
+**not** in the capture. That's intentional: the captured pattern is the editable
+computed loop, not the literal performed MIDI.
+
+The companion concern is destination-side modulation: the captured pattern inherits the
+source's CC config, and any generative setting on the destination would re-modulate the
+frozen tape on playback (FX, direction shaping, bus mode, groove, per-step
+Probability/Nth/etc.). Centralized in `SEQ_CC_ResetGenerativeForBounce()`
+([seq_cc.c](../core/seq_cc.c)) — called by both capture verbs on the destination after
+the output is written. Extend that function in the same review when a new generative CC
+is added.
+
+Source-state preservation across `CaptureToSlot` uses an **in-RAM snapshot** of
+`seq_cc_trk[src_track]` + layer/trigger buffers + pattern name + `play_section`,
+restored after `PatternWrite`. The earlier SD-based round-trip (`SEQ_PATTERN_Save` →
+mutate → `SEQ_PATTERN_Load`) had two failure modes: a non-zero `seq_pattern_remix_map`
+silently skipped the source track on reload (leaving the sanitized RAM in place), and
+`play_section` lives in `seq_core_trk_t` runtime state — never in the pattern file — so
+the SD reload couldn't restore it at all. The snapshot path makes source byte-identical
+after the capture regardless.
 
 ---
 

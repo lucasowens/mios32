@@ -417,35 +417,43 @@ extern void SEQ_CORE_RenderTracks(void);
 // whenever the underlying CCs change. Called from SEQ_CC_Set.
 extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
 
-// Phase F BOUNCE (processor half): commit the current output (post-processor)
-// back into the source par/trg layer and clear every enabled processor slot.
-// Also untangles the chord_mask tcc mirror (playmode → Normal, strength → 0)
-// so the next SlotSync doesn't re-arm the slot. Returns 1 if a bounce
-// occurred (any slot was enabled), 0 otherwise.
+// Fork capture engine — shared primitive. Forces a full quiet render of
+// `track` (sweep-safe: OutputActive current across the whole buffer) and
+// snapshots the lossless post-processor par/trg into caller-provided buffers.
+// par_dst >= SEQ_PAR_MAX_BYTES, trg_dst >= SEQ_TRG_MAX_BYTES. Returns 0 on
+// success, negative on bad args.
+extern s32 SEQ_CORE_CaptureTrackOutput(u8 track, u8 *par_dst, u8 *trg_dst);
+
+// In-place processor freeze: commit the current output (post-processor) back
+// into the source par/trg layer and clear every enabled processor slot. Also
+// untangles the chord_mask tcc mirror (playmode → Normal, strength → 0) so the
+// next SlotSync doesn't re-arm the slot. Returns 1 if a bounce occurred (any
+// slot was enabled), 0 otherwise. Sweep-safe via SEQ_CORE_CaptureTrackOutput.
 extern s32 SEQ_CORE_ProcessorBounce(u8 track);
 
-// Phase F.3 BOUNCE-capture: cross-track non-destructive variant of the
-// processor bounce — copies src_track's current post-processor output
-// (active par + trg halves) into dst_track's source par/trg buffers,
-// leaving src_track entirely alone (processor stack stays enabled,
-// chord_mask tcc mirror untouched). The §3 destination model: writing
-// to an empty/different track is the *additive* counterpart of the
-// in-place replace done by SEQ_CORE_ProcessorBounce.
-//
-// Returns:
-//    0  on success
-//   -1  dst_track has any enabled processor slot OR any engaged generator
-//       (we only capture into an "empty" target — refuse otherwise)
-//   -2  src_track has no enabled processor slot
-//   -3  src/dst track index out of range, or src == dst
-extern s32 SEQ_CORE_ProcessorBounceCapture(u8 src_track, u8 dst_track);
+// Fork capture verb — capture src_track's computed output into the destination
+// pattern slot (dst_bank, dst_pattern), lossless, CC included. dst_group is
+// vestigial (the write source-group is derived from src_track) and kept only
+// for the testctrl payload shape. The source track's live RAM is snapshot and
+// restored byte-identical. The destination's generative CC is reset and the
+// name gets a "BNC" prefix. Takes MUTEX_SDCARD — task context only. Returns the
+// SEQ_FILE_B_PatternWrite status (>=0 ok).
+extern s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_pattern);
 
-// Phase F.3 helper. Returns the number of tracks with any enabled
-// processor slot, *excluding* `exclude_track`. If at least one is
-// found, writes the first such track to *out_track. Used by the
-// PITCHGEN BOUNCE dispatch to find the cross-track-capture src
-// candidate and to refuse when the choice is ambiguous (>1).
-extern u8 SEQ_CORE_FindEnabledProcessorTrack(u8 exclude_track, u8 *out_track);
+// Fork capture verb — capture src_track's computed output onto dst_track in the
+// current pattern (RAM only). dst inherits src's event-mode/geometry/lower-48
+// CCs so the captured bytes read correctly, then its generative CC is reset.
+// Returns 0 on success, -1 bad index, -2 src == dst (use the freeze verb).
+extern s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track);
+
+// Fork capture verb — capture src_track's computed output into dst_track of the
+// pattern slot (dst_bank, dst_pattern), PERSISTED to SD. Reads the target slot
+// into dst_track's group (so the slot's other tracks are preserved), replaces
+// dst_track with the captured output (geometry inherited from src, generative CC
+// reset), writes the slot back, and restores the dst group's live RAM so the
+// operation doesn't disturb what's currently loaded/playing. Takes MUTEX_SDCARD
+// (two SD ops) — task context only. Returns >=0 on success, negative on error.
+extern s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_pattern);
 
 // Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
 // free region between `_eusrstack` and the current MSP at paint time with a

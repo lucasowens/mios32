@@ -1,49 +1,43 @@
-"""Phase F.2: PITCHGEN BOUNCE dispatch — cursor-aware destination semantic.
+"""PITCHGEN GP8 dispatch — in-place freeze only.
 
-Pins the routing that surfaced from the listen-test:
+After the bounce unification, GP8 on the PITCHGEN page no longer guesses a
+destination (the relocate / cross-track-capture auto-routing is gone — those
+violated the no-smart-default rule). It freezes in place on the visible track:
 
-  1. Cursor IS the engaged gen → in-place bounce (slot freed, state drops
+  1. Cursor IS the engaged gen → SEQ_GENERATOR_Bounce (slot freed, state drops
      to '--', distinct from DISENGAGE which leaves state='disengaged').
-  2. Cursor on empty drum + gen engaged elsewhere on track → relocate
-     (row-1 hint switches from 'GEN on Dnn  GP8 relocates here' back to
-     the default engage prompt; the gen slot is freed).
-  3. Undo stale (after UNDO+re-ENGAGE, the undo snapshot wasn't refreshed)
-     → relocate refuses with -3; the engaged gen on the original drum is
-     untouched.
+  2. No gen at the cursor but the visible track has an enabled processor →
+     SEQ_CORE_ProcessorBounce (output→source, stack cleared, playmode back to
+     Normal). LCD popup "BOUNCED (proc)".
+  3. Nothing applicable → "nothing to bounce" guidance.
 
-Verification is LCD-scrape only. The behavioral contract "src restored,
-dst plays the loop" is audible-by-ear and stays a listen-test; what these
-tests pin is the *dispatch* layer that decides which BOUNCE flavor runs.
-A silent regression in the dispatch would route the wrong way — these
-tests catch that.
+Destination captures (→ pattern slot, → track) moved to the deliberate
+PATTERN-hold gesture (test_capture_to_slot via the bounce() helper) and the
+CaptureToTrack verb (test_capture_to_track) — GP8 is purely the in-place freeze.
 
-Track 0 is reinitialized to drum mode in each test via the testctrl
-CMD_TRACK_DRUM_INIT (1 par-layer of type Note × 16 drum instruments × 64
-steps). No pre-saved drum-mode pattern is needed.
+Verification is LCD-scrape + CC readback. Track 0 is reinitialized to drum mode
+via CMD_TRACK_DRUM_INIT in each test.
 """
 
 import time
 
 import pytest
 
-from harness import Board, Button, Page
+from harness import Board, Button, CC, Page
 
 
 PITCHGEN_TRACK = 0
 GP1_ENGAGE = Button.GP(1)
-GP2_UNDO = Button.GP(2)
 GP8_BOUNCE = Button.GP(8)
 
-# SEQ_UI_Msg popups overlay the page LCD until their timeout expires, so
-# the LCD-scrape assertions only see the page's own content after the
-# popup clears. Every button press in this file pops a message — sleep
-# through it before reading the LCD. The trailing 0.15s is the page-redraw
-# settle once the popup has cleared.
+# Mirror of seq_core_trk_playmode_t (seq_core.h): playmode CC = CC.MODE (0x40).
+TRKMODE_NORMAL = 1
+TRKMODE_CHORDMASK = 4
+
 SETTLE = 0.15
-ENGAGE_MSG_MS = 750    # "Pitch Gen: ENGAGED" / "DISENGAGED" / "UNDO restored"
-BOUNCE_MSG_MS = 1000   # "BOUNCED in place"
-RELOCATE_MSG_MS = 1200 # "BOUNCED -> drum slot"
-REFUSE_MSG_MS = 2200   # "undo stale - reENGAGE"
+ENGAGE_MSG_MS = 750     # "Pitch Gen: ENGAGED"
+BOUNCE_MSG_MS = 1000    # "BOUNCED in place" / "BOUNCED (proc)"
+NOTHING_MSG_MS = 1500   # "nothing to bounce"
 
 
 def _setup_pitchgen(board: Board) -> None:
@@ -59,21 +53,13 @@ def _lcd_text(board: Board) -> str:
 
 
 def _wait_msg_clear(ms: int) -> None:
-    """Sleep through a SEQ_UI_Msg popup so the next LCD read sees the page,
-    not the message overlay."""
     time.sleep((ms / 1000.0) + SETTLE)
 
 
-def _press_engage(board: Board) -> None:
-    """GP1 ENGAGE + wait through the 750 ms popup."""
-    board.press(GP1_ENGAGE)
-    _wait_msg_clear(ENGAGE_MSG_MS)
-
-
-def _press_undo(board: Board) -> None:
-    """GP2 UNDO + wait through the 750 ms popup."""
-    board.press(GP2_UNDO)
-    _wait_msg_clear(ENGAGE_MSG_MS)
+def _enable_chordmask(board: Board, track: int, *, strength: int = 0) -> None:
+    board.cc_set(track, CC.MODE, TRKMODE_CHORDMASK)
+    board.cc_set(track, CC.CHORDMASK_STRENGTH, strength)
+    time.sleep(0.05)
 
 
 @pytest.mark.hardware
@@ -81,13 +67,13 @@ def test_bounce_in_place_frees_slot(board):
     """GP8 with cursor on the engaged gen frees the pool slot.
 
     After SEQ_GENERATOR_Bounce, SEQ_GENERATOR_Get returns NULL, so the LCD
-    state field drops to '--' (the "no slot allocated" branch in
-    seq_ui_trkpitchgen.c's LCD_Handler). This is observably distinct from
-    GP1 DISENGAGE, which leaves in_use=1 and reports 'disengaged'.
+    state field drops to '--' (the "no slot allocated" branch). This is
+    observably distinct from GP1 DISENGAGE, which leaves in_use=1 ('disengaged').
     """
     _setup_pitchgen(board)
 
-    _press_engage(board)
+    board.press(GP1_ENGAGE)
+    _wait_msg_clear(ENGAGE_MSG_MS)
     assert "state:ENGAGED" in _lcd_text(board), "GP1 should have engaged"
 
     board.press(GP8_BOUNCE)
@@ -100,66 +86,40 @@ def test_bounce_in_place_frees_slot(board):
 
 
 @pytest.mark.hardware
-def test_bounce_relocate_clears_other_engaged_marker(board):
-    """GP8 with cursor on empty drum + gen engaged elsewhere → relocate.
-
-    The row-1 hint is the visible witness:
-      - while cursor is parked on empty D5 with a gen still engaged on D0:
-        'GEN on D 1  GP8 relocates here'
-      - after BOUNCE freed the slot: no engaged gen anywhere on the track,
-        the hint falls back to 'press GP1 to ENGAGE   GP8=bounce proc'.
-    """
+def test_bounce_processor_freezes_in_place(board):
+    """GP8 on a track with an enabled processor (no gen at the cursor) →
+    SEQ_CORE_ProcessorBounce: 'BOUNCED (proc)' popup, playmode back to Normal
+    (the chord_mask tcc mirror is untangled so it doesn't re-arm)."""
     _setup_pitchgen(board)
-
-    _press_engage(board)
-    assert "state:ENGAGED" in _lcd_text(board)
-
-    board.ui_instrument_set(5)
-    time.sleep(SETTLE)
-    text = _lcd_text(board)
-    assert "GEN on D" in text, (
-        f"cursor on empty drum w/ gen engaged elsewhere should show the "
-        f"'GEN on Dnn' relocate hint:\n{text}"
-    )
+    _enable_chordmask(board, PITCHGEN_TRACK, strength=0)
+    assert board.cc_get(PITCHGEN_TRACK, CC.MODE) == TRKMODE_CHORDMASK
 
     board.press(GP8_BOUNCE)
-    _wait_msg_clear(RELOCATE_MSG_MS)
-    text = _lcd_text(board)
-    assert "GEN on D" not in text, (
-        f"after relocate, the slot is freed; row-1 hint should no longer "
-        f"mention 'GEN on D':\n{text}"
+    time.sleep(0.05)
+    popup = _lcd_text(board)
+    assert "BOUNCED (proc)" in popup, (
+        f"GP8 with an enabled processor should freeze it in place "
+        f"('BOUNCED (proc)'); LCD reads:\n{popup}"
     )
-    assert "press GP1 to ENGAGE" in text, (
-        f"after relocate, the row-1 hint should default back to the engage "
-        f"prompt:\n{text}"
+
+    _wait_msg_clear(BOUNCE_MSG_MS)
+    assert board.cc_get(PITCHGEN_TRACK, CC.MODE) == TRKMODE_NORMAL, (
+        "after processor bounce the chord_mask playmode mirror should be "
+        "reset to Normal so the next SlotSync doesn't re-arm it"
     )
 
 
 @pytest.mark.hardware
-def test_relocate_refuses_when_undo_stale(board):
-    """UNDO consumes the snapshot; re-ENGAGE does NOT refresh it because
-    the slot already exists in the pool (re-engage path does not snapshot
-    undo). With undo invalid, BOUNCE-relocate must refuse with -3
-    ('undo stale - reENGAGE') and leave the gen untouched.
-    """
+def test_nothing_to_bounce_guidance(board):
+    """GP8 on an empty track (no engaged gen, no enabled processor) → the
+    'nothing to bounce' guidance, and no playmode change."""
     _setup_pitchgen(board)
 
-    _press_engage(board)
-    _press_undo(board)               # restores par, disengages, invalidates undo
-    _press_engage(board)             # re-engages, but does NOT re-snapshot undo
-    assert "state:ENGAGED" in _lcd_text(board), (
-        "re-ENGAGE after UNDO should still show ENGAGED state"
-    )
-
-    board.ui_instrument_set(5)
-    time.sleep(SETTLE)
     board.press(GP8_BOUNCE)
-    _wait_msg_clear(REFUSE_MSG_MS)
-
-    # The relocate was refused, so the engaged gen should still be there.
-    # Move the cursor back to D0 and confirm.
-    board.ui_instrument_set(0)
-    time.sleep(SETTLE)
-    assert "state:ENGAGED" in _lcd_text(board), (
-        "stale-undo refusal should leave the original gen engaged"
+    time.sleep(0.05)
+    popup = _lcd_text(board)
+    assert "nothing to bounce" in popup, (
+        f"GP8 on an empty track should show 'nothing to bounce'; "
+        f"LCD reads:\n{popup}"
     )
+    _wait_msg_clear(NOTHING_MSG_MS)

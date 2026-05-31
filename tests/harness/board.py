@@ -38,6 +38,8 @@ from .sysex import (
     CMD_GENERATOR_TICK_FORCE,
     CMD_GENERATOR_DIAL_SET,
     CMD_GENERATOR_MULT_SET,
+    CMD_CAPTURE_TO_TRACK,
+    CMD_CAPTURE_TO_SLOT_TRACK,
     DIAL_RANGE_MIN,
     DIAL_RANGE_MAX,
     DIAL_RATE,
@@ -657,20 +659,20 @@ class Board:
         src_track: int,
         dst_bank: int,
         dst_pattern: int,
-        num_measures: int = 1,
         dst_group: int = 0,
         timeout: float = 4.0,
     ) -> bool:
-        """Trigger SEQ_CAPTURE_CommitToSlot on the firmware.
+        """Trigger SEQ_CORE_CaptureToSlot on the firmware (capture → slot).
 
-        The captured tape is whatever's currently in the per-track ring buffer
-        (filled by recent live playback). The destination slot at
-        (dst_bank, dst_pattern) is overwritten with the sanitized source CC +
-        captured layers. Source state is restored from an in-RAM snapshot.
+        Captures src_track's computed output (lossless — exact par/trg, CC
+        layers included) into the slot at (dst_bank, dst_pattern): the source
+        layers are overwritten with the forced-render output, generative CC is
+        reset, the name gets a "BNC" prefix, and the slot is written. The source
+        track's live RAM is restored byte-identical afterward. dst_group is
+        vestigial (kept for payload shape).
 
-        Returns True if the firmware committed successfully (SEQ_CAPTURE
-        returned >=0). Note: an empty ring (no recent playback) returns False.
-        The 4s default timeout accommodates SD write latency.
+        Returns True if the firmware committed successfully (>= 0). The 4s
+        default timeout accommodates SD write latency.
         """
         if not 0 <= src_track <= 15:
             raise ValueError(f"src_track out of range: {src_track}")
@@ -678,13 +680,11 @@ class Board:
             raise ValueError(f"dst_bank out of range: {dst_bank}")
         if not 0 <= dst_pattern <= 127:
             raise ValueError(f"dst_pattern out of range: {dst_pattern}")
-        if not 1 <= num_measures <= 16:
-            raise ValueError(f"num_measures out of range: {num_measures}")
         since = time.monotonic() - self._t0
         self.send_raw(
             frame(
                 CMD_BOUNCE,
-                bytes([src_track, dst_group, dst_bank, dst_pattern, num_measures]),
+                bytes([src_track, dst_group, dst_bank, dst_pattern]),
             )
         )
         payload = self.wait_for_sysex(CMD_BOUNCE, timeout=timeout, since=since)
@@ -693,6 +693,66 @@ class Board:
         if payload[4] != CMD_STATUS_OK:
             raise RuntimeError(f"BOUNCE dispatch status {payload[4]:#04x}")
         return payload[3] == CMD_STATUS_OK
+
+    def capture_to_track(
+        self,
+        src_track: int,
+        dst_track: int,
+        timeout: float = 4.0,
+    ) -> bool:
+        """Trigger SEQ_CORE_CaptureToTrack on the firmware (capture → track).
+
+        Captures src_track's computed output (lossless) onto dst_track in the
+        current pattern (RAM only — no SD). dst inherits src's
+        event-mode/geometry/lower-48 CCs so the captured bytes read correctly,
+        then its generative CC is reset. Returns True on success (>= 0).
+        """
+        if not 0 <= src_track <= 15:
+            raise ValueError(f"src_track out of range: {src_track}")
+        if not 0 <= dst_track <= 15:
+            raise ValueError(f"dst_track out of range: {dst_track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CAPTURE_TO_TRACK, bytes([src_track, dst_track])))
+        payload = self.wait_for_sysex(CMD_CAPTURE_TO_TRACK, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short CAPTURE_TO_TRACK reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise RuntimeError(f"CAPTURE_TO_TRACK dispatch status {payload[3]:#04x}")
+        return payload[2] == CMD_STATUS_OK
+
+    def capture_to_slot_track(
+        self,
+        src_track: int,
+        dst_track: int,
+        dst_bank: int,
+        dst_pattern: int,
+        timeout: float = 4.0,
+    ) -> bool:
+        """Trigger SEQ_CORE_CaptureToSlotTrack (capture → track-in-slot, saved).
+
+        Renders src_track's computed output into dst_track of slot
+        (dst_bank, dst_pattern), persisted to SD, preserving the slot's other
+        tracks. The dst group's live RAM is restored afterward. Returns True on
+        success. The 4s default timeout accommodates two SD ops.
+        """
+        if not 0 <= src_track <= 15:
+            raise ValueError(f"src_track out of range: {src_track}")
+        if not 0 <= dst_track <= 15:
+            raise ValueError(f"dst_track out of range: {dst_track}")
+        if not 0 <= dst_bank <= 7:
+            raise ValueError(f"dst_bank out of range: {dst_bank}")
+        if not 0 <= dst_pattern <= 127:
+            raise ValueError(f"dst_pattern out of range: {dst_pattern}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_CAPTURE_TO_SLOT_TRACK, bytes([src_track, dst_track, dst_bank, dst_pattern]))
+        )
+        payload = self.wait_for_sysex(CMD_CAPTURE_TO_SLOT_TRACK, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short CAPTURE_TO_SLOT_TRACK reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise RuntimeError(f"CAPTURE_TO_SLOT_TRACK dispatch status {payload[3]:#04x}")
+        return payload[2] == CMD_STATUS_OK
 
     def pattern_load(
         self,

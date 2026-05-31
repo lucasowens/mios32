@@ -90,7 +90,6 @@ THUMB_SOURCE    = core/app.c \
 		core/seq_morph.c \
 		core/seq_humanize.c \
 		core/seq_robotize.c \
-		core/seq_capture.c \
 		core/seq_lfo.c \
 		core/seq_chord.c \
 		core/seq_pattern.c \

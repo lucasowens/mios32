@@ -17,10 +17,10 @@
 #include "seq_ui_pages.h"
 #include "seq_hwcfg.h"
 #include "seq_lcd.h"
+#include "seq_lcd_logo.h"
 #include "seq_cc.h"
 #include "seq_core.h"
 #include "seq_midi_port.h"
-#include "seq_capture.h"
 #include "seq_pattern.h"
 #include "seq_file.h"
 #include "seq_trg.h"
@@ -62,6 +62,8 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_GENERATOR_TICK_FORCE 0x60
 #define CMD_GENERATOR_DIAL_SET   0x61
 #define CMD_GENERATOR_MULT_SET   0x62
+#define CMD_CAPTURE_TO_TRACK     0x63
+#define CMD_CAPTURE_TO_SLOT_TRACK 0x64
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -305,6 +307,15 @@ static void cmd_encoder(mios32_midi_port_t port, const u8 *payload, u8 plen)
 // should press CLEAR after reset.
 static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
+  // Always reset the screen-saver idle timer on a harness reset (called before
+  // every test by the conftest board fixture). Harness button injection bypasses
+  // the app.c hardware-input path that normally resets it, so without this the
+  // saver counts up unimpeded and eventually overlays the LCD mid-suite —
+  // corrupting LCD-scrape assertions. No test body runs near the saver delay, so
+  // resetting per-test keeps it from ever tripping. RAM-only; the user's saved
+  // screensaver-delay config is untouched.
+  SEQ_LCD_LOGO_ScreenSaver_Disable();
+
   // Default: stop + page + track-select + unmute-all + clear-robotize.
   u8 flags = (plen >= 1) ? (payload[0] & 0x7f) : 0x1f;
 
@@ -903,18 +914,19 @@ static void cmd_play_section_set(mios32_midi_port_t port, const u8 *payload, u8 
 }
 
 
-// CMD_BOUNCE payload: [src_track, dst_group, dst_bank, dst_pattern, num_measures]
+// CMD_BOUNCE payload: [src_track, dst_group, dst_bank, dst_pattern]
 // Reply payload: [src_track, dst_bank, dst_pattern, commit_ok, dispatch_status]
-//   commit_ok 0x01 = SEQ_CAPTURE_CommitToSlot returned >=0, 0x00 = returned <0.
+//   commit_ok 0x01 = SEQ_CORE_CaptureToSlot returned >=0, 0x00 = returned <0.
 //   dispatch_status 0x01 = ok, 0x02 = bad payload.
 //
-// Synchronous: the parser blocks until SEQ_CAPTURE_CommitToSlot returns. SD I/O
-// can take 100ms+, so the harness must wait_for_sysex with a generous timeout
-// (~3s). PatternWrite + the in-RAM snapshot/restore both run inside the call.
+// Captures src_track's computed output (lossless) into the (bank, pattern)
+// slot. Synchronous: the parser blocks until SEQ_CORE_CaptureToSlot returns.
+// SD I/O can take 100ms+, so the harness must wait_for_sysex with a generous
+// timeout (~3s). PatternWrite + the in-RAM snapshot/restore run inside the call.
 static void cmd_bounce(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
   u8 reply[5] = { 0, 0, 0, 0, 0x02 };
-  if( plen < 5 ) {
+  if( plen < 4 ) {
     send_reply(port, CMD_BOUNCE, reply, sizeof(reply));
     return;
   }
@@ -922,14 +934,8 @@ static void cmd_bounce(mios32_midi_port_t port, const u8 *payload, u8 plen)
   u8 dst_group    = payload[1];
   u8 dst_bank     = payload[2] & 0x07;
   u8 dst_pattern  = payload[3] & 0x7f;
-  u8 num_measures = payload[4] & 0x7f;
 
-  seq_pattern_t dst_pat;
-  dst_pat.ALL = 0;
-  dst_pat.bank = dst_bank;
-  dst_pat.pattern = dst_pattern;
-
-  s32 r = SEQ_CAPTURE_CommitToSlot(src_track, dst_group, dst_pat, num_measures);
+  s32 r = SEQ_CORE_CaptureToSlot(src_track, dst_group, dst_bank, dst_pattern);
 
   reply[0] = src_track;
   reply[1] = dst_bank;
@@ -937,6 +943,63 @@ static void cmd_bounce(mios32_midi_port_t port, const u8 *payload, u8 plen)
   reply[3] = (r >= 0) ? 0x01 : 0x00;
   reply[4] = 0x01;
   send_reply(port, CMD_BOUNCE, reply, sizeof(reply));
+}
+
+
+// CMD_CAPTURE_TO_TRACK payload: [src_track, dst_track]
+// Reply payload: [src_track, dst_track, ok, dispatch_status]
+//   ok 0x01 = SEQ_CORE_CaptureToTrack returned >=0, 0x00 = returned <0.
+//   dispatch_status 0x01 = ok, 0x02 = bad payload.
+//
+// Captures src_track's computed output (lossless) onto dst_track in the current
+// pattern (RAM only — no SD). dst inherits src's event-mode/geometry/lower-48
+// CCs, then its generative CC is reset.
+static void cmd_capture_to_track(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 2 ) {
+    send_reply(port, CMD_CAPTURE_TO_TRACK, reply, sizeof(reply));
+    return;
+  }
+  u8 src_track = payload[0];
+  u8 dst_track = payload[1];
+
+  s32 r = SEQ_CORE_CaptureToTrack(src_track, dst_track);
+
+  reply[0] = src_track;
+  reply[1] = dst_track;
+  reply[2] = (r >= 0) ? 0x01 : 0x00;
+  reply[3] = 0x01;
+  send_reply(port, CMD_CAPTURE_TO_TRACK, reply, sizeof(reply));
+}
+
+
+// CMD_CAPTURE_TO_SLOT_TRACK payload: [src_track, dst_track, dst_bank, dst_pattern]
+// Reply payload: [src_track, dst_track, ok, dispatch_status]
+//   ok 0x01 = SEQ_CORE_CaptureToSlotTrack returned >=0, 0x00 = returned <0.
+//   dispatch_status 0x01 = ok, 0x02 = bad payload.
+//
+// Renders src_track's computed output into dst_track of slot (bank, pattern),
+// persisted to SD, preserving the slot's other tracks. Synchronous (two SD ops).
+static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_CAPTURE_TO_SLOT_TRACK, reply, sizeof(reply));
+    return;
+  }
+  u8 src_track   = payload[0];
+  u8 dst_track   = payload[1];
+  u8 dst_bank    = payload[2] & 0x07;
+  u8 dst_pattern = payload[3] & 0x7f;
+
+  s32 r = SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern);
+
+  reply[0] = src_track;
+  reply[1] = dst_track;
+  reply[2] = (r >= 0) ? 0x01 : 0x00;
+  reply[3] = 0x01;
+  send_reply(port, CMD_CAPTURE_TO_SLOT_TRACK, reply, sizeof(reply));
 }
 
 
@@ -1316,6 +1379,12 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_GENERATOR_MULT_SET:
             cmd_generator_mult_set(port, payload_buf, payload_len);
+            break;
+          case CMD_CAPTURE_TO_TRACK:
+            cmd_capture_to_track(port, payload_buf, payload_len);
+            break;
+          case CMD_CAPTURE_TO_SLOT_TRACK:
+            cmd_capture_to_slot_track(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

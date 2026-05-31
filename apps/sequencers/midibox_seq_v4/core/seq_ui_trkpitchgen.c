@@ -31,9 +31,15 @@
  *         and clear the stack (SEQ_CORE_ProcessorBounce).
  *       - else: nothing-to-bounce message.
  *
- * Target = active drum on the visible track: (track = SEQ_UI_VisibleTrackGet,
- *           instrument = ui_selected_instrument). Drum-mode + Note par-layer
- *           assignment required, else ENGAGE refuses with a guidance message.
+ * Target = a Note line on the visible track (track = SEQ_UI_VisibleTrackGet).
+ *           Drum track: instrument = ui_selected_instrument (the drum cursor),
+ *           one line per drum, writing the shared linked Note layer. Normal
+ *           track: instrument = 0 (single melodic line) and the gen writes the
+ *           cursor's Note layer (ui_selected_par_layer) if it's a Note layer,
+ *           else the linked Note layer — cursor-aware, deliberate placement
+ *           wins. The only requirement is an assigned Note par-layer (else
+ *           ENGAGE refuses with a guidance message). See gen_instr() /
+ *           gen_par_layer().
  *
  * ==========================================================================
  */
@@ -50,12 +56,44 @@
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Generator target line for the visible track. Drum tracks select a line via
+// the instrument cursor (which drum); normal tracks collapse to the single
+// melodic line (instrument 0) — ui_selected_instrument is the drum cursor and
+// would be stale from a previously-visited drum track. One generator slot per
+// normal track in this mono build; per-Note-layer polyphony is a later step.
+/////////////////////////////////////////////////////////////////////////////
+static u8 gen_instr(u8 track)
+{
+  return (seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum)
+           ? ui_selected_instrument : 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Cursor-aware target Note par-layer for the visible track. Drum tracks write
+// the shared linked Note layer (drum lines are separated by instrument, not
+// layer). Normal tracks honor the cursor: if ui_selected_par_layer is itself a
+// Note layer, the gen targets *that* layer (deliberate cursor placement wins);
+// otherwise it falls back to the track's linked Note layer. Returns the linked
+// layer cast to u8 even when -1 (no Note layer) — Engage's -3 guard catches it.
+/////////////////////////////////////////////////////////////////////////////
+static u8 gen_par_layer(u8 track)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->event_mode != SEQ_EVENT_MODE_Drum &&
+      SEQ_PAR_AssignmentGet(track, ui_selected_par_layer) == SEQ_PAR_Type_Note )
+    return ui_selected_par_layer;
+  return (u8)tcc->link_par_layer_note;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // LED handler — GP1 lit while engaged.
 /////////////////////////////////////////////////////////////////////////////
 static s32 LED_Handler(u16 *gp_leds)
 {
   u8 track = SEQ_UI_VisibleTrackGet();
-  if( SEQ_GENERATOR_IsEngaged(track, ui_selected_instrument) )
+  if( SEQ_GENERATOR_IsEngaged(track, gen_instr(track)) )
     *gp_leds = (1 << 0);
   else
     *gp_leds = 0;
@@ -83,7 +121,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
     return 0;
   }
 
-  seq_generator_t *g = SEQ_GENERATOR_Get(track, ui_selected_instrument);
+  seq_generator_t *g = SEQ_GENERATOR_Get(track, gen_instr(track));
 
   // No allocated slot ⇒ nothing to tune yet. Encoders no-op until ENGAGE.
   if( g == NULL ) return -1;
@@ -136,7 +174,7 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
   if( depressed ) return 0;
 
   u8 track = SEQ_UI_VisibleTrackGet();
-  u8 instr = ui_selected_instrument;
+  u8 instr = gen_instr(track);
 
   if( button == SEQ_UI_BUTTON_GP1 ) {
     u8 engaged = SEQ_GENERATOR_IsEngaged(track, instr);
@@ -177,7 +215,7 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
     // can't reliably detect that, so deferring to the cursor is the
     // right call.
 
-    s32 r = SEQ_GENERATOR_Engage(track, instr);
+    s32 r = SEQ_GENERATOR_Engage(track, instr, gen_par_layer(track));
     switch( r ) {
       case 0:
         SEQ_UI_Msg(SEQ_UI_MSG_USER, 750, "Pitch Gen:", "ENGAGED");
@@ -186,7 +224,7 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
         SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "pool full (64/64)");
         break;
       case -2:
-        SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "needs drum-mode track");
+        SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "bad track/line");
         break;
       case -3:
         SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "assign Note par-layer");
@@ -206,79 +244,24 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
   }
 
   if( button == SEQ_UI_BUTTON_GP8 ) {
-    // Phase F.2 + F.3 BOUNCE — cursor-aware destination (§3).
+    // BOUNCE — in-place freeze on the visible track only. Cross-track and
+    // to-slot captures are deliberate, explicit gestures elsewhere (the
+    // PATTERN-hold capture gesture drives capture → pattern slot); GP8 no
+    // longer auto-guesses a destination.
     //
-    // Resolve in order:
-    //   1. Cursor IS on the engaged gen → in-place gen bounce (free slot,
-    //      source stays as last-written). §3 "occupied → replace".
-    //   2. A gen is engaged elsewhere on the visible track → relocate it
-    //      to (cursor track, cursor instr): restore src from undo, write
-    //      loop to dst. §3 "empty → additive".
-    //   3. Visible track has an enabled processor → in-place processor
-    //      bounce-and-commit (destructive: output → source on visible
-    //      track). §3 "occupied → replace" for processors.
-    //   4. Visible track empty AND exactly one other track has an enabled
-    //      processor → cross-track capture: copy that track's output into
-    //      visible track's source, leave the src processor untouched. §3
-    //      "empty → additive" for processors (phase F.3).
-    //   5. Visible track empty AND multiple other tracks have processors
-    //       → refuse with "multi proc" message (ambiguous).
-    //   6. Nothing applicable → "nothing to bounce" guidance.
+    //   1. Cursor IS on the engaged gen → freeze gen in place (free slot,
+    //      source stays as last-written).
+    //   2. Visible track has an enabled processor → freeze processor output
+    //      → source on the visible track, clear the stack.
+    //   3. Nothing applicable → guidance.
     if( SEQ_GENERATOR_IsEngaged(track, instr) ) {
       SEQ_GENERATOR_Bounce(track, instr);
       SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "BOUNCED in place");
       return 1;
     }
 
-    u8 src_instr;
-    if( SEQ_GENERATOR_FindEngagedOnTrack(track, &src_instr) ) {
-      s32 r = SEQ_GENERATOR_BounceRelocate(track, src_instr, track, instr);
-      switch( r ) {
-        case 0:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1200, "Pitch Gen:", "BOUNCED -> drum slot");
-          break;
-        case -2:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1800, "Pitch Gen:", "dst not drum-mode");
-          break;
-        case -3:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 2200, "Pitch Gen:", "undo stale - reENGAGE");
-          break;
-        default:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1800, "Pitch Gen:", "BOUNCE failed");
-      }
-      return 1;
-    }
-
     if( SEQ_CORE_ProcessorBounce(track) ) {
       SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Pitch Gen:", "BOUNCED (proc)");
-      return 1;
-    }
-
-    // Phase F.3 cross-track capture. Only reaches here when the visible
-    // track has nothing of its own to bounce.
-    u8 cap_src;
-    u8 cap_count = SEQ_CORE_FindEnabledProcessorTrack(track, &cap_src);
-    if( cap_count == 1 ) {
-      s32 r = SEQ_CORE_ProcessorBounceCapture(cap_src, track);
-      switch( r ) {
-        case 0: {
-          char line2[21];
-          sprintf(line2, "CAPTURED from T%2d", cap_src + 1);
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1200, "Pitch Gen:", line2);
-          break;
-        }
-        case -1:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1800, "Pitch Gen:", "dst not empty");
-          break;
-        case -2:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1500, "Pitch Gen:", "nothing to bounce");
-          break;
-        default:
-          SEQ_UI_Msg(SEQ_UI_MSG_USER, 1800, "Pitch Gen:", "CAPTURE failed");
-      }
-      return 1;
-    } else if( cap_count >= 2 ) {
-      SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Pitch Gen:", "multi proc - pick one");
       return 1;
     }
 
@@ -386,34 +369,25 @@ static s32 LCD_Handler(u8 high_prio)
     return 0;
 
   u8 track = SEQ_UI_VisibleTrackGet();
-  u8 instr = ui_selected_instrument;
+  u8 instr = gen_instr(track);
+  u8 is_drum = (seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum);
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
   seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
   u8 engaged = SEQ_GENERATOR_IsEngaged(track, instr);
-  u8 other_engaged_instr = 0;
-  u8 has_other_engaged = 0;
-  if( !engaged )
-    has_other_engaged = SEQ_GENERATOR_FindEngagedOnTrack(track, &other_engaged_instr);
 
-  // Phase F.3 — cross-track capture candidate hint. Only meaningful when
-  // the visible track has nothing of its own (no engaged gen anywhere on
-  // it, and no enabled processor).
-  u8 cap_src_track = 0;
-  u8 cap_count = 0;
-  u8 has_own_proc = 0;
-  if( !engaged && !has_other_engaged ) {
-    u8 s;
-    for(s=0; s<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++s) {
-      const seq_processor_slot_t *p = &seq_processor_stack[track][s];
-      if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) { has_own_proc = 1; break; }
-    }
-    if( !has_own_proc )
-      cap_count = SEQ_CORE_FindEnabledProcessorTrack(track, &cap_src_track);
-  }
-
-  // Row 0
+  // Row 0. Drum tracks name the line by drum number (.D nn); normal tracks
+  // name the target Note par-layer (Nt:X) — the layer the gen writes into,
+  // which the cursor selects (cursor-aware). Show the engaged gen's actual
+  // target if a slot exists, else the layer ENGAGE would pick right now. Both
+  // prefixes are 23 chars wide so "state:" lands at the same column.
   SEQ_LCD_CursorSet(0, 0);
-  SEQ_LCD_PrintFormattedString("PITCH GEN  Trk%2d.D%2d   ", track+1, instr+1);
+  if( is_drum )
+    SEQ_LCD_PrintFormattedString("PITCH GEN  Trk%2d.D%2d   ", track+1, instr+1);
+  else {
+    u8 pl = (g != NULL) ? g->par_layer : gen_par_layer(track);
+    char letter = (pl < SEQ_PAR_NumLayersGet(track)) ? (char)('A' + pl) : '?';
+    SEQ_LCD_PrintFormattedString("PITCH GEN  Trk%2d Nt:%c  ", track+1, letter);
+  }
   if( engaged )       SEQ_LCD_PrintString("state:ENGAGED     ");
   else if( g != NULL ) SEQ_LCD_PrintString("state:disengaged  ");
   else                 SEQ_LCD_PrintString("state:--          ");
@@ -435,11 +409,10 @@ static s32 LCD_Handler(u8 high_prio)
     SEQ_LCD_PrintString("Lo:--  Hi:--  R:--- D:--- Ct:---        ");
   }
 
-  // Row 1 RHS: contextual hint.
+  // Row 1 RHS: contextual hint. The only hard requirement now (drum OR
+  // normal) is a Note par-layer to write into.
   SEQ_LCD_CursorSet(40, 1);
-  if( tcc->event_mode != SEQ_EVENT_MODE_Drum )
-    SEQ_LCD_PrintString("(needs drum-mode track)                 ");
-  else if( tcc->link_par_layer_note < 0 )
+  if( tcc->link_par_layer_note < 0 )
     SEQ_LCD_PrintString("(assign Note in PAR-ASG first)          ");
   else if( engaged ) {
     // Show cursor + its lock state + per-step MULT + key gestures.
@@ -449,12 +422,6 @@ static s32 LCD_Handler(u8 high_prio)
                                  ui_selected_step + 1,
                                  locked ? "[L]" : "[ ]",
                                  mult_label(mc));
-  } else if( has_other_engaged ) {
-    SEQ_LCD_PrintFormattedString("GEN on D%2d  GP8 relocates here       ",
-                                 other_engaged_instr + 1);
-  } else if( cap_count == 1 ) {
-    SEQ_LCD_PrintFormattedString("Proc on T%2d  GP8 captures here         ",
-                                 cap_src_track + 1);
   } else
     SEQ_LCD_PrintString("press GP1 to ENGAGE   GP8=bounce proc   ");
 

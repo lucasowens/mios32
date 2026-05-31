@@ -39,6 +39,8 @@
 #include "seq_par.h"
 #include "seq_trg.h"
 #include "seq_pattern.h"
+#include "seq_file.h"
+#include "seq_file_b.h"
 #include "seq_random.h"
 #include "seq_record.h"
 #include "seq_live.h"
@@ -48,7 +50,6 @@
 #include "seq_cv.h"
 #include "seq_statistics.h"
 #include "seq_ui.h"
-#include "seq_capture.h"
 #include "seq_generator.h"
 
 
@@ -261,9 +262,6 @@ s32 SEQ_CORE_Init(u32 mode)
 
   // reset robotizer module
   SEQ_ROBOTIZE_Init(0);
-
-  // reset capture/bounce ring
-  SEQ_CAPTURE_Init(0);
 
   // reset generator pool (phase E)
   SEQ_GENERATOR_Init(0);
@@ -634,17 +632,51 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
   }
 }
 
-// Phase F BOUNCE (processor half): commit the post-processor output buffer
-// back into the source par/trg layer and clear every enabled processor slot,
-// so the freshly written source *is* the bounced material and subsequent
-// renders are identity (output ≡ source). Returns 1 if a bounce occurred,
-// 0 if there was nothing to bounce.
+/////////////////////////////////////////////////////////////////////////////
+// Fork: capture engine — the shared primitive behind every "bounce"/capture
+// verb. Snapshots a track's rendered output (the lossless, exact post-
+// processor par/trg, CC layers included) into caller-provided buffers.
+//
+// Forcing a full *quiet* render first is what makes capture sweep-safe: a
+// recent dial touch leaves the renderer in sweep regime, where only a ~4-step
+// slice of OutputActive is fresh; resetting touched_ms + dirty and re-rendering
+// guarantees a whole-buffer catch-up. The touched_ms reset is benign — the
+// next dial touch re-arms sweep.
+//
+// Runs in task context; does no MIDI/SD I/O, so it needs no mutex of its own
+// (the render's active-buffer flip is a single-byte atomic — the tick never
+// sees a half-rendered buffer). par_dst must be >= SEQ_PAR_MAX_BYTES, trg_dst
+// >= SEQ_TRG_MAX_BYTES.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_CaptureTrackOutput(u8 track, u8 *par_dst, u8 *trg_dst)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( par_dst == NULL || trg_dst == NULL ) return -1;
+
+  // Full quiet render → OutputActive current across the whole buffer.
+  seq_render_touched_ms[track] = 0;
+  seq_render_dirty[track] = 1;
+  SEQ_CORE_RenderTrack(track);
+
+  memcpy(par_dst, SEQ_PAR_OutputActive(track), SEQ_PAR_MAX_BYTES);
+  memcpy(trg_dst, SEQ_TRG_OutputActive(track), SEQ_TRG_MAX_BYTES);
+  return 0;
+}
+
+
+// In-place processor freeze: commit the post-processor output into the source
+// par/trg layer and clear every enabled processor slot, so the freshly written
+// source *is* the bounced material and subsequent renders are identity
+// (output ≡ source). Returns 1 if a bounce occurred, 0 if nothing was enabled.
+//
+// The output→source copy goes through SEQ_CORE_CaptureTrackOutput, which forces
+// a full quiet render first — without it, a recent dial touch (sweep regime)
+// would freeze a buffer where only a 4-step slice reflects the live dial value.
 //
 // The chord_mask processor is doubly-bound: slot 0 mirrors tcc->playmode +
 // tcc->chordmask_strength via SEQ_CORE_ChordMaskSlotSync. Clearing the slot
 // alone would let the next SlotSync re-enable it, so we also reset
-// playmode → Normal and chordmask_strength → 0. This matches §3's
-// "processors return to zero after bounce" contract.
+// playmode → Normal and chordmask_strength → 0.
 s32 SEQ_CORE_ProcessorBounce(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
@@ -662,12 +694,8 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
   if( !any_enabled )
     return 0;
 
-  // Commit output → source. Read from the active half: it carries the most
-  // recently published post-processor render. (Sweep regime writes the active
-  // half in place, quiet regime flips inactive→active — either way the active
-  // pointer is what the tick currently reads.)
-  memcpy(seq_par_layer_value[track], SEQ_PAR_OutputActive(track), SEQ_PAR_MAX_BYTES);
-  memcpy(seq_trg_layer_value[track], SEQ_TRG_OutputActive(track), SEQ_TRG_MAX_BYTES);
+  // Commit output → source (full-buffer, sweep-safe via the primitive).
+  SEQ_CORE_CaptureTrackOutput(track, seq_par_layer_value[track], seq_trg_layer_value[track]);
 
   // Clear every slot.
   for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
@@ -694,83 +722,245 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
 }
 
 
-// Phase F.3 — count enabled-processor tracks excluding `exclude_track`,
-// returning the first found via *out_track. The PITCHGEN BOUNCE dispatch
-// uses this both to find the cross-track-capture src candidate AND to
-// refuse the gesture when the choice is ambiguous (count > 1).
-u8 SEQ_CORE_FindEnabledProcessorTrack(u8 exclude_track, u8 *out_track)
+// Static snapshot buffers for the capture-to-slot verb: preserve the source
+// track's RAM across the slot write without an SD round-trip (a non-zero
+// remix_map silently skips the source track on reload, and play_section lives
+// outside the pattern file). One track's worth; the verb runs in task context
+// and is not re-entrant.
+static seq_cc_trk_t capture_cc_snapshot;
+static u8           capture_par_snapshot[SEQ_PAR_MAX_BYTES];
+static u8           capture_trg_snapshot[SEQ_TRG_MAX_BYTES];
+static char         capture_name_snapshot[20];
+
+/////////////////////////////////////////////////////////////////////////////
+// Fork: capture a track's computed output into a destination pattern slot.
+//
+// Lossless replacement for the removed emission-tape bounce. The source track's
+// OutputActive (exact par/trg, CC layers included, precise lengths — none of
+// the tape's NoteOff-heuristic / CC-drop / grid-snap loss) is written into the
+// (bank, pattern) slot. The source track's live RAM is snapshot and restored
+// byte-identical, so capture never disturbs what is playing.
+//
+// A pattern slot stores a whole group of tracks, so the other tracks in
+// src_group are written in their current live state; only src_track is the
+// frozen capture. The destination's generative CC is reset
+// (SEQ_CC_ResetGenerativeForBounce) so the frozen output isn't re-modulated on
+// playback, and the name gets a "BNC" prefix.
+//
+// MUST run in task context (takes MUTEX_SDCARD around the write).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_pattern)
 {
-  u8 count = 0;
-  u8 track;
-  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
-    if( track == exclude_track ) continue;
-    u8 slot;
-    for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
-      const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
-      if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) {
-        if( count == 0 && out_track ) *out_track = track;
-        ++count;
-        break;
-      }
-    }
-  }
-  return count;
+  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( dst_group >= SEQ_CORE_NUM_GROUPS ) return -1;
+
+  u8 src_group = src_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  s32 status;
+
+  // 1. Snapshot source RAM (restored byte-identical at the end).
+  u8 play_section_snapshot = seq_core_trk[src_track].play_section;
+  memcpy(&capture_cc_snapshot, &seq_cc_trk[src_track], sizeof(seq_cc_trk_t));
+  memcpy(capture_par_snapshot, seq_par_layer_value[src_track], SEQ_PAR_MAX_BYTES);
+  memcpy(capture_trg_snapshot, seq_trg_layer_value[src_track], SEQ_TRG_MAX_BYTES);
+  memcpy(capture_name_snapshot, seq_pattern_name[src_group], 20);
+
+  // 2. Overwrite the source layers with the track's computed output
+  //    (forced quiet render inside the primitive → sweep-safe, lossless).
+  SEQ_CORE_CaptureTrackOutput(src_track, seq_par_layer_value[src_track], seq_trg_layer_value[src_track]);
+
+  // 3. Sanitize generative CC so the frozen slot plays back as tape, not
+  //    re-modulated material.
+  SEQ_CC_ResetGenerativeForBounce(src_track);
+
+  // 4. BNC name tag so bounced slots are visually distinct in the picker.
+  seq_pattern_name[src_group][0] = 'B';
+  seq_pattern_name[src_group][1] = 'N';
+  seq_pattern_name[src_group][2] = 'C';
+
+  // 5. Write the mutated RAM (still labelled src_group) to the dst slot.
+  MUTEX_SDCARD_TAKE;
+  status = SEQ_FILE_B_PatternWrite(seq_file_session_name, dst_bank, dst_pattern, src_group, 1);
+  MUTEX_SDCARD_GIVE;
+
+  // 6. Restore source RAM. Always run, even on write failure — the in-RAM
+  //    state has to return to its pre-capture value either way.
+  memcpy(&seq_cc_trk[src_track], &capture_cc_snapshot, sizeof(seq_cc_trk_t));
+  memcpy(seq_par_layer_value[src_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
+  memcpy(seq_trg_layer_value[src_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
+  memcpy(seq_pattern_name[src_group], capture_name_snapshot, 20);
+  seq_core_trk[src_track].play_section = play_section_snapshot;
+  SEQ_CORE_RenderDirtySet(src_track);
+  SEQ_CC_LinkUpdate(src_track);
+
+  return status;
 }
 
 
-// Phase F.3 cross-track non-destructive capture. The §3 "additive at
-// empty target" half of the processor-bounce gesture: snapshot the
-// src track's current post-processor output into the dst track's
-// source par/trg buffers, leave the src processor stack enabled and
-// the src tcc untouched. dst must be empty (no enabled processor, no
-// engaged generator) — refuse otherwise.
-s32 SEQ_CORE_ProcessorBounceCapture(u8 src_track, u8 dst_track)
+/////////////////////////////////////////////////////////////////////////////
+// Fork: capture a track's computed output onto another track in the current
+// pattern (RAM only; does not touch SD).
+//
+// Track geometry (par/trg layer + step + instrument counts) lives in
+// seq_par/seq_trg, NOT in seq_cc_trk, so a raw layer copy across tracks of
+// differing geometry would read back as garbage. We mirror COPY/PASTE TRACK
+// (seq_ui_util.c PASTE_CLEAR_MODE_TRACK): set the dst event-mode, repartition
+// via SEQ_*_TrackInit with the source geometry, copy the lower-48 CCs + drum
+// par-layer assignments (so layer *types* match) — only then is the raw output
+// copy valid. The dst's generative CC is then reset so it plays the frozen
+// line without re-modulation.
+//
+// No UNDO snapshot yet: the UI trigger for this verb is deferred; when it lands
+// it must snapshot dst before calling here (UNDO is the live safety net). Per
+// the no-smart-default rule, dst is NOT gated on "empty" — the caller's pick is
+// deliberate. Runs in task context; RAM only, no mutex.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 {
-  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -3;
-  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -3;
-  if( src_track == dst_track ) return -3;
+  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( src_track == dst_track ) return -2; // in-place is the freeze verb
 
-  // src must have an enabled processor; otherwise there's nothing to capture.
-  u8 src_has_proc = 0;
-  u8 slot;
-  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
-    const seq_processor_slot_t *p = &seq_processor_stack[src_track][slot];
-    if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) { src_has_proc = 1; break; }
+  // 1. Inherit src config + geometry onto dst so the layer copy is valid.
+  u16 par_steps  = (u16)SEQ_PAR_NumStepsGet(src_track);
+  u8  par_layers = (u8)SEQ_PAR_NumLayersGet(src_track);
+  u8  num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
+  u16 trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
+  u8  trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
+
+  SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, SEQ_CC_Get(src_track, SEQ_CC_MIDI_EVENT_MODE));
+  SEQ_CC_LinkUpdate(dst_track);
+  SEQ_PAR_TrackInit(dst_track, par_steps, par_layers, num_instr);
+  SEQ_TRG_TrackInit(dst_track, trg_steps, trg_layers, num_instr);
+
+  // copy the lower-48 CCs + drum par-layer assignments (layer *types*),
+  // exactly as PASTE_CLEAR_MODE_TRACK does, so the captured bytes are
+  // interpreted correctly on dst.
+  {
+    int i;
+    for(i=0; i<48; ++i)
+      SEQ_CC_Set(dst_track, i, SEQ_CC_Get(src_track, i));
+    for(i=0; i<4; ++i)
+      SEQ_CC_Set(dst_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i,
+                 SEQ_CC_Get(src_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i));
   }
-  if( !src_has_proc ) return -2;
 
-  // dst must be empty: no enabled processor slot AND no engaged gen.
-  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
-    const seq_processor_slot_t *p = &seq_processor_stack[dst_track][slot];
-    if( p->id != SEQ_PROCESSOR_ID_NONE && p->enabled ) return -1;
-  }
-  if( SEQ_GENERATOR_FindEngagedOnTrack(dst_track, NULL) ) return -1;
+  // 2. Lossless output → dst source (forced quiet render → sweep-safe). Valid
+  //    raw copy because dst geometry now equals src geometry.
+  SEQ_CORE_CaptureTrackOutput(src_track, seq_par_layer_value[dst_track], seq_trg_layer_value[dst_track]);
 
-  // Force a full quiet render of src so its OutputActive is current across
-  // the whole buffer. Without this, a recent dial touch on src puts the
-  // renderer in sweep regime, which only refreshes a 4-step slice — the
-  // rest of OutputActive is stale and the capture would only mirror the
-  // slice. The touched_ms reset is benign: the next dial touch will arm
-  // sweep again.
-  seq_render_touched_ms[src_track] = 0;
-  seq_render_dirty[src_track] = 1;
-  SEQ_CORE_RenderTrack(src_track);
+  // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated.
+  SEQ_CC_ResetGenerativeForBounce(dst_track);
 
-  // Copy active output halves → dst source. Active is what the tick reads now,
-  // so it carries the most-recent post-processor render of src.
-  memcpy(seq_par_layer_value[dst_track], SEQ_PAR_OutputActive(src_track),
-         SEQ_PAR_MAX_BYTES);
-  memcpy(seq_trg_layer_value[dst_track], SEQ_TRG_OutputActive(src_track),
-         SEQ_TRG_MAX_BYTES);
-
-  // dst has no processor stack → identity output ≡ source after re-render.
-  // Force a quiet (full-buffer) render too, so SEQ_PAR_Get(dst) — which
-  // reads through the output mirror — returns the captured bytes across
-  // the whole buffer, not just a 4-step sweep slice.
+  // 4. Force a full dst render so SEQ_PAR_Get(dst) reads the captured bytes
+  //    across the whole buffer immediately.
   seq_render_touched_ms[dst_track] = 0;
   seq_render_dirty[dst_track] = 1;
   SEQ_CORE_RenderTrack(dst_track);
   return 0;
+}
+
+
+// Static snapshot of the destination group (4 tracks) for the capture-to-slot-
+// track verb: preserve the dst group's live RAM across the load-modify-save so
+// the operation doesn't disturb what's currently loaded/playing there. Plus a
+// small snapshot of the source's config (captured before the load, in case the
+// source shares the dst group) used for the geometry/layer-type inherit:
+// [0] = event_mode, [1..48] = CC 0..47, [49..52] = drum par-layer assignments.
+static seq_cc_trk_t slottrk_cc_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u8           slottrk_par_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_PAR_MAX_BYTES];
+static u8           slottrk_trg_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_TRG_MAX_BYTES];
+static char         slottrk_name_snap[20];
+static u8           slottrk_play_section_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u8           slottrk_src_cc[53];
+
+/////////////////////////////////////////////////////////////////////////////
+// Fork: capture src_track's computed output into dst_track of slot (bank,
+// pattern), PERSISTED to SD, preserving the slot's other tracks.
+//
+// MBSEQ pattern slots store a whole 4-track group, so to place one track into a
+// stored slot we: capture the source first (before any SD load, in case the
+// source shares the dst group); snapshot the dst group's live RAM; read the
+// target slot into the dst group (remix_map=0 so all 4 tracks load); replace
+// dst_track with the captured output (src geometry/CC inherited, generative CC
+// reset); write the slot back; restore the dst group's live RAM. seq_pattern[]
+// is never touched, so the dst group's "current pattern" tracking is unchanged.
+//
+// MUST run in task context (two MUTEX_SDCARD ops). While the slot is staged
+// (read..write), a running dst group briefly plays the target slot — a small,
+// deliberate glitch. Returns the PatternWrite status (>=0 ok), or the negative
+// PatternRead status if the load failed (dst group left restored).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_pattern)
+{
+  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  u8 dst_group = dst_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  u8 dst_base  = dst_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  s32 status;
+  int t, i;
+
+  // 1. Capture source output + config BEFORE touching the dst group (step 3's
+  //    load overwrites the dst group's RAM, which may include the source).
+  SEQ_CORE_CaptureTrackOutput(src_track, capture_par_snapshot, capture_trg_snapshot);
+  u16 src_par_steps  = (u16)SEQ_PAR_NumStepsGet(src_track);
+  u8  src_par_layers = (u8)SEQ_PAR_NumLayersGet(src_track);
+  u8  src_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
+  u16 src_trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
+  u8  src_trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
+  slottrk_src_cc[0] = (u8)SEQ_CC_Get(src_track, SEQ_CC_MIDI_EVENT_MODE);
+  for(i=0; i<48; ++i)
+    slottrk_src_cc[1+i] = (u8)SEQ_CC_Get(src_track, i);
+  for(i=0; i<4; ++i)
+    slottrk_src_cc[49+i] = (u8)SEQ_CC_Get(src_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i);
+
+  // 2. Snapshot the dst group's live RAM (4 tracks) so we can restore it.
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    memcpy(&slottrk_cc_snap[t], &seq_cc_trk[dst_base+t], sizeof(seq_cc_trk_t));
+    memcpy(slottrk_par_snap[t], seq_par_layer_value[dst_base+t], SEQ_PAR_MAX_BYTES);
+    memcpy(slottrk_trg_snap[t], seq_trg_layer_value[dst_base+t], SEQ_TRG_MAX_BYTES);
+    slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
+  }
+  memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
+
+  // 3. Read the target slot into the dst group (full load, remix_map=0).
+  MUTEX_SDCARD_TAKE;
+  status = SEQ_FILE_B_PatternRead(dst_bank, dst_pattern, dst_group, 0);
+  MUTEX_SDCARD_GIVE;
+
+  if( status >= 0 ) {
+    // 4. Inherit src config/geometry onto dst_track, write the captured output,
+    //    sanitize generative CC (incl. the gate-assignment-preserving fix).
+    SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[0]);
+    SEQ_CC_LinkUpdate(dst_track);
+    SEQ_PAR_TrackInit(dst_track, src_par_steps, src_par_layers, src_num_instr);
+    SEQ_TRG_TrackInit(dst_track, src_trg_steps, src_trg_layers, src_num_instr);
+    for(i=0; i<48; ++i)
+      SEQ_CC_Set(dst_track, i, slottrk_src_cc[1+i]);
+    for(i=0; i<4; ++i)
+      SEQ_CC_Set(dst_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i, slottrk_src_cc[49+i]);
+    memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
+    memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
+    SEQ_CC_ResetGenerativeForBounce(dst_track);
+
+    // 5. Write the dst group (now carrying the captured track) back to the slot.
+    MUTEX_SDCARD_TAKE;
+    status = SEQ_FILE_B_PatternWrite(seq_file_session_name, dst_bank, dst_pattern, dst_group, 1);
+    MUTEX_SDCARD_GIVE;
+  }
+
+  // 6. Restore the dst group's live RAM (always — even on a read/write error).
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    memcpy(&seq_cc_trk[dst_base+t], &slottrk_cc_snap[t], sizeof(seq_cc_trk_t));
+    memcpy(seq_par_layer_value[dst_base+t], slottrk_par_snap[t], SEQ_PAR_MAX_BYTES);
+    memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
+    seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
+    SEQ_CC_LinkUpdate(dst_base+t);
+    SEQ_CORE_RenderDirtySet(dst_base+t);
+  }
+  memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
+
+  return status;
 }
 
 
@@ -876,11 +1066,6 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 {
   s32 status = 0;
   mios32_midi_port_t fx_midi_port = tcc->fx_midi_port ? tcc->fx_midi_port : tcc->midi_port;
-
-  // capture tap: snapshot emitted event into the per-track ring buffer.
-  // No-op (single branch on a hot u8) when the track isn't armed.
-  if( SEQ_CAPTURE_IsArmed(track) )
-    SEQ_CAPTURE_TapEvent(track, midi_package, timestamp);
 
   u8 shadow_enabled = seq_core_shadow_out_chn && SEQ_UI_VisibleTrackGet() == track;
 
