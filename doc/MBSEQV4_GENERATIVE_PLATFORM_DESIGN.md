@@ -769,11 +769,27 @@ Append-only-ish; revise an entry only with a dated note.
     default current; **GP9-16 = pattern number → COMMITs**, persisted to SD), and
     optionally a destination **track within that slot** via the **lower select
     row** (the 16 `DirectTrack` buttons stash a dst track). On the GP9-16 commit:
-    with a dst track picked → `SEQ_CORE_CaptureToSlotTrack(src, dstTrk, bank, pat)`
-    (render source into just that track of the slot, other slot tracks preserved,
-    **saved to SD**); without one → `SEQ_CORE_CaptureToSlot` (whole source group →
-    slot). Bare PATTERN tap → Pattern page. This is the arrangement-building move:
-    render generative tracks into specific slots' tracks, persisted.
+    **always** `SEQ_CORE_CaptureToSlotTrack(src, dstTrk, bank, pat)` — dstTrk is the
+    select-row pick, or the **source's own track index** if none was picked (render
+    source into just that track of the slot, other slot tracks preserved, **saved to
+    SD**). One consistent operation for every cell (same/different track,
+    same/different group). Bare PATTERN tap → Pattern page. This is the arrangement-
+    building move: render generative tracks into specific slots' tracks, persisted.
+    - **Never auto-load / no jump (decided 2026-05-31, by ear + AskUserQuestion).**
+      An interim version auto-loaded the just-written slot into the destination
+      track's group (`SEQ_PATTERN_Change`, force=1) "to show the capture live there."
+      That clobbered the live source in the **same-group / default (dst==src track)**
+      cell — `SEQ_PATTERN_Change(dst_track/4, …)` reloads the *source's own* group,
+      replacing the track being tweaked, which breaks the *tweak → bounce → tweak →
+      bounce* workflow and the no-auto-jump rule (see F.3 withdrawal + the
+      cursor-aware-destinations principle). **Decided: capture-only everywhere — no
+      auto-load in any cell.** Every bounce persists the static copy to the chosen
+      slot and leaves all groups' live RAM untouched; you navigate to the slot
+      deliberately to hear it ("loaded into the slot I select, persists, plays when I
+      move to it"). The bug was caught by an adversarial pre-commit review (the
+      cross-group gesture test passed; the same-group cell was the untested hole) and
+      the fix is pinned by `test_bounce_gesture_same_group_leaves_source_live` +
+      `…never_jumps_destination` + `…lands_in_selected_slot_and_persists`.
     - **Why CaptureToSlotTrack and not the RAM-only CaptureToTrack:** found by
       ear — `CaptureToTrack` writes a track's *live RAM* only; switching that
       group's pattern away **loses it** (not on SD). `CaptureToSlotTrack` does a
@@ -804,8 +820,36 @@ Append-only-ish; revise an entry only with a dated note.
     (which round-tripped) but not the gate *assignment*, so it missed this.
   - **Sizing:** the 16 KB ring + hot-path tap removed from `.bss`/`SEQ_CORE_Tick`
     (replaced by ~1.3 KB of capture snapshot buffers); CCM unchanged at 52.9/64 KB
-    (the ring was main-SRAM, not CCM). Firmware builds clean; full HIL collection
-    green (61 tests). Hardware/by-ear verification pending flash.
+    (the ring was main-SRAM, not CCM). **Verified on device 2026-05-31: full HIL
+    suite 72/72 green** (incl. the never-auto-load gesture, slot-persistence,
+    computed-output, and note/drum parity tests below); by-ear confirmed.
+- **Note vs drum tracks: bounce/render parity confirmed; the differences are
+  essential, not bugs (2026-05-31).** Investigated "why do note and drum tracks
+  perform differently" via a 4-subsystem adversarial map (data model / capture-bounce
+  / render-processors / gesture-UI-harness). Result: **20 divergences — 16
+  essential, 3 harness-only, 1 accidental.** The capture/bounce engine, the
+  PATTERN-hold gesture, the render loop, and the processor stack are all
+  **mode-agnostic** — note and drum tracks take the identical path, and a suspected
+  cross-mode-bounce corruption was *refuted* on source inspection (geometry is
+  inherited onto the dst before a fixed-size buffer copy, so it round-trips). The
+  real divergences are **inherent to the data model** and correct as-is: a drum track
+  is up to 16 one-shot instruments each with a constant note + a few par-layers; a
+  melodic track is one voice with many expression layers (Note/Vel/Length/CC…).
+  Unifying them would be wrong — it's what makes a kit a kit and a line a line.
+  - **The one accidental divergence: accent velocity.** A note-track accent is
+    hardcoded to `0x7f`; a drum accent reads a per-drum constant
+    ([seq_core.c:2143-2149](../core/seq_core.c#L2143)). **User decided keep-127 is
+    intended** (classic accent = full velocity for leads/bass) — left as-is, no
+    follow-up.
+  - **The perceived distinction was mostly a test-harness gap.** All bounce tests
+    used drums because the harness could only read drum par-layers (the drum-only
+    `cmd_track_drum_par_get/set` via `link_par_layer_note`). Closed by adding a
+    general mode-agnostic par read/write verb (`CMD_TRACK_PAR_GET/SET` →
+    `SEQ_PAR_Get/Set`, layer-explicit, no event-mode gate) + `board.track_par_get/set`
+    + `test_note_track_bounce_matches_drum`, which **proves** a melodic-track bounce
+    is byte-identical to a drum bounce rather than asserting it. (This is the §6
+    "normal vs drum" tradeoff confirmed from the bounce side: the spine is
+    track-agnostic; only the data model differs.)
 - **§8 step 5 (the spine) is broken into phases A–F.** User agreed 2026-05-24:
   ship the full design-doc spine as a multi-PR sequence, infrastructure first.
   Each phase is a buildable+harness-testable unit.

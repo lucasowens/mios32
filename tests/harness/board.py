@@ -46,8 +46,11 @@ from .sysex import (
     DIAL_DEPTH,
     DIAL_CONTOUR,
     CMD_UI_TRACK_SET,
+    CMD_UI_TRACK_GET,
     CMD_TRACK_DRUM_PAR_SET,
     CMD_TRACK_DRUM_PAR_GET,
+    CMD_TRACK_PAR_SET,
+    CMD_TRACK_PAR_GET,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -602,6 +605,19 @@ class Board:
         if payload[1] != CMD_STATUS_OK:
             raise ValueError(f"UI_TRACK_SET status {payload[1]:#04x}")
 
+    def ui_track_get(self, timeout: float = 1.0) -> int:
+        """Return SEQ_UI_VisibleTrackGet() (0..15) — the UI's current visible
+        track. Used to verify track selection (e.g. that the select row still
+        switches tracks after a capture gesture)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_UI_TRACK_GET, b""))
+        payload = self.wait_for_sysex(CMD_UI_TRACK_GET, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short UI_TRACK_GET reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"UI_TRACK_GET status {payload[1]:#04x}")
+        return payload[0]
+
     def track_drum_par_set(
         self, track: int, instr: int, step: int, value: int, timeout: float = 1.0
     ) -> None:
@@ -653,6 +669,58 @@ class Board:
         if payload[4] != CMD_STATUS_OK:
             raise ValueError(f"TRACK_DRUM_PAR_GET status {payload[4]:#04x}")
         return payload[3]
+
+    def track_par_set(
+        self, track: int, layer: int, instr: int, step: int, value: int,
+        timeout: float = 1.0,
+    ) -> None:
+        """General (mode-agnostic, layer-explicit) par-layer write — the
+        note-track counterpart of track_drum_par_set. Writes any track/layer/
+        instr/step directly via SEQ_PAR_Set (no Drum gate). Use to seed a
+        melodic track's Note/Velocity/etc. layers."""
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= layer <= 127:
+            raise ValueError(f"layer out of range: {layer}")
+        if not 0 <= instr <= 127:
+            raise ValueError(f"instr out of range: {instr}")
+        if not 0 <= step <= 127:
+            raise ValueError(f"step out of range: {step}")
+        if not 0 <= value <= 127:
+            raise ValueError(f"value out of range: {value}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_TRACK_PAR_SET, bytes([track, layer, instr, step, value]))
+        )
+        payload = self.wait_for_sysex(CMD_TRACK_PAR_SET, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short TRACK_PAR_SET reply: {payload!r}")
+        if payload[5] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_PAR_SET status {payload[5]:#04x}")
+
+    def track_par_get(
+        self, track: int, layer: int, instr: int, step: int, timeout: float = 1.0
+    ) -> int:
+        """General (mode-agnostic, layer-explicit) par-layer read — the
+        note-track counterpart of track_drum_par_get. Returns the 7-bit
+        SEQ_PAR_Get(track, step, layer, instr) output-mirror value for any
+        track/layer, so note-track captures can be verified byte-for-byte."""
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= layer <= 127:
+            raise ValueError(f"layer out of range: {layer}")
+        if not 0 <= instr <= 127:
+            raise ValueError(f"instr out of range: {instr}")
+        if not 0 <= step <= 127:
+            raise ValueError(f"step out of range: {step}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_PAR_GET, bytes([track, layer, instr, step])))
+        payload = self.wait_for_sysex(CMD_TRACK_PAR_GET, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short TRACK_PAR_GET reply: {payload!r}")
+        if payload[5] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_PAR_GET status {payload[5]:#04x}")
+        return payload[4]
 
     def bounce(
         self,

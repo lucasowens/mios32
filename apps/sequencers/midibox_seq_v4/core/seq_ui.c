@@ -168,20 +168,21 @@ static u16 ui_delayed_action_ctr;
 static u8 seq_ui_track_setup_visible_track;
 static seq_ui_track_setup_t seq_ui_track_setup[SEQ_CORE_NUM_TRACKS];
 
-// PATTERN-hold capture gesture state. SOURCE is always the visible track (the
-// one you navigated to). While PATTERN is held you pick a DESTINATION slot via
-// the top row, optionally a destination TRACK via the lower select row, and the
-// GP9-16 pattern press COMMITs (capture is persisted to SD):
+// PATTERN-hold capture gesture state. SOURCE = the visible track. One
+// consistent operation: while PATTERN is held you pick a DESTINATION slot
+// (top row) and optionally a destination TRACK within it (lower select row);
+// the GP9-16 pattern press COMMITs a STATIC copy of the source into that
+// track of the slot (persisted to SD, other slot tracks preserved) via
+// SEQ_CORE_CaptureToSlotTrack. No jump — the source keeps playing.
 //   GP1-8  (top row)  -> destination group letter (A..H); default current
 //   GP9-16 (top row)  -> destination pattern number (1..8) -> COMMIT
-//   select row (DirectTrack, 16 btns) -> destination track WITHIN that slot
-// With a destination track picked: render source → track N of slot (other slot
-// tracks preserved) via SEQ_CORE_CaptureToSlotTrack. Without one: capture the
-// whole source group → slot via SEQ_CORE_CaptureToSlot. The select-row stash
-// lives in SEQ_UI_Button_DirectTrack.
+//   select row (DirectTrack, 16 btns) -> destination track; default = source's
+//                                        own track index (the select-row stash
+//                                        lives in SEQ_UI_Button_DirectTrack)
 static u8 pattern_held_gp_consumed;       // 1 if any capture button fired during the hold (suppress bare-tap nav)
 static u8 pattern_capture_group = 0xff;   // chosen dest group letter, 0xff = current group
-static u8 pattern_capture_dst_track = 0xff; // chosen dest track (select row), 0xff = none (whole-group slot capture)
+static u8 pattern_capture_dst_track = 0xff; // chosen dest track (select row), 0xff = default to source's track index
+static char pattern_capture_status[24] = ""; // last commit result, shown in the held overlay (the popup is masked while PATTERN is held)
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -545,24 +546,6 @@ void SEQ_UI_Msg_LivePattern(char *line2)
 // Mapped to physical buttons in SEQ_UI_Button_Handler()
 // Will also be mapped to MIDI keys later (for MIDI remote function)
 /////////////////////////////////////////////////////////////////////////////
-// Print the OK/fail message for a capture-to-slot result (visible track →
-// pattern slot). Fired by the GP9-16 commit during a PATTERN hold.
-static void pattern_capture_msg(s32 status, seq_pattern_t dst)
-{
-  if( status < 0 ) {
-    SEQ_UI_Msg_Track("capture failed");
-  } else {
-    char msg[8];
-    msg[0] = '>';
-    msg[1] = 'A' + (dst.group & 0x07);
-    msg[2] = '1' + (dst.num & 0x07);
-    msg[3] = ' ';
-    msg[4] = 'O';
-    msg[5] = 'K';
-    msg[6] = 0;
-    SEQ_UI_Msg_Track(msg);
-  }
-}
 
 // Print the result of a capture → track-in-slot (visible track → dst_track of a
 // pattern slot, persisted). status >=0 ok, else failure. Shows ">A3.Tnn".
@@ -570,6 +553,8 @@ static void pattern_capture_slottrack_msg(s32 status, seq_pattern_t dst, u8 dst_
 {
   if( status < 0 ) {
     SEQ_UI_Msg_Track("capture failed");
+    sprintf(pattern_capture_status, "FAILED A%c%d.T%d",
+            'A' + (dst.group & 0x07), (dst.num & 0x07) + 1, dst_track + 1);
   } else {
     char msg[12];
     int n = 0;
@@ -583,6 +568,8 @@ static void pattern_capture_slottrack_msg(s32 status, seq_pattern_t dst, u8 dst_
     msg[n++] = '0' + ((dst_track + 1) % 10);
     msg[n] = 0;
     SEQ_UI_Msg_Track(msg);
+    sprintf(pattern_capture_status, "saved A%c%d.T%d",
+            'A' + (dst.group & 0x07), (dst.num & 0x07) + 1, dst_track + 1);
   }
 }
 
@@ -591,14 +578,14 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
   if( !depressed ) // selection button has been pressed while Bookm/Step/Track/Param/Trigger/Instr/Mute/Phrase button pressed: don't take over new sel view anymore
     seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
 
-  // Capture gesture (PATTERN held): freeze the VISIBLE track's computed output
-  // into a destination slot. Top rows pick the slot:
+  // Capture gesture (PATTERN held): freeze a STATIC copy of the VISIBLE track
+  // into a destination slot's track. Top rows pick the slot:
   //   GP1-8  (top row, left)  -> destination group letter (A..H); default current
   //   GP9-16 (top row, right) -> destination pattern number (1..8) -> commit
-  // The lower select row optionally picks a destination TRACK within that slot
-  // (stashed in SEQ_UI_Button_DirectTrack). With one picked, the commit renders
-  // the source into just that track of the slot; without one, the whole source
-  // group is captured to the slot.
+  // The lower select row optionally picks the destination TRACK within the slot
+  // (stashed in SEQ_UI_Button_DirectTrack); default = the source's own track
+  // index. Always SEQ_CORE_CaptureToSlotTrack — same effect for same/different
+  // track or group. No jump; the source keeps playing.
 
   if( !depressed && seq_ui_button_state.PATTERN_PRESSED && gp < 8 ) {
     // top row left: destination group (stash; pattern press commits).
@@ -618,16 +605,16 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     dst.num   = (u8)(gp - 8) & 0x07;
     dst.lower = 0;
 
-    if( pattern_capture_dst_track != 0xff ) {
-      // a destination track was picked -> render source → that track of the
-      // slot, preserving the slot's other tracks, persisted.
-      pattern_capture_slottrack_msg(
-        SEQ_CORE_CaptureToSlotTrack(src_track, pattern_capture_dst_track, dst.bank, dst.pattern),
-        dst, pattern_capture_dst_track);
-    } else {
-      // no destination track -> capture the whole source group to the slot.
-      pattern_capture_msg(SEQ_CORE_CaptureToSlot(src_track, src_group, dst.bank, dst.pattern), dst);
-    }
+    // One consistent operation across every cell (same/different track, same/
+    // different group): freeze a STATIC copy of the source track into the
+    // destination slot's track, preserving the slot's other tracks, persisted
+    // to SD. The destination track is the select-row pick, or the source's own
+    // track index if none was picked. NO auto-load and NO jump — every group's
+    // live RAM is left untouched, so whatever is playing keeps playing. The
+    // capture lives in the chosen slot; navigate to it deliberately to hear it.
+    u8 dst_track = (pattern_capture_dst_track != 0xff) ? pattern_capture_dst_track : src_track;
+    s32 cap_r = SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
+    pattern_capture_slottrack_msg(cap_r, dst, dst_track);
     // group + dst track stay set so the user can rapid-fire to more patterns.
     return 0;
   }
@@ -1599,6 +1586,7 @@ static s32 SEQ_UI_Button_Pattern(s32 depressed)
     pattern_held_gp_consumed = 0;
     pattern_capture_group = 0xff;
     pattern_capture_dst_track = 0xff;
+    pattern_capture_status[0] = 0;
     return 0;
   }
 
@@ -1947,10 +1935,18 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 
   // Capture gesture (PATTERN held): the select row picks a DESTINATION track
   // within the slot — stash it; the GP9-16 pattern press commits the capture
-  // into that track of the chosen slot (persisted). Swallow the button while
-  // held so the normal track-select / sel-view behavior doesn't also fire.
+  // into that track of the chosen slot (persisted). Swallow the button so the
+  // normal track-select doesn't also fire — BUT still maintain button_state and
+  // the take-over flag exactly as the normal handler would, otherwise a select
+  // press/release that straddles the PATTERN-hold boundary leaves button_state
+  // with a stuck bit and corrupts the track-select radio/toggle logic afterward
+  // (symptom: no track LED lit, presses toggle instead of switching tracks).
   if( seq_ui_button_state.PATTERN_PRESSED ) {
-    if( !depressed ) {
+    if( depressed ) {
+      button_state |= (1 << sel_button);
+    } else {
+      button_state &= ~(1 << sel_button);
+      seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
       pattern_capture_dst_track = (u8)sel_button;
       pattern_held_gp_consumed = 1;
     }
@@ -3223,20 +3219,19 @@ s32 SEQ_UI_LCD_Handler(void)
     }
   } else if( seq_ui_button_state.PATTERN_PRESSED ) {
     // Capture gesture overlay. Source = visible track. GP1-8 = destination group,
-    // GP9-16 = destination pattern (commits, persisted), lower select row = an
-    // optional destination track WITHIN the slot. Group defaults to current.
+    // GP9-16 = destination pattern (commits, persisted), lower select row = the
+    // destination track within the slot (default = source's track). Group
+    // defaults to current.
     u8 src_track = SEQ_UI_VisibleTrackGet();
     u8 src_group = src_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
     u8 cur_letter = seq_pattern[src_group].group;
+    u8 eff_dst_track = (pattern_capture_dst_track != 0xff) ? pattern_capture_dst_track : src_track;
 
-    // LCD 1 row 0: title — source track + the destination track (if picked).
+    // LCD 1 row 0: title — source track -> effective destination track.
     SEQ_LCD_CursorSet(0, 0);
     //                                "1234567890123456789012345678901234567890"
-    if( pattern_capture_dst_track != 0xff )
-      SEQ_LCD_PrintFormattedString("CAPTURE T%-2d -> dest trk T%-2d           ",
-                                   src_track + 1, pattern_capture_dst_track + 1);
-    else
-      SEQ_LCD_PrintFormattedString("CAPTURE T%-2d  (sel row = dest trk)      ", src_track + 1);
+    SEQ_LCD_PrintFormattedString("CAPTURE T%-2d -> T%-2d (sel=dest trk)     ",
+                                 src_track + 1, eff_dst_track + 1);
 
     // LCD 1 row 1: destination group letters A..H (GP1-8). Picked group
     // bracketed; current playing letter shows a dot prefix.
@@ -3253,9 +3248,13 @@ s32 SEQ_UI_LCD_Handler(void)
       }
     }
 
-    // LCD 2 row 0: the destination layout reminder.
+    // LCD 2 row 0: after a commit, show the result (the SEQ_UI_Msg popup is
+    // masked by this overlay while PATTERN is held); otherwise the layout hint.
     SEQ_LCD_CursorSet(40, 0);
-    SEQ_LCD_PrintString("GP1-8 grp GP9-16 pat  sel=trk           ");
+    if( pattern_capture_status[0] )
+      SEQ_LCD_PrintFormattedString("%-40s", pattern_capture_status);
+    else
+      SEQ_LCD_PrintString("GP1-8 grp GP9-16 pat  sel=trk           ");
 
     // LCD 2 row 1: destination pattern numbers 1..8 (GP9-16). The group's
     // currently-loaded pattern number is dotted as a reference.

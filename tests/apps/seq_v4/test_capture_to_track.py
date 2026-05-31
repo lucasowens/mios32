@@ -202,3 +202,147 @@ def test_capture_to_slot_track_persists(board):
             f"slot position-1 track (loaded as track 9) step {step} should hold "
             f"captured byte {note}; got {v} — capture-to-slot-track not persisted?"
         )
+
+
+@pytest.mark.hardware
+def test_capture_to_slot_track_survives_switch_away(board):
+    """The captured track persists on SD: after loading the slot, switching the
+    group away to another pattern and back leaves the captured track intact (no
+    manual save needed — the bounce wrote it to the bank file)."""
+    board.reset()
+    board.track_drum_init(SRC_TRACK)
+    board.page_set(Page.PITCHGEN)
+    board.ui_instrument_set(0)
+    time.sleep(SETTLE)
+    _seed_source(board, SRC_TRACK, 0, SEED)
+
+    assert board.capture_to_slot_track(SRC_TRACK, 5, SLOT_BANK, SLOT_PATTERN)
+
+    # load the slot into group 1 (track 5 = slot position 1)
+    assert board.pattern_load(group=1, bank=SLOT_BANK, pattern=SLOT_PATTERN)
+    time.sleep(SETTLE)
+    for step, note in SEED.items():
+        assert board.track_drum_par_get(5, 0, step) == note, "capture missing right after load"
+
+    # switch that group AWAY to another pattern, then BACK to the slot
+    board.pattern_load(group=1, bank=0, pattern=0)
+    time.sleep(SETTLE)
+    assert board.pattern_load(group=1, bank=SLOT_BANK, pattern=SLOT_PATTERN)
+    time.sleep(SETTLE)
+    for step, note in SEED.items():
+        v = board.track_drum_par_get(5, 0, step)
+        assert v == note, (
+            f"captured track step {step} lost after switching the group away and "
+            f"back (expected {note}, got {v}) — should persist on SD with no manual save"
+        )
+
+
+# --- computed-output capture: prove capture grabs the RENDERED output, not the
+#     raw source par-layer. chord_mask on a drum track snaps source 60 -> 62
+#     (nearest pitch-class of a held D-major triad {2,6,9}); mirror of the proven
+#     setup in test_chord_mask.py::test_chord_mask_drum_scope_only_touches...
+TRKMODE_NORMAL = 1
+CM_BUS = 1                 # bus 1 (default MIDI-in ch 2); bus 0 is the record path
+CM_BUS_WIRE = 1            # 0-indexed status nibble -> ch 2 on the wire
+CM_CHORD = (62, 66, 69)    # D / F# / A
+CM_SOURCE = 0x3C           # 60 (Note default)
+CM_SNAPPED = 62            # 60 snapped to nearest PC of {2,6,9}
+
+
+def _cm_note(note: int, vel: int) -> bytes:
+    return bytes([(0x90 if vel > 0 else 0x80) | CM_BUS_WIRE, note & 0x7F, vel & 0x7F])
+
+
+def _cm_push(board: Board) -> None:
+    for n in CM_CHORD:
+        board.send_raw(_cm_note(n, 100))
+    time.sleep(0.05)
+
+
+def _cm_clear(board: Board) -> None:
+    for n in CM_CHORD:
+        board.send_raw(_cm_note(n, 0))
+    time.sleep(0.05)
+
+
+@pytest.mark.hardware
+def test_capture_grabs_computed_output_not_source(board):
+    """The headline 'lossless capture of COMPUTED output' claim. Every other
+    capture test seeds a plain drum track (output == source), so they can't tell
+    whether capture reads OutputActive or the raw source layer. Here chord_mask
+    makes them diverge (source seed 60, rendered output 62); capture must land
+    the COMPUTED 62 on dst, never the seed 60."""
+    board.track_drum_init(SRC_TRACK)
+    board.track_drum_init(DST_TRACK)
+    time.sleep(SETTLE)
+
+    _cm_clear(board)
+    _cm_push(board)
+    board.track_drum_par_set(SRC_TRACK, 0, 0, CM_SOURCE)  # seed source 60
+
+    # arm chord_mask on src drum 0 (hard lock); MODE last fires the SlotSync render.
+    board.cc_set(SRC_TRACK, CC.CHORDMASK_BUS, CM_BUS)
+    board.cc_set(SRC_TRACK, CC.CHORDMASK_DRUM_L, 0x01)    # drum 0 in scope
+    board.cc_set(SRC_TRACK, CC.CHORDMASK_DRUM_H, 0x00)
+    board.cc_set(SRC_TRACK, CC.CHORDMASK_STRENGTH, 127)
+    board.cc_set(SRC_TRACK, CC.MODE, TRKMODE_CHORDMASK)
+    time.sleep(0.12)                                      # past the sweep window
+    board.track_drum_par_set(SRC_TRACK, 0, 0, CM_SOURCE)  # quiet-regime full snap
+
+    try:
+        # precondition: the source's OUTPUT is the snapped 62 (separates a
+        # chord_mask-setup failure from a capture failure).
+        src_out = board.track_drum_par_get(SRC_TRACK, 0, 0)
+        assert src_out == CM_SNAPPED, (
+            f"chord_mask setup failed: source output should be snapped "
+            f"{CM_SNAPPED}, got {src_out}"
+        )
+        # capture the source's COMPUTED output (chord still held -> forced render snaps).
+        assert board.capture_to_track(SRC_TRACK, DST_TRACK), "capture should succeed"
+    finally:
+        _cm_clear(board)
+        board.cc_set(SRC_TRACK, CC.MODE, TRKMODE_NORMAL)  # disarm, leave fixture clean
+
+    dst = board.track_drum_par_get(DST_TRACK, 0, 0)
+    assert dst == CM_SNAPPED, (
+        f"capture must grab the COMPUTED output {CM_SNAPPED}; dst holds {dst}"
+    )
+    assert dst != CM_SOURCE, (
+        "dst equals the raw seed 60 — capture grabbed the source par-layer instead "
+        "of the rendered output; the 'lossless computed-output' claim is broken"
+    )
+
+
+@pytest.mark.hardware
+def test_note_track_bounce_matches_drum(board):
+    """Parity: bouncing a NOTE/melodic track is byte-for-byte lossless, exactly
+    like a drum track. The capture engine is mode-agnostic (verified by source
+    review); this proves it on a real note-mode source via the general par verb
+    — closing the harness gap that previously left note-track bounce untested.
+
+    A3 is a note-mode pattern (every gate lit, par-A = the Note layer). We seed
+    the source's Note layer with values distinct from the A3 default (60), bounce
+    to another track, and read the captured Note layer back: it must match the
+    seed, not the A3 default a no-op capture would leave."""
+    NOTE_LAYER = 0
+    note_seed = {0: 62, 1: 64, 4: 67, 8: 72}  # all != 60 (the A3 par-A default)
+
+    board.pattern_load(group=0, bank=0, pattern=2)  # A3: note-mode track 0
+    time.sleep(SETTLE)
+    for step, note in note_seed.items():
+        board.track_par_set(SRC_TRACK, NOTE_LAYER, 0, step, note)
+    time.sleep(SETTLE)
+
+    assert board.capture_to_track(SRC_TRACK, DST_TRACK), "note-track capture should succeed"
+
+    for step, note in note_seed.items():
+        v = board.track_par_get(DST_TRACK, NOTE_LAYER, 0, step)
+        assert v == note, (
+            f"note-track bounce must be lossless like a drum bounce: captured "
+            f"Note layer step {step} should be {note}, got {v}"
+        )
+    # a step we never seeded keeps the A3 source default (whole-buffer copy of the
+    # rendered output, not a partial slice).
+    assert board.track_par_get(DST_TRACK, NOTE_LAYER, 0, 2) == 60, (
+        "unseeded step should carry the A3 note default through the bounce"
+    )

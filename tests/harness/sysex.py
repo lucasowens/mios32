@@ -38,6 +38,9 @@ CMD_GENERATOR_DIAL_SET = 0x61
 CMD_GENERATOR_MULT_SET = 0x62
 CMD_CAPTURE_TO_TRACK = 0x63
 CMD_CAPTURE_TO_SLOT_TRACK = 0x64
+CMD_UI_TRACK_GET = 0x65
+CMD_TRACK_PAR_GET = 0x66
+CMD_TRACK_PAR_SET = 0x67
 
 # Dial IDs for CMD_GENERATOR_DIAL_SET — keep in sync with seq_testctrl.c.
 DIAL_RANGE_MIN = 0
@@ -140,6 +143,14 @@ class Button:
         if not 1 <= n <= 16:
             raise ValueError(f"GP index out of range: {n}")
         return 0x40 + (n - 1)
+
+    @staticmethod
+    def DIRECT_TRACK(n: int) -> int:
+        """Select-row (DirectTrack) 1..16 -> button id. n is 1-based.
+        Mirrors BTN_DIRECT_TRACK_BASE in seq_testctrl.c."""
+        if not 1 <= n <= 16:
+            raise ValueError(f"DIRECT_TRACK index out of range: {n}")
+        return 0x20 + (n - 1)
 
 
 # Status byte returned by CMD_BUTTON.

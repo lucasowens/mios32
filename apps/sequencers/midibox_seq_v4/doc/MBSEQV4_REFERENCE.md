@@ -266,6 +266,14 @@ The fork captures the **computed output** of a track, never an emission tape. Th
   CCs (mirroring COPY/PASTE-TRACK in `seq_ui_util.c`) before the raw layer copy,
   because par/trg geometry lives in `seq_par.c`/`seq_trg.c`, **not** `seq_cc_trk` — a
   raw copy across mismatched geometry reads back as garbage.
+- `SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern)` — capture
+  → one track of a pattern slot, **persisted to SD** (the PATTERN-hold gesture's verb,
+  and the only one on a UI gesture). Read-modify-write of the slot file: `PatternRead`
+  (remix_map=0) into the dst group → replace `dst_track` → `PatternWrite` → restore the
+  dst group's live RAM (src captured first in case it shares the dst group). `seq_pattern[]`
+  is never touched and **no group is auto-loaded** — the capture only lands on SD; the
+  live performance is undisturbed (the gesture is capture-only / no-jump, see design §9).
+  Unlike RAM-only `CaptureToTrack`, it survives switching the dst group's pattern away.
 
 Because a track can be both a source (via loopback) and a sink (via `tcc->busasg`), the
 capture point matters: these verbs capture the **post-processor render** (`OutputActive`),

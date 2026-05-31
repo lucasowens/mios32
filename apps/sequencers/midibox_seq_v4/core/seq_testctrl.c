@@ -64,6 +64,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_GENERATOR_MULT_SET   0x62
 #define CMD_CAPTURE_TO_TRACK     0x63
 #define CMD_CAPTURE_TO_SLOT_TRACK 0x64
+#define CMD_UI_TRACK_GET         0x65
+#define CMD_TRACK_PAR_GET        0x66
+#define CMD_TRACK_PAR_SET        0x67
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -95,6 +98,8 @@ typedef enum {
   BTN_UNDO      = 0x14,
   BTN_COPY      = 0x15,
   BTN_PASTE     = 0x16,
+  // DIRECT_TRACK (the midiphy select row) 1..16: BTN_DIRECT_TRACK_BASE + (n - 1).
+  BTN_DIRECT_TRACK_BASE = 0x20,
   // GP1..GP16 are contiguous: BTN_GP_BASE + (n - 1).
   BTN_GP_BASE   = 0x40,
 } button_id_t;
@@ -196,6 +201,9 @@ static u16 lookup_button_pin(u8 id)
 {
   if( id >= BTN_GP_BASE && id < BTN_GP_BASE + SEQ_HWCFG_NUM_GP )
     return seq_hwcfg_button.gp[id - BTN_GP_BASE];
+
+  if( id >= BTN_DIRECT_TRACK_BASE && id < BTN_DIRECT_TRACK_BASE + SEQ_HWCFG_NUM_DIRECT_TRACK )
+    return seq_hwcfg_button.direct_track[id - BTN_DIRECT_TRACK_BASE];
 
   switch( id ) {
     case BTN_MENU:     return seq_hwcfg_button.menu;
@@ -544,6 +552,21 @@ static void cmd_ui_track_set(mios32_midi_port_t port, const u8 *payload, u8 plen
 }
 
 
+// CMD_UI_TRACK_GET payload: (none)
+// Reply payload: [visible_track 0..15, status 0x01]
+//
+// Returns SEQ_UI_VisibleTrackGet() — used to verify track selection (e.g. that
+// the select row still switches tracks after a capture gesture, i.e. button_state
+// wasn't corrupted).
+static void cmd_ui_track_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2];
+  reply[0] = SEQ_UI_VisibleTrackGet() & 0x0f;
+  reply[1] = 0x01;
+  send_reply(port, CMD_UI_TRACK_GET, reply, sizeof(reply));
+}
+
+
 // CMD_TRACK_DRUM_PAR_SET payload: [track, instr, step, value]
 // Reply payload: [track, instr, step, status]   status 0x01 = set, 0x02 = bad.
 //
@@ -724,6 +747,66 @@ static void cmd_track_drum_par_get(mios32_midi_port_t port, const u8 *payload, u
   reply[3] = (u8)(v & 0x7f);
   reply[4] = 0x01;
   send_reply(port, CMD_TRACK_DRUM_PAR_GET, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_PAR_GET payload: [track, layer, instr, step]
+// Reply payload: [track, layer, instr, step, value, status]   status 0x01 = ok, 0x02 = bad.
+//
+// General (mode-agnostic, layer-explicit) par-layer read — the note-track
+// counterpart of CMD_TRACK_DRUM_PAR_GET. No event_mode gate: a thin wrapper
+// over SEQ_PAR_Get so tests can observe ANY track's par output (e.g. a melodic
+// track's Note/Velocity layers) and prove note-track bounce is byte-identical
+// to drum-track bounce. Reads SEQ_PAR_OutputActive (the post-render mirror).
+static void cmd_track_par_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_TRACK_PAR_GET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+  u8 layer = payload[1] & 0x7f;
+  u8 instr = payload[2] & 0x7f;
+  u8 step  = payload[3] & 0x7f;
+  reply[0] = track;
+  reply[1] = layer;
+  reply[2] = instr;
+  reply[3] = step;
+  s32 v = SEQ_PAR_Get(track, step, layer, instr);
+  reply[4] = (u8)(v & 0x7f);
+  reply[5] = 0x01;
+  send_reply(port, CMD_TRACK_PAR_GET, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_PAR_SET payload: [track, layer, instr, step, value]
+// Reply payload: [track, layer, instr, step, value, status]   status 0x01 = set, 0x02 = bad.
+//
+// General (mode-agnostic, layer-explicit) par-layer write — the note-track
+// counterpart of CMD_TRACK_DRUM_PAR_SET. Thin wrapper over SEQ_PAR_Set so tests
+// can seed an arbitrary track/layer (no Drum gate).
+static void cmd_track_par_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 5 ) {
+    send_reply(port, CMD_TRACK_PAR_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+  u8 layer = payload[1] & 0x7f;
+  u8 instr = payload[2] & 0x7f;
+  u8 step  = payload[3] & 0x7f;
+  u8 value = payload[4] & 0x7f;
+  reply[0] = track;
+  reply[1] = layer;
+  reply[2] = instr;
+  reply[3] = step;
+  reply[4] = value;
+  SEQ_PAR_Set(track, step, layer, instr, value);
+  seq_ui_display_update_req = 1;
+  reply[5] = 0x01;
+  send_reply(port, CMD_TRACK_PAR_SET, reply, sizeof(reply));
 }
 
 
@@ -1385,6 +1468,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_CAPTURE_TO_SLOT_TRACK:
             cmd_capture_to_slot_track(port, payload_buf, payload_len);
+            break;
+          case CMD_UI_TRACK_GET:
+            cmd_ui_track_get(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_PAR_GET:
+            cmd_track_par_get(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_PAR_SET:
+            cmd_track_par_set(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface
