@@ -775,21 +775,39 @@ Append-only-ish; revise an entry only with a dated note.
     SD**). One consistent operation for every cell (same/different track,
     same/different group). Bare PATTERN tap → Pattern page. This is the arrangement-
     building move: render generative tracks into specific slots' tracks, persisted.
-    - **Never auto-load / no jump (decided 2026-05-31, by ear + AskUserQuestion).**
-      An interim version auto-loaded the just-written slot into the destination
-      track's group (`SEQ_PATTERN_Change`, force=1) "to show the capture live there."
-      That clobbered the live source in the **same-group / default (dst==src track)**
-      cell — `SEQ_PATTERN_Change(dst_track/4, …)` reloads the *source's own* group,
-      replacing the track being tweaked, which breaks the *tweak → bounce → tweak →
-      bounce* workflow and the no-auto-jump rule (see F.3 withdrawal + the
-      cursor-aware-destinations principle). **Decided: capture-only everywhere — no
-      auto-load in any cell.** Every bounce persists the static copy to the chosen
-      slot and leaves all groups' live RAM untouched; you navigate to the slot
-      deliberately to hear it ("loaded into the slot I select, persists, plays when I
-      move to it"). The bug was caught by an adversarial pre-commit review (the
-      cross-group gesture test passed; the same-group cell was the untested hole) and
-      the fix is pinned by `test_bounce_gesture_same_group_leaves_source_live` +
-      `…never_jumps_destination` + `…lands_in_selected_slot_and_persists`.
+    - **Same-group save-only, cross-group auto-load (final, by-ear 2026-05-31).**
+      One rule decides what the commit does, steered purely by which destination
+      track you aim at:
+      - **Destination in the SOURCE's own group** (incl. the default dst==src track):
+        **save only, no load.** The capture is merged into the chosen pattern on SD;
+        the source/generator keeps playing, untouched. The variation-library move —
+        *tweak → bounce → tweak → bounce*, banking variations without disturbing what
+        you're tweaking; select one deliberately to play it.
+      - **Destination in a DIFFERENT group:** the capture is written into the
+        **destination group's OWN bank**, then that group is auto-loaded
+        (`SEQ_PATTERN_Change` force=1) **and re-synched to the next measure**
+        (`SEQ_CORE_ManualSynchToMeasure`) so the merged capture drops in **on the bar,
+        locked**, immediately — for auditioning a variation in a spare group, or
+        building a multitimbral canvas (each canvas track can carry its own
+        port/channel; capture leaves CCs ≥0x46 alone). The source group is never the
+        one loaded, so it is never jumped.
+      Reached by ear, each step a real bug found by playing: (1) auto-load-everywhere
+      clobbered the live source in the same-group cell; (2) never-auto-load-everywhere
+      (an AskUserQuestion pick) fixed the clobber but left cross-group bounces invisible
+      — the capture lands in a pattern you must then manually load, breaking "the act of
+      bouncing should merge AND load"; (3) re-added auto-load **only when dst group ≠ src
+      group** (can't clobber the source); (4) cross-group then loaded but stayed **silent
+      until a manual switch** — the immediate (force=1) load skips the boundary handler's
+      track-position restart, so the dst tracks kept the prior pattern's stale step phase
+      (`FIRST_CLK=0`) and never fired; fixed with `ManualSynchToMeasure` (bar-aligned
+      restart, mirroring `SEQ_SONG_FetchHlp_PatternChange`); (5) cross-group capture was
+      **lost on switch-away-and-back** — written to the *source's* bank, but each group
+      navigates only its own dedicated bank (bank-change `#if 0`'d, dedicated bank = group
+      index), so it was stranded unreachable; fixed by addressing the write+load in
+      `seq_pattern[dst_group].bank`. Bugs (4) and (5) were each pinned by an adversarial
+      source-trace workflow before fixing. Pinned by `test_bounce_gesture_{lands_in_
+      selected_slot_and_persists, cross_group_auto_loads_destination, same_group_leaves_
+      source_live, cross_group_persists_in_dst_bank}` + the button_state straddle test.
     - **Why CaptureToSlotTrack and not the RAM-only CaptureToTrack:** found by
       ear — `CaptureToTrack` writes a track's *live RAM* only; switching that
       group's pattern away **loses it** (not on SD). `CaptureToSlotTrack` does a

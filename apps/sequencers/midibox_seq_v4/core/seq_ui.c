@@ -605,15 +605,42 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     dst.num   = (u8)(gp - 8) & 0x07;
     dst.lower = 0;
 
-    // One consistent operation across every cell (same/different track, same/
-    // different group): freeze a STATIC copy of the source track into the
-    // destination slot's track, preserving the slot's other tracks, persisted
-    // to SD. The destination track is the select-row pick, or the source's own
-    // track index if none was picked. NO auto-load and NO jump — every group's
-    // live RAM is left untouched, so whatever is playing keeps playing. The
-    // capture lives in the chosen slot; navigate to it deliberately to hear it.
+    // Freeze a STATIC copy of the source track into the destination pattern's
+    // track, preserving that pattern's other 3 tracks, persisted to SD. The
+    // destination track is the select-row pick, or the source's own track index
+    // if none was picked. Then ONE rule decides whether it also loads:
+    //   - SAME group as the source -> persist only, NO load. The generator/source
+    //     keeps playing its current pattern; the variation sits in the chosen
+    //     pattern until you deliberately select it. (Builds a variation library
+    //     without ever disturbing what you're tweaking.)
+    //   - DIFFERENT group -> also load that group's pattern so the merged capture
+    //     plays there immediately (audition in a spare group / build a multitimbral
+    //     canvas). The source group is never the one loaded, so it is never jumped.
+    // The user steers same-vs-cross purely by which destination track they aim at.
     u8 dst_track = (pattern_capture_dst_track != 0xff) ? pattern_capture_dst_track : src_track;
+    u8 dst_group = dst_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    // Write/load into the DESTINATION group's OWN bank, not the source group's
+    // (dst was copied from seq_pattern[src_group], so dst.bank started as the
+    // source's bank). The Pattern page navigates each group only within its
+    // dedicated bank (bank change is #if 0'd in seq_ui_pattern.c; dedicated bank
+    // = group index, seq_pattern.c), so a cross-group capture written to the
+    // source's bank auditions fine but is UNREACHABLE when you switch the dst
+    // group's pattern away and back — it lives in a bank that group can't address.
+    // Same-group is a no-op: dst_group==src_group, so this is the bank dst already had.
+    dst.bank = seq_pattern[dst_group].bank;
     s32 cap_r = SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
+    if( cap_r >= 0 ) {
+      if( dst_group != src_group ) {
+        SEQ_PATTERN_Change(dst_group, dst, 1); // cross-group: bring the merged pattern up live
+        // The immediate (force=1) load skips the boundary handler's track restart,
+        // so the loaded group would keep the previous pattern's stale step phase
+        // (FIRST_CLK=0) and stay SILENT until a manual pattern switch re-bases it.
+        // Re-synch the dst group's 4 tracks to the next measure so the merged
+        // capture restarts from step 0 ON THE BAR and plays, locked to the master
+        // (the source group is a different group, so it is never re-synched).
+        SEQ_CORE_ManualSynchToMeasure(0xf << (4 * dst_group));
+      }
+    }
     pattern_capture_slottrack_msg(cap_r, dst, dst_track);
     // group + dst track stay set so the user can rapid-fire to more patterns.
     return 0;

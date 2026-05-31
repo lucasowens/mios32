@@ -3,20 +3,24 @@
 These drive the actual gesture via injected buttons (the select row / DirectTrack
 is injectable), covering what the engine tests don't.
 
-Model (locked): the gesture is "capture-only everywhere" — hold PATTERN, pick a
-destination track on the select row (default = the source's own track index),
-pick group (GP1-8) + pattern (GP9-16); the pattern press commits
-SEQ_CORE_CaptureToSlotTrack. It NEVER auto-loads and NEVER jumps: a static copy
-lands in the chosen slot on SD, every group's live RAM is left untouched, so
-whatever is playing keeps playing. You navigate to the slot deliberately to hear
-the capture.
+Model (locked): hold PATTERN, pick a destination track on the select row
+(default = the source's own track index), pick group (GP1-8) + pattern (GP9-16);
+the pattern press commits SEQ_CORE_CaptureToSlotTrack (merge a static copy into
+that pattern's track, preserving the other 3, persisted to SD). Then ONE rule
+decides whether it also loads — steered purely by which destination track is
+aimed at:
+  - SAME group as the source -> persist only, NO load: the source/generator keeps
+    playing; the variation sits in the chosen pattern until deliberately selected.
+  - DIFFERENT group -> also load that group's pattern so the merged capture plays
+    there immediately (audition / multitimbral canvas); the source group is never
+    the one loaded, so it is never jumped.
 
 So the behaviors pinned here are:
-  - the capture lands in the SLOT YOU PICKED and PERSISTS there: load that slot
-    (into any group) and the captured track is present and plays; it survives
-    switching the group away and back (no manual save).
-  - NO jump: neither the destination group nor the source group's live RAM is
-    replaced by the capture (cross-group and same-group).
+  - the capture lands in the PATTERN YOU PICKED and PERSISTS there (survives
+    switching a group's pattern away and back, no manual save).
+  - same-group bounce leaves the source group's live RAM untouched (no clobber).
+  - cross-group bounce auto-loads the destination group (capture plays there) but
+    never touches the source group.
   - the button_state regression: a select-press straddling the PATTERN-hold
     boundary must not corrupt the select row's track-select afterward.
 
@@ -131,13 +135,13 @@ def test_bounce_gesture_lands_in_selected_slot_and_persists(board):
 
 
 @pytest.mark.hardware
-def test_bounce_gesture_never_jumps_destination(board):
-    """Never auto-load (cross-group): after the gesture the destination group's
-    LIVE RAM is untouched — the capture is only on SD, not loaded over the dst
-    track. A marker on the destination track survives."""
+def test_bounce_gesture_cross_group_auto_loads_destination(board):
+    """Cross-group: the bounce merges into the chosen pattern AND auto-loads it
+    into the destination group (immediate) so the capture plays there now — while
+    the SOURCE group is never the one loaded, so the generator is never jumped."""
     board.reset(RESET_UNMUTE_ALL)
     board.track_drum_init(SRC_TRACK)
-    board.track_drum_init(DST_XGROUP)            # group 1 destination track
+    board.track_drum_init(DST_XGROUP)            # group 1 destination, pre-marked
     board.ui_track_set(SRC_TRACK)
     time.sleep(SETTLE)
     _seed(board, SRC_TRACK, SEED)
@@ -146,15 +150,22 @@ def test_bounce_gesture_never_jumps_destination(board):
     _bounce_gesture(board, dst_track=DST_XGROUP, group_gp=GROUP_GP, pattern_gp=PATTERN_GP)
     time.sleep(SETTLE)
 
-    # the destination track's live RAM still holds the marker, NOT the capture
-    # (a regression that auto-loaded the slot would replace it with slot pos 0).
-    assert board.track_drum_par_get(DST_XGROUP, 0, MARK_STEP) == MARK_VAL, (
-        "destination group was reloaded by the gesture (auto-load regression) — "
-        "the live track being played would be replaced by the frozen copy"
-    )
-    # source untouched.
+    # destination group auto-loaded the merged pattern -> the dst track now shows
+    # the captured source (its pre-bounce marker is gone).
     for step, note in SEED.items():
-        assert board.track_drum_par_get(SRC_TRACK, 0, step) == note
+        v = board.track_drum_par_get(DST_XGROUP, 0, step)
+        assert v == note, (
+            f"cross-group bounce should auto-load the destination so the capture "
+            f"plays there; dst step {step} expected {note}, got {v}"
+        )
+    assert board.track_drum_par_get(DST_XGROUP, 0, MARK_STEP) != MARK_VAL, (
+        "destination still shows its pre-bounce marker — cross-group auto-load didn't fire"
+    )
+    # source group is never the one loaded -> the generator stays exactly as seeded.
+    for step, note in SEED.items():
+        assert board.track_drum_par_get(SRC_TRACK, 0, step) == note, (
+            f"source step {step} changed — the source group must never be auto-loaded"
+        )
 
 
 @pytest.mark.hardware
@@ -186,6 +197,44 @@ def test_bounce_gesture_same_group_leaves_source_live(board):
     assert board.track_drum_par_get(BYSTANDER, 0, MARK_STEP) == MARK_VAL, (
         "a source group-mate changed — the source group was reloaded from the slot"
     )
+
+
+@pytest.mark.hardware
+def test_bounce_gesture_cross_group_persists_in_dst_bank(board):
+    """Cross-group persistence: each group navigates only its OWN dedicated bank,
+    so a cross-group capture must land in the DESTINATION group's bank — not the
+    source's. Otherwise it auditions but is unreachable when you switch the dst
+    group's pattern away and back. Uses DIFFERENT banks for src (bank 0) and dst
+    (bank 1); the prior test passed falsely by loading bank 0 throughout."""
+    board.reset(RESET_UNMUTE_ALL)
+    # destination group (1) on bank 1; source group (0) on bank 0 — different banks.
+    try:
+        if not board.pattern_load(group=1, bank=1, pattern=0):
+            pytest.skip("bank 1 not available in this session")
+    except RuntimeError:
+        pytest.skip("bank 1 not available in this session")
+    board.pattern_load(group=0, bank=0, pattern=0)
+    board.track_drum_init(SRC_TRACK)             # source on group 0 / bank 0
+    board.ui_track_set(SRC_TRACK)
+    time.sleep(SETTLE)
+    _seed(board, SRC_TRACK, SEED)
+
+    # bounce src (group 0, bank 0) -> dst track 4 (group 1, bank 1).
+    _bounce_gesture(board, dst_track=DST_XGROUP, group_gp=GROUP_GP, pattern_gp=PATTERN_GP)
+    time.sleep(SETTLE)
+
+    # the capture must be in the DESTINATION group's bank (1): load that exact
+    # slot from bank 1 and confirm it's there. Pre-fix it went to the source's
+    # bank (0), so bank 1 never received it and this read finds nothing.
+    assert board.pattern_load(group=2, bank=1, pattern=SLOT_PATTERN), "load from dst bank (1)"
+    time.sleep(SETTLE)
+    for step, note in SEED.items():
+        v = board.track_drum_par_get(8, 0, step)   # group 2 position 0 = slot position 0
+        assert v == note, (
+            f"cross-group capture must persist in the DESTINATION group's bank "
+            f"(bank 1); step {step} expected {note}, got {v} — it landed in the "
+            f"source's bank and is unreachable from the dst group's navigation"
+        )
 
 
 @pytest.mark.hardware
