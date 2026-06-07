@@ -21,7 +21,7 @@ import time
 
 import pytest
 
-from harness import Board, Page
+from harness import Board, CC, Page
 from harness.sysex import RESET_UNMUTE_ALL
 
 
@@ -121,6 +121,130 @@ def test_capture_to_slot_preserves_gate_assignment(board):
         f"loaded target ASG_GATE={dst_gate} (0 = no gate layer = every step "
         f"plays). The structural trigger assignments must be preserved."
     )
+
+
+@pytest.mark.hardware
+def test_capture_to_slot_preserves_groove(board):
+    """The bounced slot must keep the source's GROOVE (style + value).
+
+    Groove is deterministic *shaping* applied at emission (swing/velocity/length),
+    never baked into the captured par/trg. SEQ_CC_ResetGenerativeForBounce used to
+    zero it on the destination alongside the genuinely-generative CCs, so a grooved
+    drum track froze to a dead-straight copy — it sounded "a lot different, wrong"
+    the moment you reloaded the slot. Groove is on the *shaping* axis, not the
+    *generation* axis: re-applying the preserved CC re-grooves the copy identically,
+    so it must survive the capture. Mirrors test_capture_to_slot_preserves_gate_
+    assignment (a structural CC that must round-trip).
+    """
+    GROOVE_STYLE = 3  # Shuffle2 (seq_groove_presets index)
+    GROOVE_VALUE = 20
+
+    board.reset(RESET_UNMUTE_ALL)
+    board.track_drum_init(SRC_TRACK)
+    board.page_set(Page.PITCHGEN)
+    board.ui_instrument_set(0)
+    time.sleep(SETTLE)
+    _seed(board, SRC_TRACK, 0, SEED)
+
+    board.cc_set(SRC_TRACK, CC.GROOVE_STYLE, GROOVE_STYLE)
+    board.cc_set(SRC_TRACK, CC.GROOVE_VALUE, GROOVE_VALUE)
+    # Read back what the device actually stored — assert on these, robust to the
+    # groove_style bitfield encoding.
+    src_style = board.cc_get(SRC_TRACK, CC.GROOVE_STYLE)
+    src_value = board.cc_get(SRC_TRACK, CC.GROOVE_VALUE)
+    assert src_style != 0, (
+        f"precondition: source should carry a groove style; got {src_style}"
+    )
+
+    assert board.bounce(
+        src_track=SRC_TRACK, dst_bank=BOUNCE_BANK, dst_pattern=BOUNCE_PATTERN
+    )
+    assert board.pattern_load(
+        group=VERIFY_GROUP, bank=BOUNCE_BANK, pattern=BOUNCE_PATTERN
+    )
+    time.sleep(SETTLE)
+
+    dst_style = board.cc_get(VERIFY_TRACK, CC.GROOVE_STYLE)
+    dst_value = board.cc_get(VERIFY_TRACK, CC.GROOVE_VALUE)
+    assert dst_style == src_style and dst_value == src_value, (
+        f"bounced slot lost its groove: source style/value={src_style}/{src_value}, "
+        f"loaded target style/value={dst_style}/{dst_value} (0/0 = stripped to "
+        f"dead-straight). Groove is deterministic shaping and must be preserved."
+    )
+
+
+@pytest.mark.hardware
+def test_capture_to_slot_track_inherits_full_config(board):
+    """The PATTERN-hold gesture verb (SEQ_CORE_CaptureToSlotTrack) must carry the
+    SOURCE's full track config onto the frozen copy — length AND groove — not just
+    the note data + drum layout.
+
+    Regression for the real-hardware report: freezing a grooved beat via the
+    gesture produced a copy that ran "almost too fast" with the groove off, because
+    CaptureToSlotTrack inherited only the lower-48 CCs (lay_const) from the source.
+    Length (0x4d), clock divider (0x4c), groove (0x52/0x53) and the trigger-layer
+    assignments (0x60+) all live ABOVE that range, so the frozen track kept the
+    DESTINATION slot's defaults. The fix copies the source's full 0x00..0x7f CC
+    space (mirroring PASTE_CLR_ALL in seq_ui_util.c).
+
+    Distinct from test_capture_to_slot_preserves_groove, which drives the in-place
+    CaptureToSlot (board.bounce) — a different verb that already preserved config by
+    snapshotting the whole source tcc. THIS test pins the actual UI gesture verb,
+    which the bounce test does not exercise.
+    """
+    GROOVE_STYLE = 3   # Shuffle2 (seq_groove_presets index)
+    GROOVE_VALUE = 20
+    NEW_LENGTH = 7     # distinct from the drum-init default — the "too fast" pin
+
+    board.reset(RESET_UNMUTE_ALL)
+    board.track_drum_init(SRC_TRACK)
+    board.page_set(Page.PITCHGEN)
+    board.ui_instrument_set(0)
+    time.sleep(SETTLE)
+
+    default_length = board.cc_get(SRC_TRACK, CC.LENGTH)
+    assert default_length != NEW_LENGTH, (
+        f"precondition: NEW_LENGTH must differ from the drum-init default "
+        f"({default_length}) for length to be a valid pin"
+    )
+    board.cc_set(SRC_TRACK, CC.LENGTH, NEW_LENGTH)
+    board.cc_set(SRC_TRACK, CC.GROOVE_STYLE, GROOVE_STYLE)
+    board.cc_set(SRC_TRACK, CC.GROOVE_VALUE, GROOVE_VALUE)
+    src_style = board.cc_get(SRC_TRACK, CC.GROOVE_STYLE)
+    src_value = board.cc_get(SRC_TRACK, CC.GROOVE_VALUE)
+    _seed(board, SRC_TRACK, 0, {0: 60, 1: 64, 5: 67})
+
+    # The actual UI gesture verb: capture src into dst_track of a stored slot,
+    # persisted to SD (dst_track == src_track == the gesture's default).
+    assert board.capture_to_slot_track(
+        src_track=SRC_TRACK,
+        dst_track=SRC_TRACK,
+        dst_bank=BOUNCE_BANK,
+        dst_pattern=BOUNCE_PATTERN,
+    ), "CaptureToSlotTrack should commit"
+
+    assert board.pattern_load(
+        group=VERIFY_GROUP, bank=BOUNCE_BANK, pattern=BOUNCE_PATTERN
+    )
+    time.sleep(SETTLE)
+
+    # Groove must travel with the frozen copy (the "groove off" symptom).
+    assert (
+        board.cc_get(VERIFY_TRACK, CC.GROOVE_STYLE) == src_style
+        and board.cc_get(VERIFY_TRACK, CC.GROOVE_VALUE) == src_value
+    ), (
+        "gesture-frozen copy lost the source groove — CaptureToSlotTrack must "
+        "inherit groove CCs (0x52/0x53) from the source, not keep the dst slot's"
+    )
+    # Length must travel too (the "almost too fast" symptom).
+    got_length = board.cc_get(VERIFY_TRACK, CC.LENGTH)
+    assert got_length == NEW_LENGTH, (
+        f"gesture-frozen copy has the wrong length: expected source length "
+        f"{NEW_LENGTH}, got {got_length} (= the dst slot's default — the 'too "
+        f"fast' bug; CaptureToSlotTrack must inherit LENGTH 0x4d from the source)"
+    )
+    # And the captured note data still round-trips.
+    assert board.track_drum_par_get(VERIFY_TRACK, 0, 0) == 60
 
 
 @pytest.mark.hardware

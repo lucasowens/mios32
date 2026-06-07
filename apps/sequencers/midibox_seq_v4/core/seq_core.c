@@ -832,16 +832,17 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
   SEQ_PAR_TrackInit(dst_track, par_steps, par_layers, num_instr);
   SEQ_TRG_TrackInit(dst_track, trg_steps, trg_layers, num_instr);
 
-  // copy the lower-48 CCs + drum par-layer assignments (layer *types*),
-  // exactly as PASTE_CLEAR_MODE_TRACK does, so the captured bytes are
-  // interpreted correctly on dst.
+  // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
+  // the source's whole 0x00..0x7f CC space so length/clock/groove/trigger
+  // assignments/routing travel with the frozen notes — not just the lay_const +
+  // drum par-asg (which left the copy at dst's defaults: wrong length/clock,
+  // wrong gates, no groove). ResetGenerativeForBounce below strips the generation
+  // axis; the deterministic shaping (groove/length/clkdiv/structural trg-asg) stays.
   {
     int i;
-    for(i=0; i<48; ++i)
+    for(i=0; i<128; ++i)
       SEQ_CC_Set(dst_track, i, SEQ_CC_Get(src_track, i));
-    for(i=0; i<4; ++i)
-      SEQ_CC_Set(dst_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i,
-                 SEQ_CC_Get(src_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i));
+    SEQ_CC_LinkUpdate(dst_track);
   }
 
   // 2. Lossless output → dst source (forced quiet render → sweep-safe). Valid
@@ -863,15 +864,16 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 // Static snapshot of the destination group (4 tracks) for the capture-to-slot-
 // track verb: preserve the dst group's live RAM across the load-modify-save so
 // the operation doesn't disturb what's currently loaded/playing there. Plus a
-// small snapshot of the source's config (captured before the load, in case the
-// source shares the dst group) used for the geometry/layer-type inherit:
-// [0] = event_mode, [1..48] = CC 0..47, [49..52] = drum par-layer assignments.
+// snapshot of the source's FULL CC config (captured before the load, in case the
+// source shares the dst group). The whole 0x00..0x7f CC space, so the frozen copy
+// faithfully inherits length/clock/groove/trigger-assignments/routing — not just
+// the lay_const + drum par-asg the old lower-48 inherit copied.
 static seq_cc_trk_t slottrk_cc_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
 static u8           slottrk_par_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_PAR_MAX_BYTES];
 static u8           slottrk_trg_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_TRG_MAX_BYTES];
 static char         slottrk_name_snap[20];
 static u8           slottrk_play_section_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
-static u8           slottrk_src_cc[53];
+static u8           slottrk_src_cc[128];
 
 /////////////////////////////////////////////////////////////////////////////
 // Fork: capture src_track's computed output into dst_track of slot (bank,
@@ -908,11 +910,13 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   u8  src_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
   u16 src_trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
   u8  src_trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
-  slottrk_src_cc[0] = (u8)SEQ_CC_Get(src_track, SEQ_CC_MIDI_EVENT_MODE);
-  for(i=0; i<48; ++i)
-    slottrk_src_cc[1+i] = (u8)SEQ_CC_Get(src_track, i);
-  for(i=0; i<4; ++i)
-    slottrk_src_cc[49+i] = (u8)SEQ_CC_Get(src_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i);
+  // Snapshot the source's FULL CC config (0x00..0x7f). The frozen copy must
+  // reproduce what was heard — length (0x4d), clock divider (0x4c), groove
+  // (0x52/0x53) and the trigger-layer assignments (0x60..0x68) all live above the
+  // old lower-48 inherit, so a partial copy left the copy running at the dst
+  // slot's defaults ("too fast" wrong length/clock, wrong gates, no groove).
+  for(i=0; i<128; ++i)
+    slottrk_src_cc[i] = (u8)SEQ_CC_Get(src_track, i);
 
   // 2. Snapshot the dst group's live RAM (4 tracks) so we can restore it.
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
@@ -931,14 +935,20 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   if( status >= 0 ) {
     // 4. Inherit src config/geometry onto dst_track, write the captured output,
     //    sanitize generative CC (incl. the gate-assignment-preserving fix).
-    SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[0]);
+    SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE]);
     SEQ_CC_LinkUpdate(dst_track);
     SEQ_PAR_TrackInit(dst_track, src_par_steps, src_par_layers, src_num_instr);
     SEQ_TRG_TrackInit(dst_track, src_trg_steps, src_trg_layers, src_num_instr);
-    for(i=0; i<48; ++i)
-      SEQ_CC_Set(dst_track, i, slottrk_src_cc[1+i]);
-    for(i=0; i<4; ++i)
-      SEQ_CC_Set(dst_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i, slottrk_src_cc[49+i]);
+    // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
+    // the source's whole 0x00..0x7f CC space so length/clock/groove/trigger
+    // assignments/routing travel with the frozen notes. SEQ_CC_ResetGenerativeForBounce
+    // below strips the generation axis (mode/direction/transpose/robotize/echo/lfo/
+    // random) while keeping the deterministic shaping (groove, length, clkdiv,
+    // structural trg-asg). EVENT_MODE re-set in the loop is a harmless no-op
+    // (already set above; the setter only re-links, never re-partitions).
+    for(i=0; i<128; ++i)
+      SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
+    SEQ_CC_LinkUpdate(dst_track);
     memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
     SEQ_CC_ResetGenerativeForBounce(dst_track);

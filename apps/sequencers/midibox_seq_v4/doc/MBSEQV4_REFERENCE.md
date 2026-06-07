@@ -262,10 +262,13 @@ The fork captures the **computed output** of a track, never an emission tape. Th
   pattern slot. (`dst_group` is vestigial — the write source-group is derived from
   `src_track`; kept for the testctrl payload shape.)
 - `SEQ_CORE_CaptureToTrack(src_track, dst_track)` — capture → another track in the
-  current pattern (RAM only). dst **inherits** src's event-mode + geometry + lower-48
-  CCs (mirroring COPY/PASTE-TRACK in `seq_ui_util.c`) before the raw layer copy,
-  because par/trg geometry lives in `seq_par.c`/`seq_trg.c`, **not** `seq_cc_trk` — a
-  raw copy across mismatched geometry reads back as garbage.
+  current pattern (RAM only). dst **inherits the source's full `0x00..0x7f` CC config +
+  geometry** (mirroring the `PASTE_CLR_ALL` branch of `PASTE_Track` in `seq_ui_util.c`)
+  before the raw layer copy. Geometry lives in `seq_par.c`/`seq_trg.c`, **not**
+  `seq_cc_trk`, so `SEQ_PAR/TRG_TrackInit` with the src counts is still needed (a raw copy
+  across mismatched geometry reads back as garbage). The full-CC inherit (was **lower-48
+  only** until 2026-06-07) is what carries length/clock/groove/trigger-assignments so the
+  frozen copy reproduces what was heard — see §9 "Freeze faithfulness".
 - `SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern)` — capture
   → one track of a pattern slot, **persisted to SD** (the PATTERN-hold gesture's verb,
   and the only one on a UI gesture). Read-modify-write of the slot file: `PatternRead`
@@ -283,13 +286,21 @@ which is *before* emission — so loopback/echo/global-transpose applied at emis
 **not** in the capture. That's intentional: the captured pattern is the editable
 computed loop, not the literal performed MIDI.
 
-The companion concern is destination-side modulation: the captured pattern inherits the
-source's CC config, and any generative setting on the destination would re-modulate the
-frozen tape on playback (FX, direction shaping, bus mode, groove, per-step
-Probability/Nth/etc.). Centralized in `SEQ_CC_ResetGenerativeForBounce()`
-([seq_cc.c](../core/seq_cc.c)) — called by both capture verbs on the destination after
-the output is written. Extend that function in the same review when a new generative CC
-is added.
+The companion concern is destination-side modulation, split across **two axes**
+(2026-06-07). The **generation axis** (generators, randomness, robotize, echo, LFO,
+direction, transpose, per-step Probability/Nth, bus mode) would re-modulate or re-roll the
+frozen tape, so `SEQ_CC_ResetGenerativeForBounce()` ([seq_cc.c](../core/seq_cc.c)) resets it
+on the destination after the output is written. The **shaping axis** is DETERMINISTIC —
+groove especially: per-step swing/velocity/length keyed to step position, applied at
+emission ([seq_core.c:1869](../core/seq_core.c#L1869), [:2113](../core/seq_core.c#L2113)),
+never baked into `OutputActive` — so re-applying its CC reproduces the heard sound exactly
+(incl. groove's negative timing delays, which can't be baked into per-step delay params).
+That axis is **PRESERVED**, not reset. Groove is the first carve-out;
+`transpose`/`FORCE_SCALE`/`echo`/`LFO`/`direction` are emission-time deterministic too and
+are *candidates* to preserve next (FORCE_SCALE is the highest-risk still-stripped one — a
+frozen force-to-scale track plays its raw off-scale notes). When you add a new `SEQ_CC_*`,
+classify it: generation → reset here; deterministic shaping → preserve. See §9 "Freeze
+faithfulness" in the design doc.
 
 Source-state preservation across `CaptureToSlot` uses an **in-RAM snapshot** of
 `seq_cc_trk[src_track]` + layer/trigger buffers + pattern name + `play_section`,

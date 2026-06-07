@@ -119,17 +119,27 @@ s32 SEQ_CC_Init(u32 mode)
 // SEQ_CC_Init). Called by the capture verbs (SEQ_CORE_CaptureToSlot /
 // SEQ_CORE_CaptureToTrack, seq_core.c) on the destination CC after the
 // computed output is written — so the captured pattern plays the frozen tape
-// without re-applying robotize / echo / direction / bus / groove / par-layer
-// modulation on top.
+// without re-applying robotize / echo / direction / bus / par-layer modulation
+// on top.
 //
-// Preserved (identity + structural + step-data carriers):
+// Two axes, only one is reset. A capture commits the GENERATION axis (generators,
+// randomness, mutation) into notes — that is correctly neutralized here. The
+// SHAPING axis (groove, …) is DETERMINISTIC: re-applying its CC on playback
+// reproduces the heard sound exactly (groove's per-step swing/velocity/length —
+// including negative delays that cannot be baked into step params), so it must be
+// PRESERVED, not reset. Groove is the first such carve-out; transpose/scale/echo/
+// LFO/direction are candidates for the same treatment (preserve), pending by-ear
+// review — left reset for now.
+//
+// Preserved (identity + structural + step-data carriers + deterministic shaping):
 //   - MIDI port/channel, event_mode, MIDI bank/PC, name
 //   - length, loop, clock divider (incl. TRIPLETS + MANUAL bits)
 //   - lay_const slots holding Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl
 //   - par_assignment_drum slots holding Velocity/Length
+//   - groove (style + value) — deterministic shaping, re-applied identically
 //
-// When you add a new generative SEQ_CC_* (FX, direction-shaper, bus-style,
-// per-step conditional, etc.) extend this function in the same review.
+// When you add a new SEQ_CC_*, classify it: GENERATION → reset here; deterministic
+// SHAPING → preserve (a frozen copy must still sound like what was heard).
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
 {
@@ -164,13 +174,16 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->steps_skip = 0;
   tcc->steps_rs_interval = 0;
 
-  // Transpose / morph / groove / humanize.
+  // Transpose / morph / humanize.
+  // NOTE: groove (groove_style + groove_value) is deliberately NOT reset here —
+  // it is deterministic shaping, preserved so the frozen copy re-grooves
+  // identically to the source (see the axis split in the header comment). The
+  // earlier reset stripped the swing/velocity/length groove off every capture,
+  // making a grooved drum track sound dead-straight once frozen.
   tcc->transpose_semi = 0;
   tcc->transpose_oct = 0;
   tcc->morph_mode = 0;
   tcc->morph_dst = 0;
-  tcc->groove_style.ALL = 0;
-  tcc->groove_value = 0;
   tcc->humanize_value = 0;
   tcc->humanize_mode = 0;
 
