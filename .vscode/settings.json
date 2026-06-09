@@ -23,5 +23,6 @@
     "**/*.sym": true
   },
   "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools",
-  "C_Cpp.errorSquiggles": "enabled"
+  "C_Cpp.errorSquiggles": "enabled",
+  "cmake.sourceDirectory": "/Users/lucas/Source/midibox/mios32/apps/sequencers/LoopA"
 }

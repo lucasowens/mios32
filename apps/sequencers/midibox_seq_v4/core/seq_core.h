@@ -431,6 +431,15 @@ extern s32 SEQ_CORE_CaptureTrackOutput(u8 track, u8 *par_dst, u8 *trg_dst);
 // slot was enabled), 0 otherwise. Sweep-safe via SEQ_CORE_CaptureTrackOutput.
 extern s32 SEQ_CORE_ProcessorBounce(u8 track);
 
+// Fork: bake the deterministic force-to-scale snap (and, in Normal playmode, the
+// static transpose offset) into a captured track's Note par-layers, so the frozen
+// tape holds the exact heard pitches and FORCE_SCALE can stay reset. Call on a
+// track whose live par buffer holds the captured output and whose tcc still
+// carries the source's pre-reset config — AFTER the capture copy, BEFORE
+// SEQ_CC_ResetGenerativeForBounce. No-op unless FORCE_SCALE is set; non-drum
+// Note layers only (see seq_core.c for the scope rationale).
+extern s32 SEQ_CORE_BakeForceScale(u8 track);
+
 // Fork capture verb — capture src_track's computed output into the destination
 // pattern slot (dst_bank, dst_pattern), lossless, CC included. dst_group is
 // vestigial (the write source-group is derived from src_track) and kept only

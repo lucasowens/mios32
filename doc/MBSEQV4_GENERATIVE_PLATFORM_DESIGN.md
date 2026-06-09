@@ -909,14 +909,43 @@ Append-only-ish; revise an entry only with a dated note.
     reproduced the bug on the pre-fix firmware, `cc_get(GROOVE_STYLE)==0`). Full suite
     **75/75 green**; by-ear confirmed — freeze reproduces the beat, and freezing *over the
     live pattern* is now sonically transparent (was the second half of the confusion).
-  - **Deferred ("then more"):** extend shaping-axis preservation to the other deterministic
-    emission shapers, each confirmed by ear — **FORCE_SCALE is the highest-risk still-stripped
-    one** (a frozen force-to-scale track plays raw off-scale notes; its `trkmode_flags.ALL=0`
-    reset needs a per-bit mask to keep FORCE_SCALE), then transpose/echo/LFO/direction.
-    Random/generative effects (robotize, humanize, probability, random-gate, echo Rnd modes,
-    morph — its global `morph_value` isn't captured) stay reset; re-applying would diverge. The
-    two-faces posture-persistence model (v3 format) and the unified four-move destination
-    gesture remain the larger deferred pieces.
+  - **FORCE_SCALE — SHIPPED via BAKE, not flag-preserve (2026-06-07; code + HIL pins, by-ear
+    PENDING the user's flash). User chose Option B.** A frozen force-to-scale track was playing its
+    RAW off-scale notes: the snap is EMISSION-time (the tick, after transpose;
+    [seq_core.c:2142](../apps/sequencers/midibox_seq_v4/core/seq_core.c#L2142)), NEVER in the captured
+    `OutputActive`, and `ResetGenerativeForBounce`'s `trkmode_flags.ALL=0` cleared FORCE_SCALE. Two
+    faithful options: (A) preserve the flag and re-snap LIVE — cheap, but a later global-key change
+    would silently re-pitch the frozen copy; or (B) **bake the heard pitch into the captured notes**
+    so the flag can stay reset (immune to later key changes). User chose **B** (the §9 mandate: a
+    frozen copy must sound like what was heard, full stop). `SEQ_CORE_BakeForceScale` (new) snaps each
+    non-drum Note par-layer value to the per-step resolved scale/root, reproducing the DETERMINISTIC
+    pitch chain `noteLimit(forceScale(transpose(raw)))` — transpose reproduced only when it was
+    deterministic (Normal playmode, global transpose off), and the post-snap note **limit** baked too
+    (both are zeroed by `ResetGenerativeForBounce`, so the heard offset + register-fold must be
+    committed; note `SEQ_CORE_Limit` octave-FOLDS via `SEQ_CORE_TrimNote`, it does not min/max clamp).
+    Called in all three freeze verbs after the captured notes land, before the reset.
+    - **Two gotchas a two-pass adversarial review caught (both fixed before any by-ear):**
+      (1) `SEQ_PAR_Get` reads the double-buffered **output mirror** while `SEQ_PAR_Set` writes the
+      **source** ([seq_par.c:258](../apps/sequencers/midibox_seq_v4/core/seq_par.c#L258) vs
+      [:285](../apps/sequencers/midibox_seq_v4/core/seq_par.c#L285)) — so the bake must read AND write
+      `seq_par_layer_value` (source) DIRECTLY; a freshly-written capture destination's mirror is stale
+      until the next render. (2) emission applies `SEQ_CORE_Limit` AFTER the snap — omitting it let
+      out-of-range notes into the frozen copy.
+    - **Scope (documented limits):** drum tracks (a drum note can fall back to a shared per-drum
+      CONSTANT — per-step scale would snap it to different notes, unbakeable) and Chord par-layers
+      (value is a chord INDEX, not a note) are NOT baked. Transpose for NON-force-scaled tracks is
+      still its own deferred item (here transpose is only reproduced as part of a force-scaled note's
+      heard pitch). Random/generative shapers stay reset (groove is preserved-as-CC; humanize/LFO/
+      robotize/probability/random-gate/morph re-apply would diverge).
+    - **HIL:** `tests/apps/seq_v4/test_capture_force_scale.py` — gesture + in-place verbs assert the
+      C-Major snaps AND that FORCE_SCALE is RESET on the copy (proving bake-not-preserve); a third pins
+      the snap→limit chain. New `CMD_GLOBAL_SCALE_SET` testctrl verb pins a deterministic key
+      (`board.reset` doesn't touch the global scale).
+  - **Deferred — the shaping-axis pass continues:** transpose (for non-force-scaled tracks),
+    echo/LFO/direction, each confirmed by ear. Random/generative effects (robotize, humanize,
+    probability, random-gate, echo Rnd modes, morph — its global `morph_value` isn't captured) stay
+    reset; re-applying would diverge. The two-faces posture-persistence model (v3 format) and the
+    unified four-move destination gesture remain the larger deferred pieces.
 - **§8 step 5 (the spine) is broken into phases A–F.** User agreed 2026-05-24:
   ship the full design-doc spine as a multi-PR sequence, infrastructure first.
   Each phase is a buildable+harness-testable unit.

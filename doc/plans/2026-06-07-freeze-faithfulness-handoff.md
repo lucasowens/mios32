@@ -61,18 +61,26 @@ Groove was the first carve-out. Other emission-time **deterministic** effects ar
 stripped on freeze and will surprise the user the same way. Per-effect classification is in
 design §9 and was produced by the 2026-06-07 audit. Order:
 
-- **FORCE_SCALE — HIGHEST RISK.** A frozen force-to-scale track plays its **raw off-scale
-  notes** (the snap is emission-time, deterministic, not in `OutputActive`). Currently
-  cleared by the blunt `tcc->trkmode_flags.ALL = 0` in `SEQ_CC_ResetGenerativeForBounce`
-  (seq_cc.c). **Fix needs a per-bit mask** that keeps `FORCE_SCALE` while still clearing the
-  live-input flags (HOLD/FIRST_NOTE/UNSORTED/STEP_TRG/SUSTAIN — decide SUSTAIN explicitly).
-  CAVEAT: scale/root also come from GLOBAL state + per-step Root/Scale par-layers (the tail
-  of `ResetGenerativeForBounce` neutralizes those layer *types*). Preserve FORCE_SCALE only
-  together with a decision on Root/Scale layer handling — or bake the snap into the captured
-  notes at capture time.
-- **transpose_semi/oct** — deterministic in Normal playmode (coupled to playmode, which is
-  reset to Normal anyway → safe to preserve). Must NOT preserve in Transpose/Arp playmode
-  (live keyboard input).
+- **FORCE_SCALE — ✅ DONE 2026-06-07 (code + HIL pins; BY-EAR PENDING the flash).** Chose the
+  **BAKE** path (Option B), NOT the per-bit-mask preserve sketched below: preserving the flag
+  would re-snap live against the *global* scale, so a later key change would silently re-pitch
+  the frozen copy. Instead `SEQ_CORE_BakeForceScale` (seq_core.c) snaps the captured non-drum
+  Note par-layers into the heard pitch — `noteLimit(forceScale(transpose(raw)))` — and the flag
+  stays reset. Called in all 3 freeze verbs before `ResetGenerativeForBounce`.
+  - **Two gotchas a two-pass adversarial review caught (fixed):** (1) `SEQ_PAR_Get` reads the
+    output *mirror*, `SEQ_PAR_Set` writes the *source* — a just-captured destination's mirror is
+    stale, so the bake reads+writes `seq_par_layer_value` directly. (2) emission applies the note
+    *limit* after the snap, so the bake reproduces it too (limits are reset).
+  - **Scope:** drum + Chord-layer force-scale NOT baked (unbakeable per-step; documented). Folded
+    in transpose+limit only as part of computing the force-scaled note's heard pitch.
+  - **HIL:** `tests/apps/seq_v4/test_capture_force_scale.py` (gesture + in-place + snap→limit) +
+    new `CMD_GLOBAL_SCALE_SET` testctrl verb / `board.global_scale_set`. **FLASH + run `-k
+    force_scale` + listen** — that's the only remaining gate on this item.
+- **transpose_semi/oct (for NON-force-scaled tracks)** — deterministic in Normal playmode
+  (coupled to playmode, which is reset to Normal anyway → safe to preserve OR bake like
+  force-scale). Must NOT reproduce in Transpose/Arp playmode (live keyboard input). NOTE: the
+  force-scale bake already reproduces transpose for force-scaled tracks; this item extends it to
+  the rest.
 - **echo / LFO / direction** — deterministic but harder (echo is *additive* events not in
   the tape; LFO is phase-stateful; direction reorders steps and needs loop/length, which are
   preserved). Lower priority; echo Rnd1/Rnd2 modes must stay reset.
@@ -80,8 +88,9 @@ design §9 and was produced by the 2026-06-07 audit. Order:
 **Stay RESET (random/generative — re-applying diverges):** robotize, humanize, probability,
 random_gate/value, echo Rnd modes, morph (its global `morph_value` isn't captured).
 
-Each one: add to the carve-out, add a gesture-path HIL pin (set the CC on src, freeze via
-`board.capture_to_slot_track`, load, assert it survives), **confirm by ear.**
+Each one: classify (preserve-as-CC vs bake-into-notes — bake when the effect reads mutable global
+state), add a gesture-path HIL pin (via `board.capture_to_slot_track`, not just `board.bounce` —
+different verbs), **confirm by ear.**
 
 ### 2. Unified four-move destination gesture
 Today the PATTERN-hold gesture only writes **SD slots** (`CaptureToSlotTrack`). So:
@@ -133,6 +142,6 @@ gesture (§5.5).
 
 ## Build / test / verify
 - Build: `cd apps/sequencers/midibox_seq_v4 && bash -c 'source ../../../source_me_MBHP_CORE_STM32F4 && make'` → `project_build/project.hex`. Flash via MIOS Studio (manual).
-- HIL: `cd tests && bash -c 'source .venv/bin/activate && pytest -q'` (75/75 as of this round). Targeted: `pytest -k "groove or full_config"`.
+- HIL: `cd tests && bash -c 'source .venv/bin/activate && pytest -q'` (75/75 at the groove round; +3 force-scale pins added this round, collect-green, **hardware run pending the flash**). Targeted: `pytest -k "groove or full_config or force_scale"`.
 - For any shaping-axis addition: add a **gesture-path** pin (via `board.capture_to_slot_track`), not just the in-place `board.bounce` — they are different verbs.
 - The real proof is always **by ear** (music-first discipline).
