@@ -97,6 +97,10 @@ nothing external forces the ear back into the loop, so the design must.
    death of the aesthetic — tasteful wallpaper. Model it like a filter cutoff you
    sweep into self-oscillation: the interesting place is in motion, between the
    extremes, under the thumb. The edge *is* the dimension.
+   *(Refined 2026-06-09: **bipolar dials put the pass-through at a center detent**,
+   with opposed forces on either side — "must include off" generalizes to "the rest
+   position is the effect silent." First instance: the GRAVITY field, §8 second
+   build.)*
 
 4. **Work with the hardware grain.** Shape the model around what the box does well
    (§6), not against it. Group-granular states, drum-vs-normal track tradeoffs, and
@@ -114,6 +118,18 @@ nothing external forces the ear back into the loop, so the design must.
    That work is preserved in Part II precisely because it must not masquerade as the
    committed plan.) The rule: the next thing built is a *sound you can hear*, not the
    next piece of capability. When in doubt, build less and listen sooner.
+
+7. **The unit of validation is a workflow, not a feature.** *(Added 2026-06-09.)*
+   A dial without its companion gestures **under-reads by ear** — a false NO-GO from
+   an incomplete rig costs as much as unheard infrastructure. "Build less" means the
+   smallest *playable loop*, not the smallest diff: every build ends at a surface that
+   can be set up in ~two minutes, swept, released, captured, and returned to; GO/NO-GO
+   gates sit at the **workflow level**. This was latent in the log before it was
+   named: phases G/H shipped as one bundle on listen-test demand; the F.3 auto-jump
+   survived feature-level review and fell only to whole-workflow play; the §8 step-3
+   GO was itself a workflow (author → hear → judge). Corollary, refining #6:
+   **infrastructure is licensed exactly when it sits on the critical path of a
+   bundle** — design-ahead is "masquerading" only when no bundle needs it.
 
 ---
 
@@ -165,6 +181,15 @@ anywhere live, including back to zero, and the underlying material returns.
 Robotize is the prototype. The chord-tone mask, voice-leading bias, and
 window-through-recorded-steps are all processors. Processors transform existing
 material; they do not create it.
+
+**Born-as-processors rule** *(2026-06-09)*: **new musical transforms are born in the
+render stack, not at emission time.** Emission-time effects are invisible to
+`OutputActive`, so every one of them forces hand-written bake code at bounce (the §9
+freeze-faithfulness saga: groove, FORCE_SCALE, the still-deferred transpose/echo
+pass); stack processors are bounce-faithful *by construction*. The legacy emission
+chain (transpose → force-scale → limit) migrates into the stack as Track 2 of the
+Tension Workbench (§8 second build), deleting the bake program rather than
+extending it.
 
 ### Bounce (verb)
 Bounce **commits the current processor (or engaged-generator) output into the buffer
@@ -314,6 +339,14 @@ The disorder must be a **reversible transformation of an identity**, not a
 
 The **Turing-machine model** (locked loop = identity + performable mutation = the
 journey) *is* this structure. Per-step lock = the human-vs-machine symbiosis dial.
+
+**Three orthogonal blur axes** *(2026-06-09)*: the journey away from an identity has
+three independently performable dimensions — **pattern** (mutation rate; soft return
+= rate→0, hard return = SNAP), **time** (the window over a captured buffer), and
+**harmony** (the GRAVITY field, §8 second build — push toward RUB/SLIP, pull toward
+chord/root; RESOLVE = the bar-quantized harmonic return). A state can fall apart
+harmonically while the loop holds, or rhythmically while the harmony holds; the
+return recipes compose.
 
 ### Morphing
 - **Live posture morph** — two states at once = two groups playing, ride the balance
@@ -606,6 +639,83 @@ here.
    ROLL/BOUNCE.
 7. **Mask polish** — per-drum-slot scope, per-processor bus selection.
 8. **Voice-leading bias** — v2 processor.
+
+### The second musical build — the Tension Workbench (decided 2026-06-09)
+
+The first build proved pitch as a *generated* dimension; the second makes harmony a
+*performed* one. Per §2.7 it ships as **one playable workflow**, not a sequence of
+dials. Durable summary here; full working detail in
+[doc/plans/2026-06-09-tension-workbench.md](plans/2026-06-09-tension-workbench.md)
+(plan = scaffolding, archived once executed).
+
+**The GRAVITY field.** Force-to-scale and the chord mask are *projections* — a legal
+set and a snap onto it; their dials only make material more correct. Tension needs a
+**ranked field**: every pitch class scored on a stability ladder computed live from
+masks the box already holds — root → root+fifth → chord tones (the bus PC-set,
+performable by holding a chord) → scale tones (global FTS scale) → chromatic
+neighbors-of-chord-tones. One bipolar knob (center detent = true pass-through, §2.3
+refined) moves gripped notes along the gradient:
+
+- **Pull (CCW):** tidy to scale → lock to chord → collapse toward root+fifth → the
+  ONE. Force-to-scale and chord-mask-at-max become *regions* of this knob.
+- **Push (CW):** **LEAN** (in-scale neighbors of chord tones — sus/add color;
+  correct tension) → **RUB** (chromatic neighbors of chord tones — maximum
+  dissonance lives a semitone from maximum consonance, so tense notes are
+  automatically leading tones) → **SLIP** (rotate the whole constraint set ±1
+  semitone — side-slipping; coherent alien).
+
+Two structural properties carry the music: **push constrains** (it narrows to the
+tense subset — structured wrongness reads as intent, loosening reads as grey; the §5
+identity principle applied to harmony), and **the release gesture is a cadence**
+(RUB tones resolve by semitone into chord tones, so a fast throw through the detent
+performs tension→resolution regardless of material). The §2.3 filter-sweep image
+made literal; a DJ-isolator hand transfers.
+
+**The cockpit (one page — the harmonic sibling of ROBOLOOP):**
+- **GRAVITY** — the global bipolar field knob.
+- **GRIP** — per-track field strength: *routing, not performance* — the send-amount
+  that makes the **room** lean under one hand. Mirrors the FTS global-value /
+  per-track-opt-in pattern (independent per-track fields read as noise, not force).
+- **RESOLVE** — bar-quantized ramp of GRAVITY to the detent, landing on the one.
+  Resolution *timing* separates an instrument from an effect; in the bundle, not
+  deferred.
+- **SHADE** — modal-brightness ladder (Lydian→…→Locrian, one flattened degree per
+  step, parallel modes) over the existing scale table; the *terrain* GRAVITY moves
+  across. Darkening under a static held chord makes the ground itself tense —
+  listen before designing that away.
+
+**Bundle contents (ships together):** the `SEQ_PROCESSOR_ID_TENSION` processor
+(render-stack, beside chord-mask — bounce-faithful by construction, and itself a
+test of the bounce model: freezing a pushed groove must need **zero new bake
+code**); global+GRIP plumbing; **deterministic grip** (hash, not live RNG —
+returnable states, exact HIL); RESOLVE; SHADE; the **ext-CC persistence fix** (the
+parked 0x96 bug is load-bearing here — and is wider than recorded: CCs 0x96–0x99
+all sit past the persisted range); a 2-minute rig recipe (chord track on a bus + a
+pitched-drum counterpoint track); HIL tests; the listen protocol. **Out of bundle,
+named so they don't creep:** inter-voice compression, register-spread
+(sample-mapped tension), the rhythmic/metric sibling, voice-leading-aware snapping,
+per-voice normal-track polyphony, TENSE-hit.
+
+**POC rule:** FTS off on gripped tracks (the emission snap would re-correct every
+pushed note); gravity's pull side contains scale-snap anyway. Track 2 dissolves the
+conflict properly.
+
+**Two-track sequencing:**
+1. **Track 1 — the Workbench** (days): everything above, ending at the cockpit page
+   and a workflow-level GO/NO-GO by ear.
+2. **Track 2 — pitch-chain migration** (gated on the GO; the licensed §2.7-corollary
+   rewrite): transpose → force-scale → limit move from emission into the render
+   stack **together** (FTS-after-transpose is what keeps bus-planing in-scale, so
+   they are entangled; the stack re-renders on transposer change the way chord-mask
+   already does on chord change). Deletes `SEQ_CORE_BakeForceScale` and ends the
+   per-effect bake program by construction; stack ordering becomes explicit (§9
+   wanted this); TRKMODE/FTS UX preserved via the phase-C slot-sync bridge; the
+   existing capture HIL tests are the regression net.
+
+**Listen protocol (the GO/NO-GO):** does full pull feel *inevitable*; does LEAN
+read as harmony, not error; does the detent feel like home; does push→RESOLVE land
+as a cadence on the one; does the *room* lean when three tracks share the knob; does
+a banked tense variation recalled cold still feel like the same place.
 
 ---
 
@@ -1415,6 +1525,46 @@ Append-only-ish; revise an entry only with a dated note.
   trivially; full Part II fits but tight** (~8 KB static before the now-gating MSP
   high-water, §10). Numbers/tables in §A5.
 
+**Tension Workbench (2026-06-09) — direction confirmed with the user; build gated on
+a workflow-level GO/NO-GO by ear.** *(Convention note, also adopted this date: new §9
+entries stay decision-sized; build narratives go to the reference doc — §9 had
+drifted toward a build journal, burying the multi-session spine it exists to be.)*
+- **§2.7 adopted: the unit of validation is a workflow, not a feature.** A dial
+  without its companions under-reads by ear; a false NO-GO from an incomplete rig
+  costs as much as unheard infrastructure. Corollary: infrastructure is licensed when
+  on a bundle's critical path. (User explicitly licensed major rewrites, including
+  rewrites that set up future features.)
+- **Force-to-tension = the GRAVITY field; the Tension Workbench is the next build.**
+  Bipolar render-stack processor over a live stability ladder (root / fifth /
+  bus-chord / scale / chromatic-rub / slip); pull ends in drone collapse, push sweeps
+  LEAN → RUB → SLIP; push *constrains* (structured wrongness), never randomizes; RUB
+  tones neighbor chord tones so the release gesture is cadential. Global value +
+  per-track GRIP (mirrors the FTS global pattern); RESOLVE = bar-quantized return;
+  SHADE = brightness-ladder terrain. Subsumes FTS and chord-mask-at-max as knob
+  regions. See §8 second build + the plan file for the full model.
+- **Deterministic-by-construction processors.** New processors gate with
+  `hash(track, instr, step, zone)`, not live RNG: same position = same notes =
+  returnable states (§1), exact HIL assertions, and a shrinking "random shapers stay
+  reset" freeze carve-out. The chord mask's per-render re-roll is **not** carried
+  forward (migrate when next touched).
+- **Born-as-processors rule (§3) + pitch-chain migration as Track 2.** New musical
+  transforms are born in the render stack; emission-time effects are legacy (each one
+  is invisible to `OutputActive` and forces bake code at bounce). Track 2, gated on
+  the workbench GO: migrate transpose → force-scale → limit into the stack
+  *together* (entangled — snapping after transpose is what keeps bus-planing
+  in-scale), deleting `SEQ_CORE_BakeForceScale` rather than extending the bake
+  program; implicit-dirty on transposer change mirrors chord-mask; TRKMODE/FTS UX
+  via the phase-C slot-sync bridge; existing capture HIL = regression net.
+- **ext-CC persistence fix promoted into the bundle.** The parked 0x96 bug breaks the
+  workflow under test (a knob that resets on pattern recall kills
+  sculpt→capture→return) — and source inspection 2026-06-09 shows it is **wider than
+  recorded**: `SEQ_FILE_B_TRK_EXT_CC_LAST = 0x95` while the chord-mask CCs occupy
+  **0x96–0x99** (strength, bus, drum-mask L/H) — all four reset on reload. Fix:
+  extend the persisted ext-CC range to a clean boundary (e.g. 0x9F) behind a new ext
+  tag (read path already dispatches on tag, old patterns stay loadable); GRIP's new
+  CC lands inside the extended range. Independent of the larger v3 *format* work
+  (processor/generator posture), which stays deferred.
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -1515,6 +1665,11 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   `SEQ_FILE_B_TRK_EXT_CC_LAST` to 0x96 (or the next clean boundary) and bump
   the v2 ext-tag — but format-bumps are a v3-format concern, so park here
   until the v3 format work lands.
+  **Update 2026-06-09 — un-parked, promoted into the Tension Workbench bundle**
+  (§8 second build): the bug is wider than recorded — CCs **0x96–0x99** (strength,
+  bus, drum-mask L/H) all sit past the persisted range and reset on reload. The
+  small ext-range bump (new ext tag, range to a clean boundary) ships with the
+  workbench, independent of the larger v3 format; GRIP's CC lands inside it.
 
 **Open puzzles (surfaced 2026-05-25, not gating, revisit with a clean baseline)**
 - **EDIT-LCD vs tick-time gate read disconnect.** While diagnosing the
@@ -1533,6 +1688,24 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   from `seq_trg_layer_value` somewhere I missed?). Investigate once
   `AUTO_TEST` baselines exist and we can A/B a clean state against the
   current broken one.
+
+**Tension Workbench (decide at the workbench, by ear — 2026-06-09)**
+- Zone boundaries/count on the bipolar sweep (proposed DRONE/CHORD/SCALE ←0→
+  LEAN/RUB/SLIP; collapsing LEAN into RUB or widening the detent dead-zone are
+  legitimate by-ear outcomes).
+- Pull floor: root-only vs root+fifth at full CCW.
+- Chord-root derivation for the ladder: recommended = lowest held note's PC via the
+  ARP_SORTED stack (bass proxy — inversions then *move the gravity floor*, which is
+  performable); fallback = global root when no chord held.
+- SHADE under a static held chord (terrain-tension: the chord goes "wrong" against
+  the darkened scale) — feature or confusion? Listen.
+- SHADE mode family: parallel modes recommended (root fixed = the brightness move);
+  relative variant rotates root — a different instrument, defer.
+- Physical page + GP allocation (decide with hardware in hand, §A3 precedent).
+- Global GRAVITY persistence: performance state (like window source, §3) vs session
+  config — decide when saving feels wrong.
+- Track 2 edges: echo (emission-scheduled repeats), the live/jam input path, and
+  per-step Root/Scale par-layer overrides against a stack-resident pitch chain.
 
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
@@ -1595,6 +1768,20 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
 - **Source / Output layers; Processor stack; quiet/editing/sweeping** — render-cache
   terms (provisional, §A2).
 - **Group / track budget** — 4 groups × 4 tracks = 16; the currency of concurrency.
+- **GRAVITY field / tension processor** — bipolar render-stack processor moving
+  gripped notes along the stability ladder; pull → scale/chord/root, push →
+  LEAN/RUB/SLIP; center detent = pass-through (§8 second build).
+- **Stability ladder** — live pitch-class ranking computed from masks the box
+  already holds: root → fifth → bus-chord tones → scale tones → chromatic
+  neighbors-of-chord-tones.
+- **GRIP** — per-track strength of the global gravity field; routing (the
+  send-amount that makes the room lean), not a second performance knob.
+- **RESOLVE** — bar-quantized ramp of GRAVITY to the detent, landing on the one;
+  the cadence gesture.
+- **SHADE** — modal-brightness ladder dial (Lydian→…→Locrian, parallel modes)
+  selecting the terrain the field moves across.
+- **Workflow bundle** — the smallest *playable loop* judgeable by ear (§2.7); the
+  unit GO/NO-GO gates sit on.
 
 ---
 ---
@@ -1618,11 +1805,18 @@ mid-stack transform. Robotize migrates from a monolith into typed processors
 performable across the full range incl. off (§2.3)** — pass-through at 0 is
 mandatory; if a processor can't sweep 0→max it's the wrong abstraction.
 
-- **Pitch (note→note):** chord-tone mask *(first build)*; voice-leading bias *(v2)*;
-  octave-shuffle, inversion, retrograde-pitch *(speculative)*; transpose-region;
-  note-decimate/stuck.
+- **Pitch (note→note):** chord-tone mask *(shipped; subsumed as a GRAVITY region)*;
+  **GRAVITY/tension field** *(promoted to Part I 2026-06-09 — §8 second build)*;
+  voice-leading bias *(v2)*; inter-voice interval compression *(v2 — scale-agnostic
+  texture tension for the drum-counterpoint rig: force concurrent lines into
+  semitone clusters or open fifths)*; register-spread *(the tension dial for
+  sample-mapped destinations, where PC-tension is meaningless but range/constraint
+  still read as intensity)*; octave-shuffle, inversion, retrograde-pitch
+  *(speculative)*; transpose-region; note-decimate/stuck.
 - **Gate (gate→gate):** conditional triggers *(special — per-step state; see below)*;
-  density-thin; density-fill; stutter; reverse; probability-override.
+  metric-weight tension *(rhythmic sibling of GRAVITY — pull gates onto strong
+  beats, push displaces them off; v2)*; density-thin; density-fill; stutter;
+  reverse; probability-override.
 - **Velocity / length:** robotize-velocity *(rebuild)*; dynamics-compress/expand;
   accent-pattern; robotize-length *(rebuild)*; staccato/legato.
 - **Source view:** window (position / length / rate / direction / wrap).

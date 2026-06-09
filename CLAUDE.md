@@ -24,9 +24,17 @@ musical instrument. One-man project, no timelines, iterative.
   them performant. The §8 build order is music-first on purpose — do not reorder it
   to put infrastructure (the render-cache) first.
 - Constraints are *materials*, not guardrails: every processor dial must sweep 0→max
-  including a true pass-through at 0.
+  including a true pass-through at 0 (bipolar dials: pass-through at the center
+  detent).
 - Build toward a sound you can hear, not the next piece of capability. When in doubt,
   build less and listen sooner.
+- The unit of by-ear validation is a **workflow bundle** — the smallest *playable
+  loop* (set up fast, sweep, release, capture, return), not the smallest feature.
+  GO/NO-GO gates sit at the workflow level; infrastructure is licensed when it's on
+  a bundle's critical path (design doc §2.7).
+- New musical transforms are **born as render-stack processors**, never emission-time
+  effects (emission effects are invisible to `OutputActive` and force bake code at
+  bounce — design doc §3).
 
 ## Plan storage convention
 
