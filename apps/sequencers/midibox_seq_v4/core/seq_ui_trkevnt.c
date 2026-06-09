@@ -136,8 +136,10 @@ static const layer_config_t layer_config[] = {
   { SEQ_EVENT_MODE_CC,       8,         128,        8,         128,      1 },
   { SEQ_EVENT_MODE_CC,       4,         256,        8,         256,      1 },
   { SEQ_EVENT_MODE_Drum,     4,          16,        2,          64,     16 },
-  { SEQ_EVENT_MODE_Drum,     4,          16,        2,         128,     16 },
-  { SEQ_EVENT_MODE_Drum,     4,          16,        1,         256,     16 },
+  // NOTE: 16 drums cap at 256 trg bytes (SEQ_TRG_MAX_BYTES), i.e. 64 steps x 2
+  // trg layers. Upstream 9dee4ede added 4*16/2*128 and 4*16/1*256 @16 drums
+  // (both 512 bytes) which silently fail SEQ_TRG_TrackInit -> never initialize.
+  // Removed here. For 128-step drums use 1 trg layer (e.g. 1*128 @8 below).
   { SEQ_EVENT_MODE_Drum,     1,          64,        2,          64,     16 },
   { SEQ_EVENT_MODE_Drum,     2,          32,        1,         128,     16 },
   { SEQ_EVENT_MODE_Drum,     1,         128,        2,         128,      8 },
@@ -1457,11 +1459,16 @@ static s32 CopyPreset(u8 track, u8 config)
   if( config >= (sizeof(layer_config)/sizeof(layer_config_t)) )
     return -1; // invalid config
 
-  layer_config_t *lc = (layer_config_t *)&layer_config[selected_layer_config];
+  layer_config_t *lc = (layer_config_t *)&layer_config[config]; // use the bounds-checked arg, not the global
 
-  // partitionate layers and clear all steps
-  SEQ_PAR_TrackInit(track, lc->par_steps, lc->par_layers, lc->instruments);
-  SEQ_TRG_TrackInit(track, lc->trg_steps, lc->trg_layers, lc->instruments);
+  // partitionate layers and clear all steps -- bail out (before touching the
+  // event mode) if the config exceeds the par/trg memory budget, otherwise the
+  // track is left half-initialized and the UI silently loops back to
+  // "Please initialize the track" (see SEQ_PAR/TRG_MAX_BYTES).
+  if( SEQ_PAR_TrackInit(track, lc->par_steps, lc->par_layers, lc->instruments) < 0 )
+    return -1; // par layer config too large to fit SEQ_PAR_MAX_BYTES
+  if( SEQ_TRG_TrackInit(track, lc->trg_steps, lc->trg_layers, lc->instruments) < 0 )
+    return -1; // trg layer config too large to fit SEQ_TRG_MAX_BYTES
 
 #if 0
   // confusing if assignments are not changed under such a condition
@@ -1527,9 +1534,10 @@ static void InitReq(u32 dummy)
   u8 visible_track = SEQ_UI_VisibleTrackGet();
 
   // TODO: copy preset for all selected tracks!
-  CopyPreset(visible_track, selected_layer_config);
-
-  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Track has been", "initialized!");
+  if( CopyPreset(visible_track, selected_layer_config) < 0 )
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "Config too large -", "NOT initialized!");
+  else
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Track has been", "initialized!");
 }
 
 

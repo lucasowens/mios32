@@ -51,6 +51,7 @@ from .sysex import (
     CMD_TRACK_DRUM_PAR_GET,
     CMD_TRACK_PAR_SET,
     CMD_TRACK_PAR_GET,
+    CMD_GLOBAL_SCALE_SET,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -721,6 +722,32 @@ class Board:
         if payload[5] != CMD_STATUS_OK:
             raise ValueError(f"TRACK_PAR_GET status {payload[5]:#04x}")
         return payload[4]
+
+    def global_scale_set(
+        self, scale: int, root_selection: int = 0, keyb_root: int = 0,
+        timeout: float = 1.0,
+    ) -> None:
+        """Pin the global scale/root (seq_core_global_scale +
+        global_scale_root_selection + keyb_scale_root) that force-to-scale reads
+        when a track has no per-step Scale/Root par-layer. board.reset() does NOT
+        touch these, so force-scale tests must set them explicitly for a
+        deterministic key. scale = seq_scale_table index (0 = Major);
+        root_selection 0 -> root from keyb_root (0..11), >0 -> root_selection-1."""
+        if not 0 <= scale <= 127:
+            raise ValueError(f"scale out of range: {scale}")
+        if not 0 <= root_selection <= 127:
+            raise ValueError(f"root_selection out of range: {root_selection}")
+        if not 0 <= keyb_root <= 127:
+            raise ValueError(f"keyb_root out of range: {keyb_root}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_GLOBAL_SCALE_SET, bytes([scale, root_selection, keyb_root]))
+        )
+        payload = self.wait_for_sysex(CMD_GLOBAL_SCALE_SET, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short GLOBAL_SCALE_SET reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise ValueError(f"GLOBAL_SCALE_SET status {payload[3]:#04x}")
 
     def bounce(
         self,

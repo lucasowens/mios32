@@ -67,6 +67,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_UI_TRACK_GET         0x65
 #define CMD_TRACK_PAR_GET        0x66
 #define CMD_TRACK_PAR_SET        0x67
+#define CMD_GLOBAL_SCALE_SET     0x68
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -810,6 +811,37 @@ static void cmd_track_par_set(mios32_midi_port_t port, const u8 *payload, u8 ple
 }
 
 
+// CMD_GLOBAL_SCALE_SET payload: [scale, root_selection, keyb_root]
+// Reply payload: [scale, root_selection, keyb_root, status]   status 0x01 = ok.
+//
+// Sets the three globals SEQ_CORE_FTS_GetScaleAndRoot reads when a track has
+// FORCE_SCALE on and no per-step Scale/Root par-layer override. Lets force-scale
+// tests pin a deterministic key — board.reset() does NOT touch global scale, so
+// without this the snapped pitches would depend on whatever the session last set.
+//   scale          = seq_scale_table index (0 = Major)
+//   root_selection = 0 -> root taken from keyb_root; >0 -> root = root_selection-1
+//   keyb_root      = 0..11 (used only when root_selection == 0)
+static void cmd_global_scale_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 3 ) {
+    send_reply(port, CMD_GLOBAL_SCALE_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 scale          = payload[0] & 0x7f;
+  u8 root_selection = payload[1] & 0x7f;
+  u8 keyb_root      = payload[2] & 0x7f;
+  seq_core_global_scale                = scale;
+  seq_core_global_scale_root_selection = root_selection;
+  seq_core_keyb_scale_root             = keyb_root;
+  reply[0] = scale;
+  reply[1] = root_selection;
+  reply[2] = keyb_root;
+  reply[3] = 0x01;
+  send_reply(port, CMD_GLOBAL_SCALE_SET, reply, sizeof(reply));
+}
+
+
 // CMD_TRACK_CONFIG payload: [track, midi_port, midi_chn]
 //   track:     0..15
 //   midi_port: raw mios32_midi_port_t value (e.g. 0x10 = USB0/USB1...)
@@ -1477,6 +1509,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRACK_PAR_SET:
             cmd_track_par_set(port, payload_buf, payload_len);
+            break;
+          case CMD_GLOBAL_SCALE_SET:
+            cmd_global_scale_set(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

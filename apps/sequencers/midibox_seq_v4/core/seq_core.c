@@ -722,6 +722,166 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
 }
 
 
+/////////////////////////////////////////////////////////////////////////////
+// Fork: bake the deterministic force-to-scale snap into a captured track's Note
+// par-layers, so the frozen tape holds the exact pitches that were HEARD — and
+// FORCE_SCALE can then stay reset (the §9 freeze-faithfulness axis split).
+//
+// Why bake instead of preserve the FORCE_SCALE flag: the snap is EMISSION-time
+// (the tick, applied to each played note AFTER transpose — see the
+// trkmode_flags.FORCE_SCALE block in SEQ_CORE_Tick), and is NEVER baked into
+// OutputActive, so the captured Note layer holds the RAW, pre-scale note.
+// Preserving the flag would re-snap LIVE against whatever seq_core_global_scale/
+// root is at playback time — a later key change would silently re-pitch the
+// frozen copy. Baking the heard pitch makes the copy immune to that (the mandate:
+// a frozen copy must still sound like what was heard, full stop).
+//
+// Reproduces the DETERMINISTIC emission pitch chain for each step:
+//     heard = noteLimit( forceScale( transpose( raw_par_note ) ) )
+//   - scale/root per step mirroring SEQ_CORE_FTS_GetScaleAndRoot (global scale/
+//     root + per-step Scale/Root par-layers — which ResetGenerativeForBounce then
+//     neutralizes to None, so they MUST be resolved HERE, before that reset).
+//   - the static transpose offset is reproduced ONLY when it was deterministic at
+//     emission (Normal playmode, global transpose off — matching the Normal-mode
+//     path of SEQ_CORE_Transpose). In Transpose/Arp playmode or with global
+//     transpose on, the offset folds in live-keyboard input we cannot replay, so
+//     the raw captured note is snapped as-is.
+//   - the note limit (SEQ_CORE_Limit, a Pre-FX applied AFTER the snap) is baked in
+//     too, since its bounds are static CCs that ResetGenerativeForBounce clears.
+//     (The per-step no_fx Nth gate that can skip the limit at emission is
+//     generative and not reproduced — a documented micro-caveat.)
+// The random/generative shapers between the par read and the snap (groove timing,
+// humanize, LFO) are NOT reproduced — they are reset on the generation axis and
+// were never in the captured tape either.
+//
+// Reads AND writes the SOURCE buffer (seq_par_layer_value) DIRECTLY, NOT via
+// SEQ_PAR_Get/Set: SEQ_PAR_Set writes the source but SEQ_PAR_Get reads the
+// double-buffered OUTPUT mirror (seq_par.c), which for a freshly-written capture
+// destination still holds pre-capture data until the next render+flip — so the
+// captured notes (and per-step Scale/Root layers) live ONLY in the source buffer
+// at this point. The index math mirrors SEQ_PAR_Get/Set with par_instrument = 0.
+//
+// Contract: call on a track whose live par buffer (seq_par_layer_value) ALREADY
+// holds the captured output and whose tcc STILL carries the SOURCE's pre-reset
+// config (FORCE_SCALE, playmode, transpose, limits, link_par_layer_scale/root) —
+// i.e. AFTER the capture copy, BEFORE SEQ_CC_ResetGenerativeForBounce. No-op
+// unless FORCE_SCALE is set. Marks the track render-dirty so the output mirror
+// refreshes from the baked source.
+//
+// Scope (round 1 — force-scale): non-drum Note par-layers only.
+//   - Chord par-layers store a chord INDEX (expanded + snapped per-voice at
+//     emission), not a note, so they can't be snapped at the par level — Chord
+//     layers are left raw (rare alongside FORCE_SCALE; a noted follow-up).
+//   - Drum tracks are not baked: a drum note can fall back to a shared per-drum
+//     CONSTANT, and per-step Scale/Root layers would snap that one constant to
+//     different notes on different steps — unbakeable into a single value (and
+//     force-scaled drums are exotic).
+//   - Note value 0 is a rest in a non-drum Note layer (GetEvents emits nothing) —
+//     left untouched so a rest stays a rest.
+// No critical section: this is a per-byte SEQ_PAR_Set sweep over the just-captured
+// buffer, like the memcpy in the capture verbs — a torn single-byte read by the
+// tick is benign and the post-verb state is consistent (capture already carries a
+// deliberate brief glitch on the affected track).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_BakeForceScale(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return -1;
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  // Only force-scale tracks carry an un-baked snap; everything else already
+  // captured the heard pitch directly into the Note layer.
+  if( !tcc->trkmode_flags.FORCE_SCALE )
+    return 0;
+
+  // Drum mode is out of scope (see header) — leave the captured notes as-is.
+  if( tcc->event_mode == SEQ_EVENT_MODE_Drum )
+    return 0;
+
+  // Reproduce the static transpose offset only when it was deterministic at
+  // emission. SEQ_CORE_Transpose's Normal-playmode path applies just
+  // transpose_oct/transpose_semi (the >=8 wrap = signed -8..+7); any other
+  // playmode (or global transpose enabled) folds in live-keyboard input that
+  // cannot be replayed, so we snap the raw captured note in those cases.
+  int inc = 0;
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Normal && !seq_core_global_transpose_enabled ) {
+    int inc_oct  = tcc->transpose_oct;   if( inc_oct  >= 8 ) inc_oct  -= 16;
+    int inc_semi = tcc->transpose_semi;  if( inc_semi >= 8 ) inc_semi -= 16;
+    inc = 12*inc_oct + inc_semi;
+  }
+
+  // Note limit bounds (mirror SEQ_CORE_Limit): no limit unless either is set;
+  // an unset upper means 127; lower>upper swaps. Resolved once — static CCs.
+  u8 lim_lo = tcc->limit_lower;
+  u8 lim_hi = tcc->limit_upper;
+  u8 do_limit = (lim_lo || lim_hi);
+  if( do_limit ) {
+    if( !lim_hi )
+      lim_hi = 127;
+    if( lim_lo > lim_hi ) { u8 tmp = lim_hi; lim_hi = lim_lo; lim_lo = tmp; }
+  }
+
+  u16 num_steps  = (u16)SEQ_PAR_NumStepsGet(track);
+  u8  num_layers = (u8)SEQ_PAR_NumLayersGet(track);
+  if( !num_steps || !num_layers )
+    return 0;
+
+  // Source buffer, read+written directly (see header — SEQ_PAR_Get reads the
+  // not-yet-refreshed output mirror). par_instrument is 0 for non-drum.
+  u8 *src = seq_par_layer_value[track];
+
+  u16 step;
+  for(step=0; step<num_steps; ++step) {
+    // Per-step scale/root — mirrors SEQ_CORE_FTS_GetScaleAndRoot, reading the
+    // Scale/Root par-layers from the SOURCE buffer (a 0 value means "fall back to
+    // the global", a non-zero value is the selection+1).
+    u8 scale, root;
+    if( tcc->link_par_layer_scale >= 0 ) {
+      u32 ix = (u32)tcc->link_par_layer_scale * num_steps + step;
+      u8 s = (ix < SEQ_PAR_MAX_BYTES) ? src[ix] : 0;
+      scale = s ? (s - 1) : seq_core_global_scale;
+    } else {
+      scale = seq_core_global_scale;
+    }
+    u8 root_selection = seq_core_global_scale_root_selection;
+    if( tcc->link_par_layer_root >= 0 ) {
+      u32 ix = (u32)tcc->link_par_layer_root * num_steps + step;
+      u8 r = ((ix < SEQ_PAR_MAX_BYTES) ? src[ix] : 0) % 13;
+      root = r ? (r - 1) : ((root_selection == 0) ? seq_core_keyb_scale_root : (root_selection - 1));
+    } else {
+      root = (root_selection == 0) ? seq_core_keyb_scale_root : (root_selection - 1);
+    }
+
+    u8 layer;
+    for(layer=0; layer<num_layers; ++layer) {
+      if( tcc->lay_const[layer] != SEQ_PAR_Type_Note )
+        continue; // only Note layers carry snappable note values
+
+      u32 ix = (u32)layer * num_steps + step;
+      if( ix >= SEQ_PAR_MAX_BYTES )
+        continue;
+      u8 v = src[ix];
+      if( !v )
+        continue; // 0 == rest in a Note layer — leave it
+
+      int n = (int)v + inc;
+      n = SEQ_CORE_TrimNote(n, 0, 127);                // transpose clamp
+      n = SEQ_SCALE_NoteValueGet((u8)n, scale, root);  // the emission force-scale snap
+      if( do_limit )
+        n = SEQ_CORE_TrimNote(n, lim_lo, lim_hi);       // post-snap note limit (Pre-FX)
+      src[ix] = (u8)n;
+    }
+  }
+
+  // Direct source writes bypass SEQ_PAR_Set's auto-dirty; mark the track so the
+  // next render refreshes the output mirror from the baked source.
+  SEQ_CORE_RenderDirtySet(track);
+
+  return 0;
+}
+
+
 // Static snapshot buffers for the capture-to-slot verb: preserve the source
 // track's RAM across the slot write without an SD round-trip (a non-zero
 // remix_map silently skips the source track on reload, and play_section lives
@@ -767,6 +927,11 @@ s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_patte
   // 2. Overwrite the source layers with the track's computed output
   //    (forced quiet render inside the primitive → sweep-safe, lossless).
   SEQ_CORE_CaptureTrackOutput(src_track, seq_par_layer_value[src_track], seq_trg_layer_value[src_track]);
+
+  // 2b. Bake the force-to-scale snap into the captured notes while the source's
+  //     scale context is still intact (before the reset neutralizes FORCE_SCALE +
+  //     Scale/Root layers), so the frozen tape holds the heard pitches.
+  SEQ_CORE_BakeForceScale(src_track);
 
   // 3. Sanitize generative CC so the frozen slot plays back as tape, not
   //    re-modulated material.
@@ -832,21 +997,28 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
   SEQ_PAR_TrackInit(dst_track, par_steps, par_layers, num_instr);
   SEQ_TRG_TrackInit(dst_track, trg_steps, trg_layers, num_instr);
 
-  // copy the lower-48 CCs + drum par-layer assignments (layer *types*),
-  // exactly as PASTE_CLEAR_MODE_TRACK does, so the captured bytes are
-  // interpreted correctly on dst.
+  // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
+  // the source's whole 0x00..0x7f CC space so length/clock/groove/trigger
+  // assignments/routing travel with the frozen notes — not just the lay_const +
+  // drum par-asg (which left the copy at dst's defaults: wrong length/clock,
+  // wrong gates, no groove). ResetGenerativeForBounce below strips the generation
+  // axis; the deterministic shaping (groove/length/clkdiv/structural trg-asg) stays.
   {
     int i;
-    for(i=0; i<48; ++i)
+    for(i=0; i<128; ++i)
       SEQ_CC_Set(dst_track, i, SEQ_CC_Get(src_track, i));
-    for(i=0; i<4; ++i)
-      SEQ_CC_Set(dst_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i,
-                 SEQ_CC_Get(src_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i));
+    SEQ_CC_LinkUpdate(dst_track);
   }
 
   // 2. Lossless output → dst source (forced quiet render → sweep-safe). Valid
   //    raw copy because dst geometry now equals src geometry.
   SEQ_CORE_CaptureTrackOutput(src_track, seq_par_layer_value[dst_track], seq_trg_layer_value[dst_track]);
+
+  // 2b. Bake force-to-scale into dst's captured notes. dst's tcc now mirrors the
+  //     source (full-config inherit above incl. FORCE_SCALE + Scale/Root links),
+  //     so the per-step snap resolves identically — done before the reset strips
+  //     that context.
+  SEQ_CORE_BakeForceScale(dst_track);
 
   // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated.
   SEQ_CC_ResetGenerativeForBounce(dst_track);
@@ -863,15 +1035,16 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 // Static snapshot of the destination group (4 tracks) for the capture-to-slot-
 // track verb: preserve the dst group's live RAM across the load-modify-save so
 // the operation doesn't disturb what's currently loaded/playing there. Plus a
-// small snapshot of the source's config (captured before the load, in case the
-// source shares the dst group) used for the geometry/layer-type inherit:
-// [0] = event_mode, [1..48] = CC 0..47, [49..52] = drum par-layer assignments.
+// snapshot of the source's FULL CC config (captured before the load, in case the
+// source shares the dst group). The whole 0x00..0x7f CC space, so the frozen copy
+// faithfully inherits length/clock/groove/trigger-assignments/routing — not just
+// the lay_const + drum par-asg the old lower-48 inherit copied.
 static seq_cc_trk_t slottrk_cc_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
 static u8           slottrk_par_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_PAR_MAX_BYTES];
 static u8           slottrk_trg_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_TRG_MAX_BYTES];
 static char         slottrk_name_snap[20];
 static u8           slottrk_play_section_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
-static u8           slottrk_src_cc[53];
+static u8           slottrk_src_cc[128];
 
 /////////////////////////////////////////////////////////////////////////////
 // Fork: capture src_track's computed output into dst_track of slot (bank,
@@ -908,11 +1081,13 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   u8  src_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
   u16 src_trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
   u8  src_trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
-  slottrk_src_cc[0] = (u8)SEQ_CC_Get(src_track, SEQ_CC_MIDI_EVENT_MODE);
-  for(i=0; i<48; ++i)
-    slottrk_src_cc[1+i] = (u8)SEQ_CC_Get(src_track, i);
-  for(i=0; i<4; ++i)
-    slottrk_src_cc[49+i] = (u8)SEQ_CC_Get(src_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i);
+  // Snapshot the source's FULL CC config (0x00..0x7f). The frozen copy must
+  // reproduce what was heard — length (0x4d), clock divider (0x4c), groove
+  // (0x52/0x53) and the trigger-layer assignments (0x60..0x68) all live above the
+  // old lower-48 inherit, so a partial copy left the copy running at the dst
+  // slot's defaults ("too fast" wrong length/clock, wrong gates, no groove).
+  for(i=0; i<128; ++i)
+    slottrk_src_cc[i] = (u8)SEQ_CC_Get(src_track, i);
 
   // 2. Snapshot the dst group's live RAM (4 tracks) so we can restore it.
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
@@ -931,16 +1106,27 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   if( status >= 0 ) {
     // 4. Inherit src config/geometry onto dst_track, write the captured output,
     //    sanitize generative CC (incl. the gate-assignment-preserving fix).
-    SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[0]);
+    SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE]);
     SEQ_CC_LinkUpdate(dst_track);
     SEQ_PAR_TrackInit(dst_track, src_par_steps, src_par_layers, src_num_instr);
     SEQ_TRG_TrackInit(dst_track, src_trg_steps, src_trg_layers, src_num_instr);
-    for(i=0; i<48; ++i)
-      SEQ_CC_Set(dst_track, i, slottrk_src_cc[1+i]);
-    for(i=0; i<4; ++i)
-      SEQ_CC_Set(dst_track, SEQ_CC_PAR_ASG_DRUM_LAYER_A+i, slottrk_src_cc[49+i]);
+    // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
+    // the source's whole 0x00..0x7f CC space so length/clock/groove/trigger
+    // assignments/routing travel with the frozen notes. SEQ_CC_ResetGenerativeForBounce
+    // below strips the generation axis (mode/direction/transpose/robotize/echo/lfo/
+    // random) while keeping the deterministic shaping (groove, length, clkdiv,
+    // structural trg-asg). EVENT_MODE re-set in the loop is a harmless no-op
+    // (already set above; the setter only re-links, never re-partitions).
+    for(i=0; i<128; ++i)
+      SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
+    SEQ_CC_LinkUpdate(dst_track);
     memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
+    // Bake force-to-scale into the captured notes now living on dst_track. dst's
+    // tcc carries the source's full config (FORCE_SCALE + Scale/Root links copied
+    // above), so the per-step snap resolves as the source heard it — before the
+    // reset neutralizes that context.
+    SEQ_CORE_BakeForceScale(dst_track);
     SEQ_CC_ResetGenerativeForBounce(dst_track);
 
     // 5. Write the dst group (now carrying the captured track) back to the slot.

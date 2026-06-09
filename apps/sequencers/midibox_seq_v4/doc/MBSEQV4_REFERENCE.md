@@ -22,10 +22,35 @@ These are the invariants TK enforces across the codebase. Violating any of them 
 ### Real-time before everything
 
 - Musical resolution is **384 ppqn** ([seq_core.c:267](../core/seq_core.c#L267), `SEQ_BPM_PPQN_Set(384)`) — 16× MIDI clock. That is the unit step events are scheduled in.
-- FreeRTOS schedules `SEQ_TASK_Period1mS()` every 1 ms ([tasks.h:114](../core/tasks.h#L114)); inside that task, any BPM ticks that fell due since the last call are processed in a batch via `SEQ_CORE_Tick()`. So a single 1ms scheduling slot may carry zero, one, or several musical ticks depending on tempo — the per-slot processing budget is the jealously guarded resource, not "one event per ms."
+- FreeRTOS runs the sequencer tick batch in `SEQ_TASK_MIDI()` every 1 ms ([app.c:830](../core/app.c#L830), driven by `TASK_MIDI` on `vTaskDelayUntil(…, 1/portTICK_RATE_MS)` with `configTICK_RATE_HZ = 1000` — *not* `SEQ_TASK_Period1mS()`; a long-standing doc slip corrected 2026-06-08). Inside that task `SEQ_CORE_Handler` → `SEQ_CORE_Tick()` processes any BPM ticks that fell due since the last call in a batch, then `SEQ_MIDI_OUT_Handler` emits them. So a single 1ms scheduling slot may carry zero, one, or several musical ticks depending on tempo — the per-slot processing budget is the jealously guarded resource, not "one event per ms." (See the **Output timing, latency & jitter** deep-dive below for the full trigger→wire pipeline.)
 - At 120 BPM, 384 ppqn ≈ 768 ticks/sec ≈ 1.3 ms/tick; at higher tempos several ticks may need to fire inside one 1ms slot. This is exactly why `bpm_tick_prefetch_req` / `bpm_tick_prefetched` exist ([seq_core.c:130](../core/seq_core.c#L130)) — to pre-compute upcoming events so the slot only has to dispatch them.
 - `STOPWATCH_PERFORMANCE_MEASURING` at [seq_core.c:66](../core/seq_core.c#L66) toggles instrumentation; results are shown in the System Info page.
 - Long-running work is moved *outside* the per-tick path — see [seq_core.c:547](../core/seq_core.c#L547) ("this code is outside SEQ_CORE_Tick() to save stack space!"). Pattern switching is one example; it runs in `SEQ_CORE_Handler()`, not `SEQ_CORE_Tick()`.
+
+### Output timing, latency & jitter — full pipeline (verified 2026-06-08)
+
+How a sequencer event reaches the wire, and where timing accuracy is won and lost. The **mechanism is source-verified** (cross-checked by an adversarial multi-agent pass over this fork); the absolute **magnitudes are inferred from structure, not yet scope-measured** on hardware — see the measurement gap at the end. Symbols are the durable anchors; line numbers drift.
+
+**Headline:** long-term tempo is rock-solid, but *per-event output placement is quantized to ~1 ms by a software polling task* — and that quantum applies to **DIN output too**, not just USB. The µs-accurate hardware timer's resolution is discarded at the output stage. The often-assumed "high-priority clock task ⇒ tight timing" is misleading here: the task is high-*priority* but only 1 ms-*resolution*.
+
+**1 — The clock source emits nothing.** `SEQ_BPM_Timer_Master` / `_Slave` (`seq_bpm.c`) run in a `TIM2` IRQ at `MIOS32_IRQ_PRIO_HIGHEST` and do **only** counter increments (`++bpm_tick; ++bpm_req_clk_ctr;`) — no MIDI. Master fires per internal tick (≈1.3 ms at 120 BPM / 384 ppqn; per-BPM `MIOS32_TIMER_ReInit`, period floored at 250 µs); slave is a fixed 250 µs interpolation timer with **no PLL/averaging** of incoming clock (only the *displayed* BPM is averaged). Tempo derivation is µs-accurate; emission is not driven from here.
+
+**2 — Emission is task-bound at ~1 ms (Quantizer #1).** All generation + dispatch happen in `SEQ_TASK_MIDI()` ([app.c:830](../core/app.c#L830)). Per pass: `SEQ_CORE_Handler` → `SEQ_CORE_Tick` drains all due ticks (generating notes + queuing the 0xF8 clock via `SEQ_MIDI_ROUTER_SendMIDIClockEvent`), then `SEQ_MIDI_OUT_Handler` flushes every queued item with `timestamp ≤ bpm_tick`. An event becomes *due* at a precise µs moment but is *released* 0–1 ms later, at the next task wake. ~1 ms is a floor, not a guarantee — under load the task can wake later (catch-up logic drops missed wakeups), never sooner.
+
+**3 — The scheduler itself is well-built.** `SEQ_MIDI_OUT` (`seq_midi_out.c`) is a sorted linked list keyed on `bpm_tick` (not wall-clock — so queued events stay in sync across tempo changes), with deterministic same-tick ordering `Clk/Tempo < CC < Note`. Pool `SEQ_MIDI_OUT_MAX_EVENTS` = **256** on this fork ([mios32_config.h:142](../mios32/mios32_config.h#L142); static `.bss` via malloc-method 3, ~4 KB; mainline default 128). Overflow **drops the new On/OnOff event silently** (`seq_midi_out_dropouts`; reserves 2 slots so an Off always fits) — a missing note, never a stuck one. Insert is O(n) (explicit "needs a better algorithm" TODO) — cost grows with queue depth inside the 1 ms budget. Per-port signed `ppqn_delay` trim exists and is enabled (`SEQ_MIDI_OUT_SUPPORT_DELAY`; the "MClk Delay" UI item, ±ms per port).
+
+**4 — Transports diverge:**
+- **DIN/UART:** `MIOS32_MIDI_SendPackage` → UART TX ring; the USART **TXE IRQ** shifts bytes at 31.25 kbaud (~320 µs/byte) asynchronously. `MIOS32_UART_MIDI_Periodic_mS` does **not** flush TX. So DIN carries **only** Quantizer #1 + byte serialization — *no* second 1 ms stage.
+- **USB (primary):** USB OTG **Full-Speed**, **bulk** endpoints (so `bInterval` is ignored — *not* a polling-interval-bounded interrupt endpoint), 64-byte packets = 16 events/transfer, single TX buffer (no double-buffering), 64-package rings. TX is **not** SOF-synced (SOF class callback is `NULL`, `mios32_usb.c`); it's flushed by a *separate* 1 ms task (`MIOS32_MIDI_Periodic_mS` → `MIOS32_USB_MIDI_TxBufferHandler`, from `main.c`) **(Quantizer #2)** plus EP-completion IRQ chaining, then rides the USB **1 ms FS frame (Quantizer #3)**. A full ring busy-waits up to 10000 spins (the "MIDI Protocol TIMEOUT" stall when a host stops draining), blocking the `MUTEX_MIDIOUT`-held task.
+
+**Net (inferred):** DIN worst-case ≈ ~1 ms + serialization; USB worst-case ≈ ~2 ms+ for an EP-idle first event (two independently-phased 1 ms task stages + the FS frame). A *continuous* USB stream collapses follow-on latency to well under 1 ms via EP-completion chaining. The USB transport is **byte-for-byte mainline MIOS32** — only `MIOS32_USB_MIDI_NUM_PORTS = 4` differs from stock.
+
+**Structural vs. tunable:**
+- ❌ Structural (not firmware-fixable): the USB FS 1 ms frame — only USB-HS escapes it, and HS is not wired up on this core.
+- ✅ Tunable / real headroom: shrink **Quantizer #1** (drive `SEQ_MIDI_OUT_Handler` from a faster periodic or the tick-IRQ bottom-half); the **0xF8 clock is queued like a note** — emitting it directly from the `TIM2` IRQ is the single highest-value jitter fix; SOF-synced USB flush; larger pool / better insert; replace the busy-wait with non-blocking + an explicit drop policy.
+- Practical, zero-code: route the master clock + timing-critical tracks over **DIN/TRS**, not USB — it skips Quantizers #2/#3 today.
+
+**Measurement gap:** no scope capture of this device exists yet; the ~1 ms / ~2 ms figures are reasoned from the 1 ms task + 1 ms frame structure and bracketed by analogous-device literature (TD-3 ~0.08 ms DIN vs ~0.44 ms USB; Sound on Sound ~0.2 vs ~1.9 ms). The design-doc **§A4 HIL test plan** (tick-interval σ, MIDI-out scheduling jitter) is the right instrument and is **not yet built** — that is the empirical confirmation step.
 
 ### Per-track determinism
 
@@ -55,9 +80,10 @@ These are the invariants TK enforces across the codebase. Violating any of them 
 
 ### Task boundaries
 
-- `SEQ_TASK_MIDI()` — receives MIDI, advances notestacks; high priority.
-- `SEQ_TASK_Period1mS()` — BPM clock, step generation; highest priority.
-- `SEQ_TASK_Period1mS_LowPrio()` — UI, SD card, logging.
+Priorities verified in [tasks.c:56-58](../mios32/tasks.c#L56) (corrected 2026-06-08 — the old note had the top two swapped):
+- `SEQ_TASK_MIDI()` — **highest app priority (`tskIDLE_PRIORITY+4`)**. The task that actually emits all MIDI: sequencer tick batch / step generation (`SEQ_CORE_Handler` → `SEQ_CORE_Tick`), timestamped-scheduler drain (`SEQ_MIDI_OUT_Handler`), and CV update (`SEQ_CV_Update`), all under `MUTEX_MIDIOUT` ([app.c:830](../core/app.c#L830)); also receives MIDI / advances notestacks.
+- `SEQ_TASK_Period1mS()` — priority `+2`. Pattern switching, high-prio UI LEDs, menu handler, BPM sweep, button handlers ([app.c:519](../core/app.c#L519)). Does **not** generate steps or emit MIDI.
+- `SEQ_TASK_Period1mS_LowPrio()` — `+2`; UI, SD card, logging.
 - `SEQ_TASK_Period1S()` — slow housekeeping.
 
 ### Trust TK's "odd" code
@@ -262,10 +288,13 @@ The fork captures the **computed output** of a track, never an emission tape. Th
   pattern slot. (`dst_group` is vestigial — the write source-group is derived from
   `src_track`; kept for the testctrl payload shape.)
 - `SEQ_CORE_CaptureToTrack(src_track, dst_track)` — capture → another track in the
-  current pattern (RAM only). dst **inherits** src's event-mode + geometry + lower-48
-  CCs (mirroring COPY/PASTE-TRACK in `seq_ui_util.c`) before the raw layer copy,
-  because par/trg geometry lives in `seq_par.c`/`seq_trg.c`, **not** `seq_cc_trk` — a
-  raw copy across mismatched geometry reads back as garbage.
+  current pattern (RAM only). dst **inherits the source's full `0x00..0x7f` CC config +
+  geometry** (mirroring the `PASTE_CLR_ALL` branch of `PASTE_Track` in `seq_ui_util.c`)
+  before the raw layer copy. Geometry lives in `seq_par.c`/`seq_trg.c`, **not**
+  `seq_cc_trk`, so `SEQ_PAR/TRG_TrackInit` with the src counts is still needed (a raw copy
+  across mismatched geometry reads back as garbage). The full-CC inherit (was **lower-48
+  only** until 2026-06-07) is what carries length/clock/groove/trigger-assignments so the
+  frozen copy reproduces what was heard — see §9 "Freeze faithfulness".
 - `SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern)` — capture
   → one track of a pattern slot, **persisted to SD** (the PATTERN-hold gesture's verb,
   and the only one on a UI gesture). Read-modify-write of the slot file: `PatternRead`
@@ -283,13 +312,41 @@ which is *before* emission — so loopback/echo/global-transpose applied at emis
 **not** in the capture. That's intentional: the captured pattern is the editable
 computed loop, not the literal performed MIDI.
 
-The companion concern is destination-side modulation: the captured pattern inherits the
-source's CC config, and any generative setting on the destination would re-modulate the
-frozen tape on playback (FX, direction shaping, bus mode, groove, per-step
-Probability/Nth/etc.). Centralized in `SEQ_CC_ResetGenerativeForBounce()`
-([seq_cc.c](../core/seq_cc.c)) — called by both capture verbs on the destination after
-the output is written. Extend that function in the same review when a new generative CC
-is added.
+The companion concern is destination-side modulation, split across **two axes**
+(2026-06-07). The **generation axis** (generators, randomness, robotize, echo, LFO,
+direction, transpose, per-step Probability/Nth, bus mode) would re-modulate or re-roll the
+frozen tape, so `SEQ_CC_ResetGenerativeForBounce()` ([seq_cc.c](../core/seq_cc.c)) resets it
+on the destination after the output is written. The **shaping axis** is DETERMINISTIC —
+groove especially: per-step swing/velocity/length keyed to step position, applied at
+emission ([seq_core.c:1869](../core/seq_core.c#L1869), [:2113](../core/seq_core.c#L2113)),
+never baked into `OutputActive` — so re-applying its CC reproduces the heard sound exactly
+(incl. groove's negative timing delays, which can't be baked into per-step delay params).
+That axis is kept faithful by one of **two mechanisms**:
+- **PRESERVE the CC** when re-applying it on playback reproduces the heard sound exactly —
+  **groove** (per-step swing/velocity/length; its negative timing delays can't be baked into
+  step params anyway). `ResetGenerativeForBounce` leaves groove (style+value) alone.
+- **BAKE into the captured notes** when preserving the flag would couple the frozen copy to
+  *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap is emission-time (the tick,
+  after transpose; [seq_core.c:2142](../core/seq_core.c#L2142)) and resolves scale/root from the
+  *global* scale + per-step Scale/Root layers, so a preserved flag would re-pitch the copy on a
+  later key change. `SEQ_CORE_BakeForceScale(track)` ([seq_core.c](../core/seq_core.c)) instead
+  snaps each non-drum Note par-layer value into the heard pitch — reproducing
+  `noteLimit(forceScale(transpose(raw)))` — and is called in all three freeze verbs *before*
+  `ResetGenerativeForBounce` clears the flag/limits/transpose.
+  - **GOTCHA (cost a blocker in review):** `SEQ_PAR_Set` writes the source buffer
+    `seq_par_layer_value` ([seq_par.c:258](../core/seq_par.c#L258)) but `SEQ_PAR_Get` reads the
+    double-buffered **output mirror** ([:285](../core/seq_par.c#L285)). A freshly-written capture
+    destination has the captured notes ONLY in the source buffer (the mirror is stale until the
+    next render+flip), so `BakeForceScale` reads AND writes `seq_par_layer_value` directly and
+    marks the track render-dirty. Any future "operate on just-captured par data" code must do the
+    same, not call `SEQ_PAR_Get`.
+  - **GOTCHA:** emission applies `SEQ_CORE_Limit` (note limit) AFTER the snap, so the bake
+    reproduces it too — both limit bounds are zeroed by the reset.
+
+`transpose` (for non-force-scaled tracks), `echo`/`LFO`/`direction` are emission-time
+deterministic too and are the remaining shaping-axis candidates. When you add a new `SEQ_CC_*`,
+classify it: generation → reset here; deterministic shaping → preserve-as-CC or bake-into-notes
+(bake when the effect reads mutable global state). See §9 "Freeze faithfulness" in the design doc.
 
 Source-state preservation across `CaptureToSlot` uses an **in-RAM snapshot** of
 `seq_cc_trk[src_track]` + layer/trigger buffers + pattern name + `play_section`,
