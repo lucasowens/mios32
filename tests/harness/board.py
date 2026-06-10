@@ -52,6 +52,11 @@ from .sysex import (
     CMD_TRACK_PAR_SET,
     CMD_TRACK_PAR_GET,
     CMD_GLOBAL_SCALE_SET,
+    CMD_TENSION_SET,
+    CMD_TENSION_BAND_GET,
+    CMD_TENSION_GET,
+    CMD_TENSION_RESOLVE,
+    CMD_PATTERN_SAVE,
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
@@ -749,6 +754,67 @@ class Board:
         if payload[3] != CMD_STATUS_OK:
             raise ValueError(f"GLOBAL_SCALE_SET status {payload[3]:#04x}")
 
+    def tension_set(self, gravity: int, timeout: float = 1.0) -> None:
+        """Set the global GRAVITY dial (Tension Workbench). gravity is the
+        signed -64..+63 dial value (0 = detent / pass-through); it's sent biased
+        by +64 to stay 7-bit-safe on the wire. Dirties all tracks so the change
+        renders. GRIP is per-track via cc_set(track, CC.TENSION_GRIP, ...)."""
+        if not -64 <= gravity <= 63:
+            raise ValueError(f"gravity out of range: {gravity}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TENSION_SET, bytes([(gravity + 64) & 0x7F])))
+        payload = self.wait_for_sysex(CMD_TENSION_SET, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short TENSION_SET reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"TENSION_SET status {payload[1]:#04x}")
+
+    def tension_band_get(
+        self, gravity: int, track: int = 0, bus: int | None = None,
+        timeout: float = 1.0,
+    ) -> tuple[int, int]:
+        """Pure-function pin of the GRAVITY band-mask builder. Returns
+        (zone, band) where zone is 0=detent/1..6=DRONE..SLIP and band is the
+        12-bit target pitch-class mask for `gravity`'s zone against the chord
+        held on `bus` (defaults to the track's CHORDMASK_BUS) and the current
+        global scale/root. No render/transport needed."""
+        if not -64 <= gravity <= 63:
+            raise ValueError(f"gravity out of range: {gravity}")
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        payload_out = bytearray([(gravity + 64) & 0x7F, track & 0x0F])
+        if bus is not None:
+            payload_out.append(bus & 0x03)
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TENSION_BAND_GET, bytes(payload_out)))
+        payload = self.wait_for_sysex(CMD_TENSION_BAND_GET, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short TENSION_BAND_GET reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise ValueError(f"TENSION_BAND_GET status {payload[3]:#04x}")
+        zone = payload[0]
+        band = payload[1] | (payload[2] << 7)
+        return zone, band
+
+    def tension_get(self, timeout: float = 1.0) -> int:
+        """Read the current global GRAVITY dial (signed −64..+63)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TENSION_GET))
+        payload = self.wait_for_sysex(CMD_TENSION_GET, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short TENSION_GET reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"TENSION_GET status {payload[1]:#04x}")
+        return payload[0] - 64
+
+    def tension_resolve(self, timeout: float = 1.0) -> None:
+        """Trigger RESOLVE — ramp GRAVITY to the detent (instant when stopped)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TENSION_RESOLVE))
+        payload = self.wait_for_sysex(CMD_TENSION_RESOLVE, timeout=timeout, since=since)
+        if not payload or payload[0] != CMD_STATUS_OK:
+            raise RuntimeError(f"TENSION_RESOLVE failed: {payload!r}")
+
     def bounce(
         self,
         src_track: int,
@@ -874,6 +940,41 @@ class Board:
         if payload[4] != CMD_STATUS_OK:
             raise RuntimeError(f"PATTERN_LOAD dispatch status {payload[4]:#04x}")
         return payload[3] == CMD_STATUS_OK
+
+    def pattern_save(
+        self, group: int, bank: int, pattern: int, timeout: float = 4.0
+    ) -> bool:
+        """Persist the working group's current in-RAM pattern (all 4 tracks) to
+        the (bank, pattern) slot on SD. Use to snapshot a host-built rig so it
+        survives reboot. Returns True if the write committed. NOTE: a track's
+        GRIP CC is not yet in the persisted range (Tension Workbench Stage D), so
+        a reloaded rig restores notes/gates/config but GRIP must be re-applied."""
+        if not 0 <= group <= 3:
+            raise ValueError(f"group out of range: {group}")
+        if not 0 <= bank <= 7:
+            raise ValueError(f"bank out of range: {bank}")
+        if not 0 <= pattern <= 127:
+            raise ValueError(f"pattern out of range: {pattern}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PATTERN_SAVE, bytes([group, bank, pattern])))
+        payload = self.wait_for_sysex(CMD_PATTERN_SAVE, timeout=timeout, since=since)
+        if len(payload) < 5:
+            raise RuntimeError(f"short PATTERN_SAVE reply: {payload!r}")
+        if payload[4] != CMD_STATUS_OK:
+            raise RuntimeError(f"PATTERN_SAVE dispatch status {payload[4]:#04x}")
+        return payload[3] == CMD_STATUS_OK
+
+    def set_force_scale(self, track: int, on: bool, timeout: float = 1.0) -> None:
+        """Toggle a track's FORCE_SCALE flag (bit 3 of MODE_FLAGS). The Tension
+        Workbench POC rule wants FTS OFF on gripped tracks so the emission snap
+        doesn't re-correct the field's push."""
+        MODE_FLAGS = 0x41  # SEQ_CC_MODE_FLAGS; FORCE_SCALE is bit 3
+        flags = self.cc_get(track, MODE_FLAGS, timeout=timeout)
+        if on:
+            flags |= 0x08
+        else:
+            flags &= ~0x08
+        self.cc_set(track, MODE_FLAGS, flags & 0x7F, timeout=timeout)
 
     def session_name_get(self, timeout: float = 1.0) -> str:
         """Return the currently-active session name (e.g. "DEFAULT", "AUTO_TEST")."""

@@ -236,6 +236,7 @@ typedef enum {
 typedef enum {
   SEQ_PROCESSOR_ID_NONE       = 0,
   SEQ_PROCESSOR_ID_CHORD_MASK = 1,
+  SEQ_PROCESSOR_ID_TENSION    = 2, // GRAVITY field (Tension Workbench, §2)
 } seq_processor_id_t;
 
 typedef struct {
@@ -321,6 +322,11 @@ extern u8 seq_core_step_update_req;
 extern u8 seq_core_global_scale;
 extern u8 seq_core_global_scale_root_selection;
 extern u8 seq_core_keyb_scale_root;
+
+// GRAVITY field (Tension Workbench, §2). Global bipolar dial −64..+63, center
+// 0 = true pass-through. Performance state (like the SHADE scale choice it sits
+// beside), NOT pattern state — persisted to the config file, not the bank.
+extern s8 seq_core_tension_gravity;
 
 extern u8 seq_core_global_transpose_enabled;
 
@@ -416,6 +422,31 @@ extern void SEQ_CORE_RenderTracks(void);
 // Phase C bridge: keep slot 0 mirrored from tcc (playmode + strength + bus)
 // whenever the underlying CCs change. Called from SEQ_CC_Set.
 extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
+
+// Tension Workbench (§2): keep the TENSION processor slot mirrored from tcc
+// (GRIP + the shared chord-context bus/drum scope). Called from SEQ_CC_Set.
+extern void SEQ_CORE_TensionSlotSync(u8 track);
+
+// Set the global GRAVITY dial (clamped −64..+63) and touch the field-bearing
+// tracks so a live cockpit-encoder sweep re-renders smoothly. Called from the
+// GRAVITY page encoder.
+extern void SEQ_CORE_TensionGravitySet(s8 gravity);
+
+// RESOLVE (§3): bar-quantized ramp of GRAVITY to the detent, landing on the next
+// downbeat (or instant when the transport is stopped). TensionResolveTick runs
+// the per-tick glide from the prologue; TensionResolveBoundary pins the exact 0
+// landing at ref_step==0; TensionResolveCancel aborts an in-flight ramp (e.g. a
+// manual GRAVITY turn).
+extern void SEQ_CORE_TensionResolve(void);
+extern void SEQ_CORE_TensionResolveTick(u32 bpm_tick);
+extern u8   SEQ_CORE_TensionResolveBoundary(void);
+extern void SEQ_CORE_TensionResolveCancel(void);
+
+// Tension Workbench (§2.1): compute the target pitch-class band (12-bit mask)
+// for the GRAVITY zone implied by `gravity`, against the chord held on `bus`
+// and the global scale/root. Writes the zone id (0=detent, 1..6 = DRONE..SLIP)
+// to *zone. Returns 0 at the detent (pass-through). Public for HIL pinning.
+extern u16 SEQ_CORE_TensionBandMask(s8 gravity, u8 bus, u8 *zone);
 
 // Fork capture engine — shared primitive. Forces a full quiet render of
 // `track` (sweep-safe: OutputActive current across the whole buffer) and

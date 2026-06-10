@@ -23,6 +23,7 @@
 #include "seq_midi_port.h"
 #include "seq_pattern.h"
 #include "seq_file.h"
+#include "seq_file_b.h"
 #include "seq_trg.h"
 #include "seq_par.h"
 #include "seq_layer.h"
@@ -68,6 +69,12 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_TRACK_PAR_GET        0x66
 #define CMD_TRACK_PAR_SET        0x67
 #define CMD_GLOBAL_SCALE_SET     0x68
+#define CMD_TENSION_SET          0x69
+#define CMD_TENSION_BAND_GET     0x6a
+#define CMD_TENSION_GET          0x6b
+#define CMD_TENSION_RESOLVE      0x6c
+#define CMD_PATTERN_SAVE         0x6d
+#define CMD_BANK_CREATE          0x6e
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -842,6 +849,76 @@ static void cmd_global_scale_set(mios32_midi_port_t port, const u8 *payload, u8 
 }
 
 
+// CMD_TENSION_SET payload: [gravity_biased]  (gravity = gravity_biased - 64,
+// range -64..+63; 64 = detent/pass-through). Reply: [gravity_biased, status].
+// Sets the global GRAVITY dial and dirties all tracks so the change renders.
+// GRIP (per-track) is set via the existing CMD_CC_SET on SEQ_CC_TENSION_GRIP
+// (0x9A); SHADE via CMD_GLOBAL_SCALE_SET — so this is the only new verb needed.
+static void cmd_tension_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_TENSION_SET, reply, sizeof(reply));
+    return;
+  }
+  s8 gravity = (s8)((s16)(payload[0] & 0x7f) - 64);
+  seq_core_tension_gravity = gravity;
+  SEQ_CORE_RenderDirtySetAll();
+  reply[0] = payload[0] & 0x7f;
+  reply[1] = 0x01;
+  send_reply(port, CMD_TENSION_SET, reply, sizeof(reply));
+}
+
+
+// CMD_TENSION_BAND_GET payload: [gravity_biased, (opt) track, (opt) bus].
+// Reply: [zone, band_lo, band_hi, status] where band = band_lo | (band_hi << 7)
+// is the 12-bit target PC mask for the gravity's zone against the chord held on
+// `bus` and the current global scale/root. zone: 0=detent,1..6=DRONE..SLIP.
+// Pure function — no render/transport needed (the §8 band-mask pinning verb).
+static void cmd_tension_band_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_TENSION_BAND_GET, reply, sizeof(reply));
+    return;
+  }
+  s8 gravity = (s8)((s16)(payload[0] & 0x7f) - 64);
+  u8 track   = (plen >= 2) ? (payload[1] & 0x0f) : 0;
+  u8 bus     = (plen >= 3) ? (payload[2] & 0x03) : seq_cc_trk[track].chordmask_bus;
+  u8 zone = 0;
+  u16 band = SEQ_CORE_TensionBandMask(gravity, bus, &zone);
+  reply[0] = zone;
+  reply[1] = band & 0x7f;
+  reply[2] = (band >> 7) & 0x1f;
+  reply[3] = 0x01;
+  send_reply(port, CMD_TENSION_BAND_GET, reply, sizeof(reply));
+}
+
+
+// CMD_TENSION_GET (no payload). Reply: [gravity_biased, status] where
+// gravity = gravity_biased - 64. Reads the current global GRAVITY dial — lets
+// the harness verify the cockpit GRAVITY encoder / RESOLVE button and (Stage C)
+// watch the RESOLVE ramp land on the detent.
+static void cmd_tension_get(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2];
+  reply[0] = (u8)(((s16)seq_core_tension_gravity + 64) & 0x7f);
+  reply[1] = 0x01;
+  send_reply(port, CMD_TENSION_GET, reply, sizeof(reply));
+}
+
+
+// CMD_TENSION_RESOLVE (no payload). Triggers the RESOLVE ramp (or instant snap
+// when stopped). Reply: [status]. The harness reads CMD_TENSION_GET afterward to
+// watch GRAVITY land on the detent.
+static void cmd_tension_resolve(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[1] = { 0x01 };
+  SEQ_CORE_TensionResolve();
+  send_reply(port, CMD_TENSION_RESOLVE, reply, sizeof(reply));
+}
+
+
 // CMD_TRACK_CONFIG payload: [track, midi_port, midi_chn]
 //   track:     0..15
 //   midi_port: raw mios32_midi_port_t value (e.g. 0x10 = USB0/USB1...)
@@ -1153,6 +1230,67 @@ static void cmd_pattern_load(mios32_midi_port_t port, const u8 *payload, u8 plen
 }
 
 
+// CMD_BANK_CREATE payload: [bank]. (Re)creates the bank file in the current
+// session with the CURRENT firmware's pattern-slot size — i.e. V3-sized ext
+// blocks, so chord-mask + tension GRIP CCs fit and persist. DESTROYS that bank's
+// existing patterns. Reply: [bank, ok, status]. (All SD sessions on this dev
+// device are disposable test work, so reformatting a scratch bank is free — but
+// never recreate the AUTOTEST baseline bank the suite depends on.)
+static void cmd_bank_create(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[3] = { 0, 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_BANK_CREATE, reply, sizeof(reply));
+    return;
+  }
+  u8 bank = payload[0] & 0x07;
+  reply[0] = bank;
+  s32 r = SEQ_FILE_B_Create(seq_file_session_name, bank);
+  if( r >= 0 )
+    r = SEQ_FILE_B_Open(seq_file_session_name, bank);  // make it usable now
+  reply[1] = (r >= 0) ? 0x01 : 0x00;
+  reply[2] = 0x01;
+  send_reply(port, CMD_BANK_CREATE, reply, sizeof(reply));
+}
+
+
+// CMD_PATTERN_SAVE payload: [group, bank, pattern]. Persists the working group's
+// current in-RAM pattern (all 4 of its tracks: par/trg layers + the persisted
+// CCs) to the bank slot on SD, so a host-configured rig survives reboot. Mirrors
+// cmd_pattern_load but calls SEQ_PATTERN_Save. Reply: [group, bank, pattern, ok,
+// status]. NOTE: a track's GRIP (CC 0x9A) is outside the persisted ext-CC range
+// until the Tension-Workbench Stage-D widening, so a reloaded rig keeps its
+// notes/gates/config but GRIP must be re-applied (the rig builder sets it live).
+static void cmd_pattern_save(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[5] = { 0, 0, 0, 0, 0x02 };
+  if( plen < 3 ) {
+    send_reply(port, CMD_PATTERN_SAVE, reply, sizeof(reply));
+    return;
+  }
+  u8 group   = payload[0];
+  u8 bank    = payload[1] & 0x07;
+  u8 pattern = payload[2] & 0x7f;
+
+  reply[0] = group;
+  reply[1] = bank;
+  reply[2] = pattern;
+
+  if( group >= SEQ_CORE_NUM_GROUPS ) {
+    reply[4] = 0x03;
+  } else {
+    seq_pattern_t pat;
+    pat.ALL = 0;
+    pat.bank = bank;
+    pat.pattern = pattern;
+    s32 r = SEQ_PATTERN_Save(group, pat);
+    reply[3] = (r >= 0) ? 0x01 : 0x00;
+    reply[4] = 0x01;
+  }
+  send_reply(port, CMD_PATTERN_SAVE, reply, sizeof(reply));
+}
+
+
 // CMD_SESSION_LOAD payload: [name_bytes...]   (1..12 ASCII chars, all 7-bit)
 // Reply payload: [load_ok, dispatch_status, name_len, name_bytes...]
 //   dispatch_status 0x01 = ok, 0x02 = empty payload, 0x03 = name too long.
@@ -1456,6 +1594,12 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
           case CMD_PATTERN_LOAD:
             cmd_pattern_load(port, payload_buf, payload_len);
             break;
+          case CMD_PATTERN_SAVE:
+            cmd_pattern_save(port, payload_buf, payload_len);
+            break;
+          case CMD_BANK_CREATE:
+            cmd_bank_create(port, payload_buf, payload_len);
+            break;
           case CMD_SESSION_LOAD:
             cmd_session_load(port, payload_buf, payload_len);
             break;
@@ -1512,6 +1656,18 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_GLOBAL_SCALE_SET:
             cmd_global_scale_set(port, payload_buf, payload_len);
+            break;
+          case CMD_TENSION_SET:
+            cmd_tension_set(port, payload_buf, payload_len);
+            break;
+          case CMD_TENSION_BAND_GET:
+            cmd_tension_band_get(port, payload_buf, payload_len);
+            break;
+          case CMD_TENSION_GET:
+            cmd_tension_get(port, payload_buf, payload_len);
+            break;
+          case CMD_TENSION_RESOLVE:
+            cmd_tension_resolve(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

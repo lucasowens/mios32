@@ -135,6 +135,13 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 {
   if( depressed ) return 0; // ignore when button depressed
 
+  // GP16 (no modifier): toggle to the GRAVITY cockpit (Tension Workbench) — the
+  // harmonic sibling of this scale page, mirroring FX_ROBOTIZE → ROBOLOOP.
+  if( button == SEQ_UI_BUTTON_GP16 && !seq_ui_button_state.SELECT_PRESSED ) {
+    SEQ_UI_PageSet(SEQ_UI_PAGE_GRAVITY);
+    return 1;
+  }
+
 #if 0
   // leads to: comparison is always true due to limited range of data type
   if( button >= SEQ_UI_BUTTON_GP1 && button <= SEQ_UI_BUTTON_GP16 ) {

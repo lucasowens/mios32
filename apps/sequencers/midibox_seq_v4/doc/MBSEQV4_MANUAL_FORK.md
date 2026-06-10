@@ -320,6 +320,53 @@ So the frozen take plays back deterministically, generative modulation on the ca
 
 ---
 
+## Tension Workbench (GRAVITY)
+
+One bipolar knob bends the whole room's harmony — *toward* consonance (pull) or *into*
+structured tension (push) — and a button resolves it on the downbeat. Instead of dials
+that only make material *more correct*, GRAVITY is a ranked field you push notes *along*
+in either direction.
+
+### Reaching the page
+
+From the **FX → Scale** page press **GP16** to toggle to the GRAVITY cockpit (the
+harmonic sibling of that page). It's also in the page menu as **GRAVITY**.
+
+### The dials
+
+- **GP1 — GRAVITY** (global, −64…+63). Center (0) is the **detent**: true pass-through,
+  material untouched. **Left/CCW pulls:** SCALE (tidy to the key) → CHORD (lock to the
+  held chord) → DRONE (collapse toward the root). **Right/CW pushes:** LEAN (sus/add
+  color) → RUB (chromatic tension a semitone off the chord tones) → SLIP (the whole set
+  side-slipped a semitone).
+- **GP3 — GRIP** (per track). How strongly *this* track is held — a send-amount,
+  set-and-forget. 0 = the track ignores GRAVITY; raise it to pull the track in.
+- **GP2 — SHADE.** Steps the global scale along a brightness ladder
+  (Lydian→Ionian→Mixolydian→Dorian→Aeolian→Phrygian→Locrian) — the *terrain* the field
+  moves across (force-to-scale tracks follow it too).
+- **GP8 — RESOLVE.** Ramps GRAVITY back to the detent, landing on the next downbeat —
+  tension resolved into the One, on the beat. (Instant when stopped; turning GP1 cancels
+  an in-flight resolve.)
+- **GP16** — back to FX → Scale.
+
+### Reading the meter
+
+The panel knobs are endless **encoders** — no felt center — so the right LCD shows a
+**bipolar meter**: `|` is the detent (home), the fill grows **left as you pull / right
+as you push**, its length is how deep you are, and the `:` ticks (turning `+` once
+crossed) mark the zone boundaries. The zone name + signed value sit alongside.
+
+### Notes
+
+- **Turn force-to-scale OFF on gripped tracks** (TRKMODE page). GRAVITY's pull already
+  contains scale-snap; leaving emission FTS on would re-correct every pushed note.
+- **GRAVITY/SHADE are performance state** (session config, like the global scale), not
+  per-pattern. **GRIP is per-track** and saved with the pattern.
+- A pushed groove **bounces faithfully** — capture a gripped track and the heard
+  (pushed) pitches are baked into the notes, no special handling.
+
+---
+
 ## Cross-Cutting Notes
 
 ### Where files live
@@ -346,9 +393,13 @@ CCs added by the fork:
 | 0x93 | `robotize_palette_length` |
 | 0x94 | `robotize_loop_start` |
 | 0x95 | `robotize_loop_rotate` |
+| 0x9a | `tension_grip` (GRAVITY field, per track) |
 
-All five live in the v2 ext block (above 0x7f) and follow the upstream V4.088 robotize CC range (0x80..0x90).
+The robotize five live in the ext block (above 0x7f) and follow the upstream V4.088
+robotize CC range (0x80..0x90). The **v3 ext block** (2026-06-10) widened the persisted
+range to 0x80..0x9f, so chord-mask (0x96–0x99) and GRIP (0x9a) now save/recall; old v2
+patterns still load (the v2 byte-count is frozen, read path dispatches on tag).
 
 ---
 
-*Last update: 2026-05-23*
+*Last update: 2026-06-10*

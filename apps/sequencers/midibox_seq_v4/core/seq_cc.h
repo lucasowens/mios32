@@ -208,6 +208,11 @@
 #define SEQ_CC_CHORDMASK_DRUM_L					0x98 // bits 0..7  = drum slots 0..7  in scope (1=on)
 #define SEQ_CC_CHORDMASK_DRUM_H					0x99 // bits 0..7  = drum slots 8..15 in scope (1=on)
 
+// Tension Workbench (§3): per-track GRIP — how strongly the GRAVITY field holds
+// this track (0 = not held / bypass, 127 = fully held). Shares the chord-context
+// bus + drum scope with chord_mask (CHORDMASK_BUS / CHORDMASK_DRUM_*).
+#define SEQ_CC_TENSION_GRIP						0x9A // 0..127 — per-track field grip
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -301,6 +306,7 @@ typedef struct {
   u8		chordmask_bus;           // 0..3 — per-processor bus the chord_mask listens to (independent of busasg.bus)
   u8		chordmask_drum_l;        // drums 0..7 in scope (bit i = drum i, 0xFF default = all drums)
   u8		chordmask_drum_h;        // drums 8..15 in scope (bit i = drum 8+i, 0xFF default = all drums)
+  u8		tension_grip;            // 0..127 — GRAVITY field grip (0 = not held by the field)
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

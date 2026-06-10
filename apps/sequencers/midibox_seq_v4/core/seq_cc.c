@@ -74,6 +74,7 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->chordmask_bus      = 0;
     tcc->chordmask_drum_l   = 0xFF;
     tcc->chordmask_drum_h   = 0xFF;
+    tcc->tension_grip       = 0;
 
     {
       u8 i;
@@ -247,6 +248,7 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->chordmask_bus      = 0;
   tcc->chordmask_drum_l   = 0xFF;
   tcc->chordmask_drum_h   = 0xFF;
+  tcc->tension_grip       = 0;
   {
     u8 i;
     for(i=0; i<16; ++i)
@@ -324,6 +326,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_MODE:
 	tcc->playmode = value;
 	SEQ_CORE_ChordMaskSlotSync(track); // ChordMask ↔ slot 0 (phase C bridge)
+	SEQ_CORE_TensionSlotSync(track);   // keep the tension slot consistent too
 	break;
       case SEQ_CC_MODE_FLAGS: tcc->trkmode_flags.ALL = value; break;
   
@@ -464,14 +467,21 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_CHORDMASK_BUS:
 	tcc->chordmask_bus = value & 0x03; // 4 buses (0..3)
 	SEQ_CORE_ChordMaskSlotSync(track);
+	SEQ_CORE_TensionSlotSync(track); // tension shares the chord-context bus
 	break;
       case SEQ_CC_CHORDMASK_DRUM_L:
 	tcc->chordmask_drum_l = value & 0xff;
 	SEQ_CORE_ChordMaskSlotSync(track);
+	SEQ_CORE_TensionSlotSync(track);
 	break;
       case SEQ_CC_CHORDMASK_DRUM_H:
 	tcc->chordmask_drum_h = value & 0xff;
 	SEQ_CORE_ChordMaskSlotSync(track);
+	SEQ_CORE_TensionSlotSync(track);
+	break;
+      case SEQ_CC_TENSION_GRIP:
+	tcc->tension_grip = value & 0x7f;
+	SEQ_CORE_TensionSlotSync(track); // GRIP enables/scales the field slot
 	break;
 
       default:
@@ -676,6 +686,7 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_CHORDMASK_BUS:        return tcc->chordmask_bus;
     case SEQ_CC_CHORDMASK_DRUM_L:     return tcc->chordmask_drum_l;
     case SEQ_CC_CHORDMASK_DRUM_H:     return tcc->chordmask_drum_h;
+    case SEQ_CC_TENSION_GRIP:         return tcc->tension_grip;
   }
 
   return -2; // invalid CC

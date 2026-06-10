@@ -57,15 +57,24 @@
 // the extended CC block. read path accepts both.
 /////////////////////////////////////////////////////////////////////////////
 #define SEQ_FILE_B_TRK_EXT_TAG_V1       0x01  // anchors only (legacy)
-#define SEQ_FILE_B_TRK_EXT_TAG_V2       0x02  // ext CCs + anchors
+#define SEQ_FILE_B_TRK_EXT_TAG_V2       0x02  // ext CCs 0x80..0x95 + anchors
+#define SEQ_FILE_B_TRK_EXT_TAG_V3       0x03  // ext CCs 0x80..0x9f (adds chord-mask 0x96..0x99 + tension GRIP 0x9a) + anchors
 
 #define SEQ_FILE_B_TRK_EXT_CC_FIRST     0x80
-#define SEQ_FILE_B_TRK_EXT_CC_LAST      0x95
-#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)
+#define SEQ_FILE_B_TRK_EXT_CC_LAST      0x9f   // widened past GRIP (0x9a); a clean boundary with headroom
+#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)  // 32 (V3)
+// V2 count is FROZEN: V2 files on SD hold exactly this many ext-CC bytes, so the
+// V2 read arm must keep using it even though the live range above grew. (Bumping
+// LAST without freezing this would mis-align every V2 pattern's anchors on read.)
+#define SEQ_FILE_B_TRK_EXT_CC_COUNT_V2  (0x95 - 0x80 + 1)  // 22 (V2, frozen)
 #define SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE 64    // sizeof(robotize_bar_anchors)
 #define SEQ_FILE_B_TRK_EXT_V1_SIZE      (1 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
-#define SEQ_FILE_B_TRK_EXT_V2_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
-#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V2_SIZE
+#define SEQ_FILE_B_TRK_EXT_V2_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT_V2 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
+#define SEQ_FILE_B_TRK_EXT_V3_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
+// Slots reserve room for the CURRENT (V3) ext block at create time. Banks created
+// by older firmware reserved only V2_SIZE, so write_ext skips them (GRIP won't
+// persist there) — recreate the bank (CMD_BANK_CREATE) to get V3-sized slots.
+#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V3_SIZE
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -621,7 +630,9 @@ DEBUG_MSG("Skipping Track %d\n", track);
       FILE_ReadSeek(peek_pos); // rewind regardless of what we saw
 
       u8 per_track_ext_size = 0;
-      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V2_SIZE;
       else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V1 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V1_SIZE;
@@ -637,11 +648,19 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	    u8 tag = 0;
 	    status |= FILE_ReadByte(&tag);
 
-	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
-	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];
+	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // 32 (0x80..0x9f)
 	      status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
 	      u8 i;
 	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
+					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	    } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
+	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT_V2];  // 22 frozen (0x80..0x95)
+	      status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2);
+	      u8 i;
+	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT_V2; ++i)
 		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
 	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
@@ -847,11 +866,11 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
   if( write_ext ) {
     track = source_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
     for(track_i=0; track_i<num_tracks; ++track_i, ++track) {
-      status |= FILE_WriteByte(SEQ_FILE_B_TRK_EXT_TAG_V2);
+      status |= FILE_WriteByte(SEQ_FILE_B_TRK_EXT_TAG_V3);
 
-      // ext CC bytes (0x80..0x95) - robotize feature CCs that fall outside
-      // the original cc[128] block. SEQ_CC_Get returns -1 for unmapped CCs;
-      // clamp to 0 so the slot is well-defined.
+      // ext CC bytes (0x80..0x9f) - robotize + chord-mask + tension GRIP CCs that
+      // fall outside the original cc[128] block. SEQ_CC_Get returns -1 for
+      // unmapped CCs; clamp to 0 so the slot is well-defined.
       u8 cc;
       for(cc=SEQ_FILE_B_TRK_EXT_CC_FIRST; cc<=SEQ_FILE_B_TRK_EXT_CC_LAST; ++cc) {
 	s32 cc_value = SEQ_CC_Get(track, cc);

@@ -42,6 +42,12 @@ CMD_UI_TRACK_GET = 0x65
 CMD_TRACK_PAR_GET = 0x66
 CMD_TRACK_PAR_SET = 0x67
 CMD_GLOBAL_SCALE_SET = 0x68
+CMD_TENSION_SET = 0x69
+CMD_TENSION_BAND_GET = 0x6a
+CMD_TENSION_GET = 0x6b
+CMD_TENSION_RESOLVE = 0x6c
+CMD_PATTERN_SAVE = 0x6d
+CMD_BANK_CREATE = 0x6e
 
 # Dial IDs for CMD_GENERATOR_DIAL_SET — keep in sync with seq_testctrl.c.
 DIAL_RANGE_MIN = 0
@@ -68,6 +74,7 @@ class Page:
     ROBOLOOP = 39
     BPM = 47
     PITCHGEN = 59
+    GRAVITY = 60  # Tension Workbench cockpit (enum SEQ_UI_PAGE_GRAVITY)
 
 
 # mios32_midi_port_t values that fit in 7 bits.
@@ -212,6 +219,7 @@ class CC:
     CHORDMASK_BUS = 0x97       # 0..3   per-processor bus the ChordMask reads PC-set from
     CHORDMASK_DRUM_L = 0x98    # bit i = process drum i  (drums 0..7)
     CHORDMASK_DRUM_H = 0x99    # bit i = process drum 8+i (drums 8..15)
+    TENSION_GRIP = 0x9A        # 0..127 per-track GRAVITY-field grip
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:

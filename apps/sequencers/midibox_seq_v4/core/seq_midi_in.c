@@ -1163,6 +1163,24 @@ u16 SEQ_MIDI_IN_BusPCSetGet(u8 bus)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Returns the lowest note currently held on the bus (a bass proxy for the
+// GRAVITY field's chord root, §2.1). Reads the ARP_SORTED notestack, which is
+// maintained in ascending pitch order, so item 0 is the lowest. Returns -1 if
+// the bus is out of range or no note is held (caller falls back to global root).
+// Unlike SEQ_MIDI_IN_TransposerNoteGet (PUSH_TOP order → most-recent note), this
+// is reliably the lowest.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_MIDI_IN_BusLowestNoteGet(u8 bus)
+{
+  if( bus >= SEQ_MIDI_IN_NUM_BUSSES )
+    return -1;
+
+  notestack_t *n = &bus_notestack[bus][BUS_NOTESTACK_ARP_SORTED];
+  return n->len ? n->note_items[0].note : -1;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Returns the note for transpose mode
 // if -1, the stack is empty
 /////////////////////////////////////////////////////////////////////////////

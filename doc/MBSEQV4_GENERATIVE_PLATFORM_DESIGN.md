@@ -642,6 +642,15 @@ here.
 
 ### The second musical build — the Tension Workbench (decided 2026-06-09)
 
+> **SHIPPED + by-ear GO — 2026-06-10.** Track 1 (the Workbench) is built, flashed, and
+> confirmed by ear: full pull collapses to the One, push reads as tension, RESOLVE
+> lands a cadence on the downbeat, the detent is home. The user deferred refinement
+> ("not at a point to refine yet") — a **soft GO**. The whole bundle is HIL-green
+> (processor · cockpit · RESOLVE · SHADE · GRIP persistence · rig tooling). What
+> diverged from this plan, and the decisions that emerged, are in §9 (2026-06-10);
+> codebase facts (symbols, verbs, gotchas) in the REFERENCE doc. **Track 2 (pitch-chain
+> migration) is now licensed.** The plan file is marked executed.
+
 The first build proved pitch as a *generated* dimension; the second makes harmony a
 *performed* one. Per §2.7 it ships as **one playable workflow**, not a sequence of
 dials. Durable summary here; full working detail in
@@ -1670,6 +1679,45 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   bus, drum-mask L/H) all sit past the persisted range and reset on reload. The
   small ext-range bump (new ext tag, range to a clean boundary) ships with the
   workbench, independent of the larger v3 format; GRIP's CC lands inside it.
+  **CLOSED 2026-06-10 — shipped with the Workbench.** A versioned **V3 ext-tag**, range
+  widened to 0x80–0x9F (covers chord-mask 0x96–0x99 + GRIP 0x9A), with the V2 byte-count
+  frozen separately so old V2 patterns still load. HIL round-trip pins it; chord-mask
+  strength + GRIP now survive reboot/recall.
+
+**Tension Workbench — BUILT + by-ear GO (2026-06-10).** Track 1 shipped as one bundle,
+HIL-green, confirmed by ear. Decisions that emerged or refined the 2026-06-09 plan
+(build narrative → REFERENCE doc):
+- **Monotone pull, varied push.** The grip hash keys on `zone` only on the PUSH side
+  (LEAN/RUB/SLIP each select a different tense set — the §2.3 "variety"); the PULL side
+  collapses all zones to one grip class, so deeper pull only ADDS gripped voices and
+  the band nests — pulling harder can never pop a voice back outward. Resolves the
+  latent §2.2-monotone-vs-§2.3-variety tension in favor of what the ear expects
+  (§8.1 "collapse, not dropout").
+- **GRIP is per-track (CC 0x9A, mirrored into the slot's `strength`); it shares the
+  chord-context bus + drum scope with chord-mask** — no separate tension-bus CC.
+  GRAVITY/SHADE stay global (config-persisted, like the scale — performance state,
+  not pattern state).
+- **RESOLVE = per-tick glide sized to the ticks remaining to the next downbeat,
+  pinned to exactly 0 in the `ref_step==0` branch; instant when the transport is
+  stopped; a manual GRAVITY turn cancels it.** (Not the `SEQ_GENERATOR_Tick` pattern
+  the plan named — that fires on per-track wrap, not the global musical measure.)
+- **ext-CC fix shipped as a versioned V3 tag**, range widened to 0x80–0x9F, with the
+  V2 byte-count *frozen separately* so old V2 patterns still load. Existing bank slots
+  already had room for the wider block (layer data dominates `pattern_size`), so no
+  bank re-format was needed.
+- **Encoders have no felt detent (raised by the user): 0 is a value, not a position.**
+  So RESOLVE (reliable return) and a bipolar LCD position meter (fill-from-center +
+  zone-boundary ticks) are how you find home — the meter is the encoder-native
+  feedback the gesture needs. Also clarifies the model: within a zone the dial
+  *continuously* recruits voices (threshold), across boundaries the target band
+  *steps* — not binary.
+- **Throughput: a host rig-builder library + CLI** (`python -m harness.rigs tension`,
+  one command after a flash) + a `pattern_save` verb — the §1 "setup friction kills
+  ear-testing" answer; also the trap that masked the first listen (a rig built on a
+  multi-layer session buried the gripped voice — fixed by loading a clean baseline).
+- **The GO is soft:** it works; no refinement requested. The §10 by-ear tunables (zone
+  widths, SHADE terrain, depth-vs-grip split) shipped at their starting values and are
+  revisited only when the ear asks. **Track 2 (pitch-chain migration) is licensed.**
 
 **Open puzzles (surfaced 2026-05-25, not gating, revisit with a clean baseline)**
 - **EDIT-LCD vs tick-time gate read disconnect.** While diagnosing the
@@ -1690,6 +1738,14 @@ design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8
   current broken one.
 
 **Tension Workbench (decide at the workbench, by ear — 2026-06-09)**
+*Soft-resolved 2026-06-10: the by-ear GO confirmed the bundle works at these starting
+values — nothing below needs changing yet; each stays a live dial, revisited when the
+ear asks. Already resolved outright by the build: chord-root = ARP_SORTED lowest held
+note (fallback global root); GRAVITY persistence = global config (performance) state;
+GP map = GP1 GRAVITY / GP2 SHADE / GP3 GRIP / GP8 RESOLVE / GP16↔FX_SCALE (provisional);
+SHADE = parallel modes. New from the build: a **depth-vs-grip split** (dial magnitude
+currently drives both how-far and how-many — split only if the ear wants "few notes
+very tense" vs "all notes slightly tense" as separate moves).*
 - Zone boundaries/count on the bipolar sweep (proposed DRONE/CHORD/SCALE ←0→
   LEAN/RUB/SLIP; collapsing LEAN into RUB or widening the detent dead-zone are
   legitimate by-ear outcomes).

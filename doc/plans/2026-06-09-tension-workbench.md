@@ -1,9 +1,23 @@
 # Tension Workbench — plan (2026-06-09)
 
-**Status: planned.** Direction confirmed with the user by discussion 2026-06-09; the
-build itself is gated on the workbench GO/NO-GO **by ear, at the workflow level**
-(design doc §2.7). This plan is scaffolding per the CLAUDE.md convention — archive or
-delete once executed into the design doc / code.
+> **✅ EXECUTED — 2026-06-10.** Track 1 (the Workbench) is built, flashed, HIL-green
+> (96/96), and by-ear GO'd (soft GO — works, refinement deferred). This plan is spent
+> scaffolding; the durable record now lives in:
+> - **design doc** §8 (SHIPPED banner), §9 (BUILT decisions 2026-06-10), §10 (0x96 bug
+>   CLOSED + by-ear tunables soft-resolved);
+> - **REFERENCE doc** §2 "Tension Workbench / GRAVITY field" (symbols, verbs, gotchas);
+> - the code + the `test_tension*.py` / `test_rigs.py` HIL pins + `harness/rigs.py`.
+>
+> What diverged from the plan below: monotone-pull grip (zone-in-hash on push only);
+> RESOLVE = per-tick glide to the downbeat (not the SEQ_GENERATOR_Tick pattern); ext-CC
+> shipped as a V3 tag with the V2 count frozen; the encoder-detent insight → a bipolar
+> LCD position meter. **Track 2 (pitch-chain migration) is now licensed but not built.**
+> Kept (not deleted) for the working detail; safe to remove once Track 2 lands.
+
+**Status: EXECUTED.** Original gating note (historical): direction confirmed with the
+user by discussion 2026-06-09; the build was gated on the workbench GO/NO-GO **by ear,
+at the workflow level** (design doc §2.7). This plan is scaffolding per the CLAUDE.md
+convention — archived (above) now that it's executed into the design doc / code.
 
 Durable homes this plan feeds: design doc §2.7 (workflow-unit principle), §3
 (born-as-processors rule), §5 (the harmonic blur axis), §8 (second musical build),

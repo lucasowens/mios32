@@ -102,6 +102,9 @@ u8 seq_core_global_scale_root;
 u8 seq_core_global_scale_root_selection;
 u8 seq_core_keyb_scale_root;
 
+// GRAVITY field (Tension Workbench, §2). −64..+63, center 0 = pass-through.
+s8 seq_core_tension_gravity;
+
 u8 seq_core_global_transpose_enabled;
 
 u8 seq_core_bpm_preset_num;
@@ -480,6 +483,189 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
   }
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// Tension Workbench — the GRAVITY field (design doc §5; plan 2026-06-09).
+//
+// A ranked field over the 12 pitch classes with one bipolar dial (GRAVITY,
+// −64..+63, center 0 = pass-through) moving notes along a stability gradient:
+// pull (CCW) toward the chord root / scale, push (CW) toward structured
+// dissonance. Reuses chord_mask_snap as the snap primitive (it is general over
+// any 12-bit mask); the new code is the band-mask builder + a deterministic
+// grip gate. GRAVITY is global; GRIP (how strongly a track is held) is per-
+// track, mirrored into the slot's strength via SEQ_CORE_TensionSlotSync.
+/////////////////////////////////////////////////////////////////////////////
+
+#define SEQ_CORE_TENSION_SLOT 1  // chord_mask owns slot 0; tension owns slot 1
+
+// 12-bit pitch-class barrel rotate (mod 12, masked to 0x0FFF — a raw u16 shift
+// would leak bits across PC 11→12). Up = toward higher PC.
+static inline u16 tension_rot12_up(u16 m, u8 n) {
+  n %= 12; return (u16)(((m << n) | (m >> (12 - n))) & 0x0FFF);
+}
+static inline u16 tension_rot12_dn(u16 m, u8 n) {
+  n %= 12; return (u16)(((m >> n) | (m << (12 - n))) & 0x0FFF);
+}
+
+// Deterministic per-note grip decision source (§2.3): a pure function of
+// (track, instrument, step, zone) — same knob position ⇒ same gripped set on
+// every render, so states are returnable and bounce is faithful with no bake.
+// Integer key-mix + one xorshift32 step (the seq_random.c GenXorshift body);
+// returns 0..126 to match chord_mask's SEQ_RANDOM_Gen_Range(0,126) bucketing.
+static u8 tension_grip_hash(u8 track, u8 instr, u16 step, u8 zone) {
+  u32 h = (u32)track * 2654435761u
+        + (u32)instr * 40503u
+        + (u32)step  * 2246822519u
+        + (u32)zone  * 3266489917u
+        + 0x9e3779b9u;
+  h ^= h << 13; h ^= h >> 17; h ^= h << 5;  // xorshift32 mix
+  return (u8)(h % 127);
+}
+
+// §2.1 stability ladder + §2.2 zones. Builds the target PC band for the zone
+// implied by `gravity`. Pull-side bands NEST (L0 ⊂ ≤L1 ⊂ ≤L2 ⊂ ≤L3) so the CCW
+// sweep is monotone. Push-side bands are targets (in-band notes stay put — the
+// snap returns them unchanged at d=0). Degrades gracefully with no chord held:
+// L0/L1/L3 come from the global root + scale, so the field works solo.
+u16 SEQ_CORE_TensionBandMask(s8 gravity, u8 bus, u8 *zone)
+{
+  // Resolve scale + root exactly as force-to-scale does from the globals.
+  u8 scale = seq_core_global_scale;
+  u8 root  = (seq_core_global_scale_root_selection == 0)
+             ? seq_core_keyb_scale_root
+             : (u8)(seq_core_global_scale_root_selection - 1);
+  if( root >= 12 ) root = 0;
+
+  // L0: chord root = lowest held note's PC (bass proxy), else the global root.
+  s32 low = SEQ_MIDI_IN_BusLowestNoteGet(bus);
+  u8 root_pc = (low >= 0) ? (u8)((u8)low % 12) : root;
+
+  u16 L0  = (u16)(1u << root_pc);
+  u16 L1  = (u16)(L0 | (1u << ((root_pc + 7) % 12)));   // + perfect fifth
+  u16 L2c = SEQ_MIDI_IN_BusPCSetGet(bus);               // chord tones (0 = none)
+
+  // Scale membership: PCs where the FTS snap is a fixed point (the table is a
+  // snap map, not a bitmask — test at a fixed mid octave to dodge 0/127 clamp).
+  u16 scaleMask = 0;
+  {
+    u8 pc;
+    for(pc=0; pc<12; ++pc) {
+      u8 n = 60 + pc;
+      if( SEQ_SCALE_NoteValueGet(n, scale, root) == n )
+        scaleMask |= (u16)(1u << pc);
+    }
+  }
+
+  u16 leL2 = (u16)(L1 | L2c);
+  u16 leL3 = (u16)(leL2 | scaleMask);
+
+  if( gravity == 0 ) { *zone = 0; return 0; }           // detent → pass-through
+
+  u16 band;
+  u8  z;
+  if( gravity < 0 ) {
+    // Pull side — nested, monotone toward the root.
+    if( gravity >= -24 )      { z = 3; band = leL3; }                       // SCALE
+    else if( gravity >= -48 ) { z = 2; band = leL2; }                       // CHORD
+    else                      { z = 1; band = (gravity <= -57) ? L0 : L1; } // DRONE
+  } else {
+    // Push side — tense targets.
+    if( gravity <= 24 ) {                                                   // LEAN
+      z = 4;
+      u16 b = (u16)(leL3 & ~leL2);   // in-scale, non-chord (sus/add color)
+      band = b ? b : leL3;
+    } else if( gravity <= 48 ) {                                            // RUB
+      z = 5;
+      u16 anchor = L2c ? L2c : L1;
+      u16 adj = (u16)(tension_rot12_up(anchor, 1) | tension_rot12_dn(anchor, 1));
+      u16 L4  = (u16)(~leL3 & 0x0FFF);   // chromatic remainder
+      u16 b   = (u16)(L4 & adj);         // chromatic neighbours of chord tones
+      band = b ? b : (L4 ? L4 : leL3);
+    } else {                                                               // SLIP
+      z = 6;
+      band = tension_rot12_up(L2c ? leL2 : L1, 1);  // chord planed +1 semitone
+    }
+  }
+  *zone = z;
+  return band;
+}
+
+// TENSION processor (§2.3). Parallels chord_mask_render_range, but swaps the
+// live SEQ_RANDOM gate for the deterministic grip hash and feeds chord_mask_snap
+// the GRAVITY band instead of the raw chord PC-set. p->strength carries the
+// per-track GRIP; GRAVITY/scale are read from globals. Skips 0-valued bytes
+// (drum lay_const fallback idiom). 0 GRIP or detent ⇒ untouched pass-through.
+static void tension_render_range(u8 track, const seq_processor_slot_t *p,
+                                 u8 *par_buf, u16 step_lo, u16 step_hi)
+{
+  if( !p->strength )                  // GRIP 0 → this track not held by the field
+    return;
+  s8 gravity = seq_core_tension_gravity;
+  if( !gravity )                      // detent → byte-identical pass-through (§2.3)
+    return;
+
+  u8 zone;
+  u16 band = SEQ_CORE_TensionBandMask(gravity, p->bus, &zone);
+  if( !band )                         // nothing legal to snap to → pass-through
+    return;
+
+  // Threshold: |gravity| (1..64) scaled by GRIP (0..127), /64 → 0..127. At full
+  // pull + full grip every note grips; light grip / shallow gravity → few.
+  u8  abs_g = (gravity < 0) ? (u8)(-(s16)gravity) : (u8)gravity;
+  u32 thr = ((u32)abs_g * (u32)p->strength) >> 6;
+  if( thr > 127 ) thr = 127;
+  if( !thr )
+    return;
+
+  // Grip-hash zone key. PULL collapses ALL into one class (0) so the gripped set
+  // only GROWS as |gravity| rises (thr ↑, band nests ⊆) — pulling harder can
+  // only move a voice further down the ladder, never pop it back out (§2.2
+  // monotone pull / §8.1 "collapse, not dropout"). PUSH keeps the per-zone id so
+  // LEAN/RUB/SLIP each select a different tense set (§2.3 variety across zones).
+  u8 hash_zone = (gravity < 0) ? 0 : zone;
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  u8 num_p_layers      = SEQ_PAR_NumLayersGet(track);
+  u16 num_p_steps      = SEQ_PAR_NumStepsGet(track);
+  u8 num_p_instruments = SEQ_PAR_NumInstrumentsGet(track);
+  if( step_hi > num_p_steps ) step_hi = num_p_steps;
+  if( step_lo >= step_hi ) return;
+
+  if( tcc->event_mode == SEQ_EVENT_MODE_Drum ) {
+    s8 nl = tcc->link_par_layer_note;
+    if( nl < 0 )
+      return;
+    u8 drum;
+    for(drum=0; drum<num_p_instruments; ++drum) {
+      if( !(p->drum_mask & (1u << drum)) )
+        continue;
+      u8 *base = &par_buf[(u32)drum*num_p_layers*num_p_steps + (u32)nl*num_p_steps];
+      u16 step;
+      for(step=step_lo; step<step_hi; ++step) {
+        u8 note = base[step];
+        if( !note )
+          continue;
+        if( tension_grip_hash(track, drum, step, hash_zone) < thr )
+          base[step] = chord_mask_snap(note, band);
+      }
+    }
+  } else {
+    u8 par_layer;
+    for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
+      if( tcc->lay_const[par_layer] != SEQ_PAR_Type_Note )
+        continue;
+      u8 *base = &par_buf[(u32)par_layer*num_p_steps];
+      u16 step;
+      for(step=step_lo; step<step_hi; ++step) {
+        u8 note = base[step];
+        if( !note )
+          continue;
+        if( tension_grip_hash(track, par_layer, step, hash_zone) < thr )
+          base[step] = chord_mask_snap(note, band);
+      }
+    }
+  }
+}
+
 // Phase D.2 — sweep-window render. Recopies source → ACTIVE output buffer
 // for a bounded [step_lo, step_hi) slice across every par/trg layer/drum,
 // then runs the processor stack on the same slice. Writes directly to the
@@ -546,6 +732,9 @@ static void sweep_window_render(u8 track)
       case SEQ_PROCESSOR_ID_CHORD_MASK:
         chord_mask_render_range(track, p, par_buf, step_lo, step_hi);
         break;
+      case SEQ_PROCESSOR_ID_TENSION:
+        tension_render_range(track, p, par_buf, step_lo, step_hi);
+        break;
       default:
         break;
     }
@@ -583,6 +772,9 @@ void SEQ_CORE_RenderTrack(u8 track)
     switch( p->id ) {
       case SEQ_PROCESSOR_ID_CHORD_MASK:
         chord_mask_render_range(track, p, par_buf, 0, num_p_steps);
+        break;
+      case SEQ_PROCESSOR_ID_TENSION:
+        tension_render_range(track, p, par_buf, 0, num_p_steps);
         break;
       default:
         break;
@@ -630,6 +822,141 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
     slot->drum_mask = 0xFFFF;
     SEQ_CORE_RenderTouched(track);
   }
+}
+
+// Tension Workbench (§3): the TENSION slot mirrors tcc->tension_grip (GRIP) into
+// slot->strength, and shares the chord-context bus + drum scope with chord_mask
+// (tcc->chordmask_bus / chordmask_drum_*). Enabled iff GRIP > 0. GRAVITY/SHADE
+// are globals read at render time, so they need no per-track mirror — only GRIP
+// gates whether a track is held by the field. Called from SEQ_CC_Set on a GRIP
+// write, and on a chordmask_bus/drum change (so the shared context stays synced).
+void SEQ_CORE_TensionSlotSync(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][SEQ_CORE_TENSION_SLOT];
+
+  if( tcc->tension_grip ) {
+    slot->id        = SEQ_PROCESSOR_ID_TENSION;
+    slot->enabled   = 1;
+    slot->strength  = tcc->tension_grip;
+    slot->bus       = tcc->chordmask_bus;
+    slot->drum_mask = ((u16)tcc->chordmask_drum_h << 8) | (u16)tcc->chordmask_drum_l;
+    SEQ_CORE_RenderTouched(track);
+  } else if( slot->id == SEQ_PROCESSOR_ID_TENSION ) {
+    slot->id        = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled   = 0;
+    slot->strength  = 0;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  }
+}
+
+// Set the global GRAVITY dial (clamped −64..+63) and re-render the tracks the
+// field holds. Touches them (sweep regime) so a live knob sweep stays smooth
+// while playing; when stopped, RenderTouched renders synchronously so the LCD/
+// audition reflect it. The cockpit GRAVITY encoder calls this. (The testctrl
+// CMD_TENSION_SET uses RenderDirtySetAll instead — it must make every track
+// reflect the value for offline pinning regardless of which tracks are gripped.)
+void SEQ_CORE_TensionGravitySet(s8 gravity)
+{
+  if( gravity < -64 ) gravity = -64;
+  if( gravity >  63 ) gravity =  63;
+  seq_core_tension_gravity = gravity;
+
+  u8 track, slot;
+  for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+    for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+      const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+      if( p->id == SEQ_PROCESSOR_ID_TENSION && p->enabled ) {
+        SEQ_CORE_RenderTouched(track);
+        break;
+      }
+    }
+  }
+}
+
+// RESOLVE (§3): a bar-quantized ramp of GRAVITY to the detent, landing exactly
+// on the next musical-measure downbeat — tension resolved into the One. The
+// glide runs in the per-tick prologue (SEQ_CORE_TensionResolveTick); a hard pin
+// at the ref_step==0 boundary (SEQ_CORE_Tick) guarantees the exact 0 landing.
+// Resolution timing is most of what separates an instrument from an effect
+// (Meyer/Huron), so the landing is quantized, not instantaneous. When the
+// transport is stopped there is no measure to ramp into, so RESOLVE snaps now.
+static u8  tension_resolve_active;
+static s32 tension_resolve_q8;       // GRAVITY × 256 during the glide (fixed point)
+static s32 tension_resolve_step_q8;  // per-tick magnitude toward 0 (0 = compute on first tick)
+
+void SEQ_CORE_TensionResolveCancel(void)
+{
+  tension_resolve_active = 0;
+}
+
+void SEQ_CORE_TensionResolve(void)
+{
+  if( seq_core_tension_gravity == 0 ) {     // already home
+    tension_resolve_active = 0;
+    return;
+  }
+  if( !SEQ_BPM_IsRunning() ) {              // no bar to ramp over → resolve now
+    tension_resolve_active = 0;
+    SEQ_CORE_TensionGravitySet(0);
+    return;
+  }
+  tension_resolve_q8      = (s32)seq_core_tension_gravity << 8;
+  tension_resolve_step_q8 = 0;              // sized on the first ramp tick
+  tension_resolve_active  = 1;
+}
+
+// Per-tick prologue glide. Sizes the step on the first tick from the ticks
+// remaining to the next downbeat, then walks GRAVITY toward 0 each tick. The
+// boundary pin in SEQ_CORE_Tick finalizes the exact landing + clears active.
+void SEQ_CORE_TensionResolveTick(u32 bpm_tick)
+{
+  if( !tension_resolve_active )
+    return;
+
+  if( tension_resolve_step_q8 == 0 ) {
+    // 384 ppqn → 96 ticks per 16th-note. seq_core_steps_per_measure is (steps−1),
+    // ref_step is the current 0-based step in the measure; the next downbeat is
+    // (steps_per_measure+1 − ref_step) sixteenths out, less our place in this one.
+    u32 sixteenth   = bpm_tick % 96;
+    u32 steps_left  = (u32)seq_core_steps_per_measure + 1 - seq_core_state.ref_step;
+    s32 ticks_to_dn = (s32)(steps_left * 96) - (s32)sixteenth;
+    if( ticks_to_dn < 1 ) ticks_to_dn = 1;
+    s32 mag = (tension_resolve_q8 < 0) ? -tension_resolve_q8 : tension_resolve_q8;
+    // round up so the glide fully reaches 0 by the downbeat (then holds, clamped)
+    // rather than undershooting and leaving a residual for the boundary pin.
+    tension_resolve_step_q8 = (mag + ticks_to_dn - 1) / ticks_to_dn;
+    if( tension_resolve_step_q8 < 1 ) tension_resolve_step_q8 = 1;
+  }
+
+  if( tension_resolve_q8 > 0 ) {
+    tension_resolve_q8 -= tension_resolve_step_q8;
+    if( tension_resolve_q8 < 0 ) tension_resolve_q8 = 0;
+  } else {
+    tension_resolve_q8 += tension_resolve_step_q8;
+    if( tension_resolve_q8 > 0 ) tension_resolve_q8 = 0;
+  }
+
+  s8 g = (s8)(tension_resolve_q8 >> 8);
+  if( g != seq_core_tension_gravity )
+    SEQ_CORE_TensionGravitySet(g);  // set + touch field tracks (does not cancel resolve)
+}
+
+// Called from the ref_step==0 measure boundary: pin GRAVITY to exactly 0 and
+// end the ramp. Returns 1 if a resolve landed (so the tick can re-render).
+u8 SEQ_CORE_TensionResolveBoundary(void)
+{
+  if( !tension_resolve_active )
+    return 0;
+  tension_resolve_active = 0;
+  tension_resolve_q8 = 0;
+  if( seq_core_tension_gravity != 0 )
+    SEQ_CORE_TensionGravitySet(0);
+  return 1;
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -1154,14 +1481,16 @@ void SEQ_CORE_RenderTracks(void)
 {
   u8 track;
   for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
-    // chord_mask depends on a live bus PC-set, not just source state — force
-    // a re-render every tick on any track carrying an enabled chord_mask
-    // slot, so the next emitted note reflects the current held chord. Phase D
-    // will optimize via sweep/quiet detection.
+    // chord_mask + tension depend on live inputs (the bus PC-set / the global
+    // GRAVITY dial), not just source state — force a re-render every tick on any
+    // track carrying an enabled chord_mask or tension slot, so the next emitted
+    // note reflects the current held chord / knob. Phase D will optimize via
+    // sweep/quiet detection.
     u8 slot;
     for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
       const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
-      if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled ) {
+      if( (p->id == SEQ_PROCESSOR_ID_CHORD_MASK || p->id == SEQ_PROCESSOR_ID_TENSION)
+          && p->enabled ) {
         seq_render_dirty[track] = 1;
         break;
       }
@@ -1682,6 +2011,10 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
   // reads the output mirror.
   SEQ_GENERATOR_Tick();
 
+  // RESOLVE glide (§3): walk the GRAVITY dial toward the detent BEFORE the
+  // renderer reads it, so each tick of the ramp re-renders the field tracks.
+  SEQ_CORE_TensionResolveTick(bpm_tick);
+
   // Phase A render-cache prologue: refresh dirty tracks' output mirrors before
   // any tick read. Identity copy only in phase A; processor stack lands in B/C.
   SEQ_CORE_RenderTracks();
@@ -1754,6 +2087,9 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
     // Master-sync (song-mode-only) runs first so any pending_resync it sets
     // is consumed by the same measure tick below.
     if( seq_core_state.ref_step == 0 ) {
+      // RESOLVE lands GRAVITY exactly on the One (§3 cadence).
+      SEQ_CORE_TensionResolveBoundary();
+
       if( synch_to_measure_req && SEQ_SONG_ActiveGet() && seq_song_guide_track ) {
 	seq_core_trk_t *t_ms = &seq_core_trk[0];
 	seq_cc_trk_t *tcc_ms = &seq_cc_trk[0];

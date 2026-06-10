@@ -118,21 +118,27 @@ Adding a new small-range field: prefer a bitfield. Adding a new CC: place it in 
 | 0x70–0x76 | Echo parameters |
 | 0x78–0x7b | Fx MIDI routing |
 | 0x80–0x95 | Robotize (extended block — **not in base 0x00..0x7f persistence loop**) |
-| 0x96–0x99 | ChordMask (strength / bus / drum-mask L+H) — **past the persisted ext range, see below** |
+| 0x96–0x99 | ChordMask (strength / bus / drum-mask L+H) |
+| 0x9a | Tension Workbench **GRIP** (per-track field strength) |
 
-CCs ≥ 0x80 require the v2 per-track ext block in `seq_file_b.c` to persist — and the
-v2 block stops at `SEQ_FILE_B_TRK_EXT_CC_LAST = 0x95` ([seq_file_b.c:62](../core/seq_file_b.c#L62)),
-so **0x96–0x99 currently reset on every reload** (verified against source
-2026-06-09; design doc §10 open bug, wider than its original 0x96-only record).
-Scheduled fix: Tension Workbench bundle extends the range behind a new ext tag
-(design doc §8 second build); GRIP's CC will land inside the extended range.
+CCs ≥ 0x80 require the per-track ext block in `seq_file_b.c` to persist. As of the
+**V3 ext-tag (2026-06-10)** the persisted range is 0x80–0x9F, so chord-mask (0x96–0x99)
+and GRIP (0x9a) now survive reboot/recall. (Before V3 the range stopped at
+`SEQ_FILE_B_TRK_EXT_CC_LAST = 0x95` and 0x96+ reset on reload — closed.)
 
 ### Extension-block format ([seq_file_b.c:45](../core/seq_file_b.c#L45))
 
 Per-track block appended after the trigger layers, within each pattern slot:
-- `tag:u8` (0x00 = no ext, 0x01 = v1 anchors only, 0x02 = v2 ext-CC + anchors)
-- v2 body: 22 bytes of ext CCs (0x80..0x95) + 64 bytes of `robotize_bar_anchors[16]` (u32 each)
-- `Create` allocates room for it; `Write` degrades gracefully (skips ext) on slots sized by older firmware.
+- `tag:u8` (0x00 = no ext, 0x01 = v1 anchors only, 0x02 = v2 ext-CC, 0x03 = **v3 ext-CC**)
+- v2 body: 22 ext-CC bytes (0x80..0x95) + 64 `robotize_bar_anchors`; v3 body: **32** ext-CC
+  bytes (0x80..0x9F) + the same anchors. Read path dispatches on tag; the **v2 byte-count
+  is frozen separately** (`..._CC_COUNT_V2 = 22`) so old patterns still align — bumping
+  `..._CC_LAST` alone would have mis-read every v2 pattern's anchors.
+- `Create` allocates room from the current (v3) size; `Write` skips ext on slots too small
+  to fit it. In practice existing banks had slack (par/trg layer data dominates
+  `pattern_size`), so the wider block fit without re-formatting. `SEQ_FILE_B_Create` is
+  **header-only** (the slot-fill loop is `#if 0`) — a created bank isn't loadable until its
+  slots are written.
 
 ### Ring-buffer for retroactive state capture
 
@@ -151,6 +157,48 @@ Every `ui_menu_pages[]` row carries:
 - `init_callback`
 
 Adding a UI page: append to both the enum and the table, leave existing `old_bm_index` values alone.
+
+### Tension Workbench / GRAVITY field ([seq_core.c](../core/seq_core.c), [seq_ui_gravity.c](../core/seq_ui_gravity.c))
+
+Render-stack harmony processor (design doc §8 second build, shipped 2026-06-10).
+- **Processor:** `SEQ_PROCESSOR_ID_TENSION` (=2) in **slot 1** (chord-mask owns slot 0).
+  `tension_render_range` mirrors `chord_mask_render_range` but swaps the live
+  `SEQ_RANDOM` gate for a deterministic hash and feeds a computed band to the (reused)
+  `chord_mask_snap`. `SEQ_CORE_TensionBandMask(gravity, bus, *zone)` builds the ladder→
+  zone band (public — HIL pins it). Dispatched in BOTH render switches + the per-tick
+  implicit-dirty loop, beside chord-mask.
+- **Grip gate:** `tension_grip_hash(track, instr, step, zone)` — local xorshift32 mix,
+  `% 127`. Keyed on `zone` only when `gravity > 0` (push variety); pull collapses all
+  zones to class 0 (monotone — deeper pull only ADDS gripped voices). Threshold =
+  `(|gravity| × GRIP) >> 6`.
+- **State:** `seq_core_tension_gravity` (s8 global, −64..+63; config-persisted, NOT
+  pattern). `SEQ_CORE_TensionGravitySet` clamps + touches field tracks (live sweep).
+  GRIP = `SEQ_CC_TENSION_GRIP` 0x9a per-track → `SEQ_CORE_TensionSlotSync` arms slot 1
+  (shares chord-mask's bus + drum scope).
+- **RESOLVE:** `SEQ_CORE_TensionResolve` (arm) / `…ResolveTick` (per-tick glide in the
+  `SEQ_CORE_Tick` prologue, step sized to ticks-to-next-downbeat) / `…ResolveBoundary`
+  (pin to 0 at `ref_step==0`) / `…ResolveCancel` (a manual turn aborts). Instant when
+  stopped.
+- **Cockpit:** `seq_ui_gravity.c`, `SEQ_UI_PAGE_GRAVITY` (enum value 60), reached via
+  GP16 from FX_SCALE. GP1 GRAVITY / GP2 SHADE (writes `seq_core_global_scale` along the
+  brightness ladder indices {15,12,16,13,17,14,18}) / GP3 GRIP / GP8 RESOLVE. LCD2 row0
+  = bipolar fill meter (`tension_meter`) with zone-boundary ticks.
+
+**Gotchas:**
+- `SEQ_LCD_PrintFormattedString` has **no `+` flag** — `"%+4d"` renders as literal
+  "4d". Format signed values as `"%c%2d"` (sign + magnitude), the codebase idiom.
+- `pattern_load` updates source par/trg but the **stopped output mirror** that
+  `SEQ_PAR_Get` reads only refreshes on a render; a read right after a load can be stale
+  (and a recently-touched track renders *sweep* = a partial window). Read from an
+  untouched group, or force a render.
+- **testctrl verbs** (seq_testctrl.c): `CMD_TENSION_SET` 0x69 (gravity ±64-biased),
+  `…_BAND_GET` 0x6a (pure-function band pin), `…_GET` 0x6b, `…_RESOLVE` 0x6c,
+  `CMD_PATTERN_SAVE` 0x6d. `CMD_BANK_CREATE` 0x6e exists but is **incomplete/unused**
+  (`SEQ_FILE_B_Create` is header-only) — byte 0x6e is allocated; remove or fix-with-fill
+  if ever needed.
+- **Rig tooling:** `tests/harness/rigs.py` — `build_tension` + CLI
+  (`python -m harness.rigs tension`) sets up a clean playable rig in one command (loads
+  AUTOTEST baseline, routes the lead to USB2, GRIP on, GRAVITY page up).
 
 ### Two-pass robotize at runtime ([seq_core.c:1227 & :1423](../core/seq_core.c#L1227))
 
