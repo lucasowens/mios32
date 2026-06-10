@@ -161,7 +161,8 @@ Adding a UI page: append to both the enum and the table, leave existing `old_bm_
 ### Tension Workbench / GRAVITY field ([seq_core.c](../core/seq_core.c), [seq_ui_gravity.c](../core/seq_ui_gravity.c))
 
 Render-stack harmony processor (design doc §8 second build, shipped 2026-06-10).
-- **Processor:** `SEQ_PROCESSOR_ID_TENSION` (=2) in **slot 1** (chord-mask owns slot 0).
+- **Processor:** `SEQ_PROCESSOR_ID_TENSION` (=2) in **slot 2** (Track 2 re-home
+  2026-06-10: PITCH=0, CHORD_MASK=1, TENSION=2, LIMIT=3 — next section).
   `tension_render_range` mirrors `chord_mask_render_range` but swaps the live
   `SEQ_RANDOM` gate for a deterministic hash and feeds a computed band to the (reused)
   `chord_mask_snap`. `SEQ_CORE_TensionBandMask(gravity, bus, *zone)` builds the ladder→
@@ -173,12 +174,15 @@ Render-stack harmony processor (design doc §8 second build, shipped 2026-06-10)
   `(|gravity| × GRIP) >> 6`.
 - **State:** `seq_core_tension_gravity` (s8 global, −64..+63; config-persisted, NOT
   pattern). `SEQ_CORE_TensionGravitySet` clamps + touches field tracks (live sweep).
-  GRIP = `SEQ_CC_TENSION_GRIP` 0x9a per-track → `SEQ_CORE_TensionSlotSync` arms slot 1
-  (shares chord-mask's bus + drum scope).
+  GRIP = `SEQ_CC_TENSION_GRIP` 0x9a per-track → `SEQ_CORE_TensionSlotSync` arms the
+  tension slot (shares chord-mask's bus + drum scope).
 - **RESOLVE:** `SEQ_CORE_TensionResolve` (arm) / `…ResolveTick` (per-tick glide in the
   `SEQ_CORE_Tick` prologue, step sized to ticks-to-next-downbeat) / `…ResolveBoundary`
   (pin to 0 at `ref_step==0`) / `…ResolveCancel` (a manual turn aborts). Instant when
-  stopped.
+  stopped. **Transport STOP also lands an in-flight ramp at 0** (Boundary in the
+  ChkReqStop handler, 2026-06-10) — the glide reaches 0 *before* the downbeat by
+  design, and stopping in that window used to strand `tension_resolve_active`,
+  silently zeroing GRAVITY at the next play's first downbeat.
 - **Cockpit:** `seq_ui_gravity.c`, `SEQ_UI_PAGE_GRAVITY` (enum value 60), reached via
   GP16 from FX_SCALE. GP1 GRAVITY / GP2 SHADE (writes `seq_core_global_scale` along the
   brightness ladder indices {15,12,16,13,17,14,18}) / GP3 GRIP / GP8 RESOLVE. LCD2 row0
@@ -199,6 +203,50 @@ Render-stack harmony processor (design doc §8 second build, shipped 2026-06-10)
 - **Rig tooling:** `tests/harness/rigs.py` — `build_tension` + CLI
   (`python -m harness.rigs tension`) sets up a clean playable rig in one command (loads
   AUTOTEST baseline, routes the lead to USB2, GRIP on, GRAVITY page up).
+
+### Track 2 — stack-resident pitch chain ([seq_core.c](../core/seq_core.c), shipped 2026-06-10)
+
+Transpose → force-to-scale → note-limit live in the render stack (design doc §8
+Track 2; plan `doc/plans/2026-06-10-pitch-chain-migration.md`). HIL 108/108.
+- **Slot homes** (= stack order, the musical chain): `SEQ_CORE_PITCH_SLOT 0`
+  (`SEQ_PROCESSOR_ID_PITCH`=3, transpose+FTS fused — snap-after-transpose keeps
+  planing in-scale), `CHORDMASK_SLOT 1`, `TENSION_SLOT 2`, `LIMIT_SLOT 3`
+  (`SEQ_PROCESSOR_ID_LIMIT`=4, the final octave-fold). FTS upstream of TENSION
+  retired the Track-1 "FTS off on gripped tracks" POC rule.
+- **Renderers:** `pitch_render_range` (Normal/Transpose/ChordMask playmodes; global
+  transpose = notes only; CC+PB value shift in CC event mode — PC/AT deliberately
+  excluded, the legacy shift wrote a don't-care byte; transposer-no-key → mirror
+  RESTS, with a dedicated emission branch releasing held glides) and
+  `limit_render_range` (`SEQ_CORE_Limit` parity + per-step no_fx TRG escape,
+  OOB-guarded). Per-step Scale/Root via `pitch_step_scale_root` — reads the buffer
+  being built, NOT `SEQ_PAR_Get`.
+- **Syncs (phase-C bridge pattern):** `SEQ_CORE_PitchSlotSync` /
+  `SEQ_CORE_LimitSlotSync`, armed iff non-neutral; triggered from `SEQ_CC_Set` on
+  MODE / MODE_FLAGS / TRANSPOSE_* / BUSASG / EVENT_MODE / LIMIT_* / ASG_NO_FX /
+  lay_const writes. **GOTCHA: any writer that bypasses `SEQ_CC_Set` (direct tcc
+  writes) MUST re-run all four slot syncs** — `SEQ_FILE_T_Read` (preset import)
+  and the `CaptureToSlotTrack` restore both shipped that bug before review.
+- **Three emission fences** (the per-event `legacy_pitch` gate in `SEQ_CORE_Tick`
+  keeps the legacy chain): Arpeggiator playmode (multi-arp runtime state), Drum
+  event mode (a 0 Note byte = lay_const fallback, NOT a rest), Chord par layers
+  (the byte is a chord index).
+- **Dirty model:** PITCH joins the per-tick implicit dirty only when live-varying
+  (`pitch_slot_live`: Transpose playmode / global transpose); every global
+  scale/root/keyb-root write site carries a change-guarded `RenderDirtySetAll`
+  hook. `seq_core_global_transpose_enabled` has NO runtime writer on this fork.
+- **Emission carve-out:** humanize-note / LFO-note re-snap + re-fold IFF the
+  mutator actually moved the note. Robotize needs nothing (walks scale degrees
+  under FORCE_SCALE itself).
+- **`SEQ_CORE_BakeForceScale` is DELETED** — capture = mirror copy +
+  `SEQ_CC_ResetGenerativeForBounce`; capturing a planed groove is faithful (the
+  bake never was). `SEQ_CORE_ProcessorBounce` untangles pitch/tension/limit tcc.
+- **HIL:** `test_pitch_chain.py` (12 pins incl. planing-in-scale, FTS+GRIP push
+  surviving to emission, capture-planed-groove); `test_capture_force_scale.py`
+  reshaped — the mirror now holds the SNAPPED pitch (precondition inverted).
+  **Test gotchas:** AUTOTEST A3 ships with trkmode HOLD set (clear MODE_FLAGS for
+  transposer pins — a held transposer keeps the last released key by design);
+  standalone `Board()` scripts run on the USER session, not AUTOTEST (pytest's
+  conftest swaps and restores it).
 
 ### Two-pass robotize at runtime ([seq_core.c:1227 & :1423](../core/seq_core.c#L1227))
 
@@ -380,22 +428,22 @@ That axis is kept faithful by one of **two mechanisms**:
   **groove** (per-step swing/velocity/length; its negative timing delays can't be baked into
   step params anyway). `ResetGenerativeForBounce` leaves groove (style+value) alone.
 - **BAKE into the captured notes** when preserving the flag would couple the frozen copy to
-  *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap is emission-time (the tick,
-  after transpose; [seq_core.c:2142](../core/seq_core.c#L2142)) and resolves scale/root from the
-  *global* scale + per-step Scale/Root layers, so a preserved flag would re-pitch the copy on a
-  later key change. `SEQ_CORE_BakeForceScale(track)` ([seq_core.c](../core/seq_core.c)) instead
-  snaps each non-drum Note par-layer value into the heard pitch — reproducing
-  `noteLimit(forceScale(transpose(raw)))` — and is called in all three freeze verbs *before*
-  `ResetGenerativeForBounce` clears the flag/limits/transpose.
-  - **GOTCHA (cost a blocker in review):** `SEQ_PAR_Set` writes the source buffer
-    `seq_par_layer_value` ([seq_par.c:258](../core/seq_par.c#L258)) but `SEQ_PAR_Get` reads the
-    double-buffered **output mirror** ([:285](../core/seq_par.c#L285)). A freshly-written capture
-    destination has the captured notes ONLY in the source buffer (the mirror is stale until the
-    next render+flip), so `BakeForceScale` reads AND writes `seq_par_layer_value` directly and
-    marks the track render-dirty. Any future "operate on just-captured par data" code must do the
+  *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap was emission-time and
+  `SEQ_CORE_BakeForceScale(track)` reproduced `noteLimit(forceScale(transpose(raw)))` at
+  capture. **SUPERSEDED 2026-06-10 (Track 2): the bake is DELETED.** The pitch chain renders
+  into the output mirror, so the capture copy holds the heard pitch by construction — same
+  observable contract (frozen copy = heard pitches, FORCE_SCALE reset), no bake code. The
+  bake-vs-preserve mechanism choice above remains the live rule for any FUTURE emission-time
+  effect (which the §3 born-as-processors rule says not to write in the first place).
+  - **GOTCHA (still live for any "operate on just-captured par data" code):** `SEQ_PAR_Set`
+    writes the source buffer `seq_par_layer_value` ([seq_par.c:258](../core/seq_par.c#L258))
+    but `SEQ_PAR_Get` reads the double-buffered **output mirror**
+    ([:285](../core/seq_par.c#L285)). A freshly-written capture destination has the captured
+    notes ONLY in the source buffer (the mirror is stale until the next render+flip) — read
+    and write `seq_par_layer_value` directly and mark the track render-dirty. Such code must do the
     same, not call `SEQ_PAR_Get`.
-  - **GOTCHA:** emission applies `SEQ_CORE_Limit` (note limit) AFTER the snap, so the bake
-    reproduces it too — both limit bounds are zeroed by the reset.
+  - (The old "bake reproduces the post-snap note limit" gotcha died with the bake —
+    the LIMIT processor folds in the mirror, slot 3, Track 2.)
 
 `transpose` (for non-force-scaled tracks), `echo`/`LFO`/`direction` are emission-time
 deterministic too and are the remaining shaping-axis candidates. When you add a new `SEQ_CC_*`,

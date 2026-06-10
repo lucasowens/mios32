@@ -346,7 +346,8 @@ harmonic sibling of that page). It's also in the page menu as **GRAVITY**.
   moves across (force-to-scale tracks follow it too).
 - **GP8 — RESOLVE.** Ramps GRAVITY back to the detent, landing on the next downbeat —
   tension resolved into the One, on the beat. (Instant when stopped; turning GP1 cancels
-  an in-flight resolve.)
+  an in-flight resolve; **stopping the transport mid-ramp lands it at the detent
+  immediately** — same "no bar to ramp into" rule.)
 - **GP16** — back to FX → Scale.
 
 ### Reading the meter
@@ -358,12 +359,38 @@ crossed) mark the zone boundaries. The zone name + signed value sit alongside.
 
 ### Notes
 
-- **Turn force-to-scale OFF on gripped tracks** (TRKMODE page). GRAVITY's pull already
-  contains scale-snap; leaving emission FTS on would re-correct every pushed note.
+- **Force-to-scale and GRIP now coexist on one track** (since the pitch-chain
+  migration, 2026-06-10): FTS tidies *before* the field, so a push lands on the
+  tidied material and **survives** — the old "turn FTS off on gripped tracks" rule
+  is retired. Sweep with both on; the pull side and FTS agree by construction.
 - **GRAVITY/SHADE are performance state** (session config, like the global scale), not
   per-pattern. **GRIP is per-track** and saved with the pattern.
 - A pushed groove **bounces faithfully** — capture a gripped track and the heard
-  (pushed) pitches are baked into the notes, no special handling.
+  (pushed) pitches are in the notes, no special handling.
+
+---
+
+## The Pitch Chain (transpose · force-to-scale · note limit)
+
+Since 2026-06-10 the per-track pitch chain — **transpose** (including live
+bus-planing in Transpose track mode), **force-to-scale**, and the **note limit**
+(FX → Limit) — is computed *into the track's playing material*, not sprayed on at
+the MIDI output. You'll feel it in three places:
+
+- **What you see is what you hear.** The EDIT page shows the *sounding* pitch —
+  planed, snapped, folded — not the raw stored note.
+- **Planing stays in key.** In Transpose mode with FTS on, the snap happens *after*
+  the bus offset, so planing a groove from a keyboard never walks it off-scale.
+- **Capture is always faithful.** Bounce/capture a planed, snapped, limited,
+  gripped groove and the frozen copy holds exactly the heard pitches, with the
+  chain's dials reset on the copy — recall it cold and it *is* that moment.
+  (Previously a captured planed track silently lost its planing.)
+
+Edge behaviors worth knowing: with **no key held in Transpose mode** the track is
+silent and shows rests (with HOLD on it keeps following the last key, as always);
+**Arpeggiator tracks and drum tracks keep the old output-side chain** (unchanged
+feel); humanize/LFO note-wander still lands in-scale and in-window on FTS/limited
+tracks.
 
 ---
 

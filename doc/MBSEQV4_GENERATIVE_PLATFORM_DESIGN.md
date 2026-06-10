@@ -185,11 +185,13 @@ material; they do not create it.
 **Born-as-processors rule** *(2026-06-09)*: **new musical transforms are born in the
 render stack, not at emission time.** Emission-time effects are invisible to
 `OutputActive`, so every one of them forces hand-written bake code at bounce (the §9
-freeze-faithfulness saga: groove, FORCE_SCALE, the still-deferred transpose/echo
-pass); stack processors are bounce-faithful *by construction*. The legacy emission
-chain (transpose → force-scale → limit) migrates into the stack as Track 2 of the
-Tension Workbench (§8 second build), deleting the bake program rather than
-extending it.
+freeze-faithfulness saga); stack processors are bounce-faithful *by construction*.
+**Done 2026-06-10:** the legacy emission chain (transpose → force-scale → limit)
+migrated into the stack as Track 2 (§8 second build) and `SEQ_CORE_BakeForceScale`
+was deleted — the bake program is over. Still emission-time (deliberately): groove
+(timing), humanize/LFO/robotize (generation-axis randomness, reset on bounce
+anyway), echo (scheduled repeats), and the three fenced pitch cases (arp playmode,
+drum event mode, chord-layer expansion — §9 2026-06-10).
 
 ### Bounce (verb)
 Bounce **commits the current processor (or engaged-generator) output into the buffer
@@ -720,6 +722,22 @@ conflict properly.
    per-effect bake program by construction; stack ordering becomes explicit (§9
    wanted this); TRKMODE/FTS UX preserved via the phase-C slot-sync bridge; the
    existing capture HIL tests are the regression net.
+
+   > **SHIPPED + by-ear GO — 2026-06-10 (HIL 108/108; "works so well").** Built in four staged
+   > checkpoints (plan `doc/plans/2026-06-10-pitch-chain-migration.md`). Slot
+   > order: PITCH(0) → CHORD_MASK(1) → TENSION(2) → LIMIT(3) — FTS upstream of
+   > TENSION **retires the Track-1 POC rule**: FORCE_SCALE and GRIP coexist on a
+   > track, a push survives the snap (HIL-pinned at emission). Three fences keep
+   > the legacy emission chain: **Arp playmode** (multi-arp runtime state; user
+   > call), **Drum event mode** (0-byte = lay_const fallback, not a rest), and
+   > **Chord par layers** (the byte is a chord index). The bake is deleted —
+   > capture = mirror copy + the existing generative reset, and **capturing a
+   > planed groove is now faithful** (the old bake only reproduced static
+   > Normal-mode transpose). Two latent Track-1 bugs fixed en route: stranded
+   > RESOLVE flag eating GRAVITY at next play's downbeat (STOP now lands an
+   > in-flight ramp at 0), and preset-import/capture-restore paths that bypassed
+   > the slot bridges. Decisions + accepted edges in §9 (2026-06-10, Track 2);
+   > symbols/gotchas in the REFERENCE doc.
 
 **Listen protocol (the GO/NO-GO):** does full pull feel *inevitable*; does LEAN
 read as harmony, not error; does the detent feel like home; does push→RESOLVE land
@@ -1574,6 +1592,52 @@ drifted toward a build journal, burying the multi-session spine it exists to be.
   CC lands inside the extended range. Independent of the larger v3 *format* work
   (processor/generator posture), which stays deferred.
 
+**2026-06-10 — Track 2 BUILT (pitch-chain migration; HIL 108/108)**
+- **Fences instead of total migration.** Three event classes keep the legacy
+  emission chain behind a per-event `legacy_pitch` gate: Arpeggiator playmode
+  (multi-arp cycles `t->arp_pos` per emission — runtime state a step-deterministic
+  render can't reproduce; **user call 2026-06-10**, migrate-when-touched), Drum
+  event mode (a 0 Note byte falls back to the per-drum lay_const note and still
+  plays — mirror-rest silence is wrong there; fenced until drum pitch gets its own
+  design pass), and Chord par layers (the par byte is a chord index; pitch only
+  exists post-expansion).
+- **Slot order is the musical statement:** PITCH(0) → CHORD_MASK(1) → TENSION(2) →
+  LIMIT(3). Tidy/plane first, the chord wins over the scale, tension pushes last
+  and survives, the limit folds the result. Deliberate behavior change vs the old
+  emission order (FTS used to re-snap *after* the chord mask): **the POC rule
+  ("FTS off on gripped tracks") is retired** — pinned at emission by HIL.
+- **Capture-while-planed is faithful** — the migration's headline musical win. The
+  deleted bake only ever reproduced static Normal-mode transpose; now the mirror
+  holds plane+snap+fold and capture is a plain copy + the existing generative
+  reset. The per-effect bake program is over.
+- **Emission note-mutators get a narrow carve-out, not a migration.** Humanize-note
+  / LFO-note re-snap + re-fold at emission IFF the mutator actually moved the note
+  (stack output, including a push, passes through untouched). Robotize needed
+  nothing — it already walks scale degrees under FORCE_SCALE. Echo keeps its
+  per-repeat re-snap (pushed-note echoes resolve into the terrain — accepted,
+  arguably musical).
+- **Dirty model:** PITCH joins the per-tick implicit dirty only when live-varying
+  (Transpose playmode / global transpose); static transpose/FTS/LIMIT render on
+  events, with change-guarded `RenderDirtySetAll` hooks at every global
+  scale/root/keyb-root write site. Direct-tcc writers (track-preset import,
+  CaptureToSlotTrack restore) must re-run the four slot syncs — two such bypasses
+  were found by review and fixed.
+- **STOP lands an in-flight RESOLVE at 0** (boundary semantics, matching
+  stopped-RESOLVE's instant snap). Fixes a latent Track-1 bug: the glide reaches 0
+  before the downbeat by design, and stopping in that window stranded
+  `tension_resolve_active`, silently zeroing GRAVITY at the next play's downbeat.
+  By-ear alternative if landing feels wrong: freeze at mid-ramp.
+- **Accepted edges** (each documented at the code site): transpose-note-0 ("play
+  C-2") unrepresentable in the mirror; transposer-no-key writes rests
+  (bounce-visible silence; a dedicated emission branch still releases held
+  glides); morph blends already-pitched values (an in-scale blend can pass
+  off-scale — decide by ear); nth-trigger no_fx can't escape the stack LIMIT
+  (bar-dependent; the per-step no_fx TRG layer still does); PC/AT values are NOT
+  shifted in CC mode (the legacy "shift" wrote a don't-care byte — never audible);
+  CC/PB dedupe compares post-pitch values (constant CC lanes re-send on plane
+  changes); edit-page note display always shows the heard pitch
+  (PRINT_TRANSPOSED_NOTES re-apply removed — it would double-transpose).
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -1760,8 +1824,21 @@ very tense" vs "all notes slightly tense" as separate moves).*
 - Physical page + GP allocation (decide with hardware in hand, §A3 precedent).
 - Global GRAVITY persistence: performance state (like window source, §3) vs session
   config — decide when saving feels wrong.
-- Track 2 edges: echo (emission-scheduled repeats), the live/jam input path, and
-  per-step Root/Scale par-layer overrides against a stack-resident pitch chain.
+- ~~Track 2 edges: echo, the live/jam input path, per-step Root/Scale overrides.~~
+  **CLOSED 2026-06-10** (Track 2 built): echo keeps its per-repeat re-snap (the
+  snap is idempotent on mirror notes; pushed-note echoes resolve into the
+  terrain); the live/jam path is untouched (live notes never traverse the render
+  buffers — same primitives, same tcc truth); per-step Root/Scale overrides are
+  read by the PITCH render from the buffer being built (`pitch_step_scale_root`).
+  Accepted-edge list in §9 (2026-06-10).
+- **Drum-track pitch chain** (new, from the Track 2 drum fence): drums keep the
+  legacy emission chain because a 0 Note byte means "lay_const fallback, still
+  plays" — mirror-rest silence and skip-0 are both wrong there. Migrating drums
+  needs its own design pass (what does transposer-silence mean for a kit? does
+  the fallback note transpose?). Pitched-drum GRAVITY work is unaffected
+  (chord-mask/tension process drum note layers already).
+- STOP-mid-RESOLVE semantics: now lands at 0 (boundary). If by ear the landing
+  feels wrong mid-performance, the alternative is freeze-at-mid-ramp (one line).
 
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
