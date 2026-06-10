@@ -1,19 +1,19 @@
-"""Freeze faithfulness — FORCE_SCALE is BAKED into the captured notes, not
-preserved as a flag (the §9 "bake heard pitches" decision).
+"""Freeze faithfulness — a frozen FORCE_SCALE track holds the HEARD pitches and
+plays back with FORCE_SCALE reset (the §9 "bake heard pitches" decision).
 
-Force-to-scale is applied at EMISSION (the tick, per played note, after
-transpose) and is NEVER baked into the captured OutputActive — the captured Note
-layer holds the RAW, off-scale note. Two ways to keep a frozen force-scale track
-faithful:
-  - preserve the FORCE_SCALE flag and re-snap LIVE → a later global-key change
-    would silently re-pitch the frozen copy (rejected);
-  - bake the heard pitch into the Note layer at capture time and leave FORCE_SCALE
-    reset → the copy is immune to later key changes (chosen).
+Track 2 (pitch-chain migration, plan 2026-06-10) changed HOW this is achieved
+without changing WHAT these pins assert:
+  - pre-Track-2: the snap was emission-time, the mirror held the RAW note, and
+    SEQ_CORE_BakeForceScale re-applied transpose+snap+limit at capture;
+  - Track 2 Stage A: the snap lives in the RENDER STACK — the mirror (and thus
+    the plain capture copy) already holds the snapped note; the interim bake
+    only reproduces the still-emission-side note limit (gone entirely with the
+    Stage-B LIMIT processor + Stage-D bake deletion).
 
-These pins prove the chosen behavior on the real gesture verb AND the in-place
-verb: a seeded off-scale note comes back SNAPPED, an in-scale note is unchanged,
-and the FORCE_SCALE flag is RESET on the frozen copy (the snap lives in the notes
-now, not in a re-applied flag).
+The observable contract is identical either way and is what these pins protect:
+a seeded off-scale note comes back SNAPPED in the frozen copy, an in-scale note
+is unchanged, and FORCE_SCALE is RESET on the copy (the snap lives in the notes,
+immune to later global-key changes).
 
 Key = C Major, pinned via board.global_scale_set (board.reset does not touch the
 global scale). Major snap (root C): C#->D, D#->E, F#->G, A#->B; C/D/E/G unchanged.
@@ -80,11 +80,11 @@ def _setup_force_scale_source(board: Board) -> None:
         board.track_par_set(SRC_TRACK, NOTE_LAYER, 0, step, raw)
     time.sleep(SETTLE)
 
-    # The captured OutputActive holds the RAW note — force-scale is emission-time,
-    # not in the mirror. This is exactly why baking is needed: a no-op freeze would
-    # carry the off-scale 61 through.
-    assert board.track_par_get(SRC_TRACK, NOTE_LAYER, 0, 0) == 61, (
-        "source output mirror should be RAW (off-scale) — the snap is emission-time"
+    # Track 2: the snap is stack-resident, so the output mirror already holds the
+    # HEARD (snapped) pitch — the capture copy is faithful with no bake. This
+    # precondition pins the inversion (pre-Track-2 the mirror held the raw 61).
+    assert board.track_par_get(SRC_TRACK, NOTE_LAYER, 0, 0) == 62, (
+        "source output mirror should hold the SNAPPED pitch — FTS is stack-resident"
     )
 
 
@@ -147,9 +147,11 @@ def test_bounce_bakes_force_scale(board):
 
 @pytest.mark.hardware
 def test_capture_bakes_force_scale_then_limit(board):
-    """The heard pitch is noteLimit(forceScale(note)) — emission applies the note
-    limit AFTER the snap. The bake must reproduce both, since
-    ResetGenerativeForBounce clears the limit CCs.
+    """The heard pitch is noteLimit(forceScale(note)) — the snap is stack-resident
+    (Track 2), the note limit still applies at emission AFTER it, and the interim
+    bake reproduces just the limit (ResetGenerativeForBounce clears the limit CCs).
+    Stage B moves the limit into the stack; Stage D deletes the bake — the baked
+    values pinned here stay identical through both.
 
     Note: SEQ_CORE_Limit's note limit is NOT a min/max clamp — SEQ_CORE_TrimNote
     OCTAVE-FOLDS an out-of-range note back toward the window, preserving pitch

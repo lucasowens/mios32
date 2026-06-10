@@ -839,7 +839,6 @@ s32 SEQ_LCD_PrintLayerValue(u8 track, u8 par_layer, u8 par_value)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 step_view, int print_edit_value)
 {
-  seq_core_trk_t *t = &seq_core_trk[track];
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
   seq_par_layer_type_t layer_type = SEQ_PAR_AssignmentGet(track, par_layer);
   u8 event_mode = SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE);
@@ -872,19 +871,14 @@ s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 s
       }
     }
 
-    if( seq_ui_options.PRINT_TRANSPOSED_NOTES && tcc->playmode != SEQ_CORE_TRKMODE_Arpeggiator && layer_event.midi_package.note > 0 && (print_without_gate || layer_event.midi_package.velocity > 0) ) {
-      // transpose notes/CCs
-      SEQ_CORE_Transpose(track, instrument, t, tcc, &layer_event.midi_package);
+    // Track 2 (pitch-chain migration): transpose + force-to-scale live in the
+    // render stack, and this value was read through the output mirror — it is
+    // already the heard pitch for every non-arp track, so the old
+    // PRINT_TRANSPOSED_NOTES re-apply (SEQ_CORE_Transpose + SEQ_SCALE_Note on
+    // top) would double-transpose. The option's intent is now satisfied by the
+    // mirror itself; the block (which already excluded Arpeggiator playmode)
+    // is gone.
 
-      if( seq_cc_trk[track].trkmode_flags.FORCE_SCALE && layer_type != SEQ_PAR_Type_Chord1 && layer_type != SEQ_PAR_Type_Chord2 && layer_type != SEQ_PAR_Type_Chord3 ) {
-	if( layer_event.midi_package.note ) {
-	  u8 scale, root_selection, root;
-	  SEQ_CORE_FTS_GetScaleAndRoot(track, step, instrument, tcc, &scale, &root_selection, &root);
-	  SEQ_SCALE_Note(&layer_event.midi_package, scale, root);
-	}      
-      }
-    }
-    
     if( step_view ) {
       if( layer_event.midi_package.note &&
 	  (print_edit_value >= 0 || print_without_gate || (layer_event.midi_package.velocity && SEQ_TRG_GateGet(track, step, instrument))) ) {

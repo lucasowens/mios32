@@ -237,6 +237,8 @@ typedef enum {
   SEQ_PROCESSOR_ID_NONE       = 0,
   SEQ_PROCESSOR_ID_CHORD_MASK = 1,
   SEQ_PROCESSOR_ID_TENSION    = 2, // GRAVITY field (Tension Workbench, §2)
+  SEQ_PROCESSOR_ID_PITCH      = 3, // transpose+FTS (Track 2 pitch-chain migration)
+  SEQ_PROCESSOR_ID_LIMIT      = 4, // note-limit octave fold (Track 2 Stage B)
 } seq_processor_id_t;
 
 typedef struct {
@@ -427,6 +429,17 @@ extern void SEQ_CORE_ChordMaskSlotSync(u8 track);
 // (GRIP + the shared chord-context bus/drum scope). Called from SEQ_CC_Set.
 extern void SEQ_CORE_TensionSlotSync(u8 track);
 
+// Track 2 (pitch-chain migration): keep the PITCH processor slot mirrored from
+// tcc (playmode / transpose / FORCE_SCALE / transposer bus). Armed only when
+// the chain is non-neutral; never armed in Arpeggiator playmode (fenced at
+// emission). Called from SEQ_CC_Set.
+extern void SEQ_CORE_PitchSlotSync(u8 track);
+
+// Track 2 Stage B: keep the LIMIT processor slot mirrored from tcc
+// (limit_lower/upper). Armed iff either bound is set; same arp/drum fences as
+// PITCH. Called from SEQ_CC_Set.
+extern void SEQ_CORE_LimitSlotSync(u8 track);
+
 // Set the global GRAVITY dial (clamped −64..+63) and touch the field-bearing
 // tracks so a live cockpit-encoder sweep re-renders smoothly. Called from the
 // GRAVITY page encoder.
@@ -462,14 +475,9 @@ extern s32 SEQ_CORE_CaptureTrackOutput(u8 track, u8 *par_dst, u8 *trg_dst);
 // slot was enabled), 0 otherwise. Sweep-safe via SEQ_CORE_CaptureTrackOutput.
 extern s32 SEQ_CORE_ProcessorBounce(u8 track);
 
-// Fork: bake the deterministic force-to-scale snap (and, in Normal playmode, the
-// static transpose offset) into a captured track's Note par-layers, so the frozen
-// tape holds the exact heard pitches and FORCE_SCALE can stay reset. Call on a
-// track whose live par buffer holds the captured output and whose tcc still
-// carries the source's pre-reset config — AFTER the capture copy, BEFORE
-// SEQ_CC_ResetGenerativeForBounce. No-op unless FORCE_SCALE is set; non-drum
-// Note layers only (see seq_core.c for the scope rationale).
-extern s32 SEQ_CORE_BakeForceScale(u8 track);
+// (Track 2, 2026-06-10: SEQ_CORE_BakeForceScale is gone — the pitch chain
+//  renders into the output mirror, so captures hold the heard pitch by
+//  construction. The per-effect bake program ended here.)
 
 // Fork capture verb — capture src_track's computed output into the destination
 // pattern slot (dst_bank, dst_pattern), lossless, CC included. dst_group is

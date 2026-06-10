@@ -106,6 +106,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
     case ITEM_SCALE_ROOT:
       if( SEQ_UI_Var8_Inc(&seq_core_global_scale_root_selection, 0, 12, incrementer) >= 0 ) { // Keyb, C..H
 	ui_store_file_required = 1;
+	SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
 	return 1;
       }
       return 0;
@@ -114,6 +115,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       u8 scale_max = SEQ_SCALE_NumGet()-1;
       if( SEQ_UI_Var8_Inc(&seq_core_global_scale, 0, scale_max, incrementer) >= 0 ) {
 	ui_store_file_required = 1;
+	SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
 	return 1;
       }
       return 0;

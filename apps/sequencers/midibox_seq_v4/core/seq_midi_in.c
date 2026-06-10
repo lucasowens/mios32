@@ -781,7 +781,16 @@ static s32 SEQ_MIDI_IN_Receive_Note(u8 bus, u8 note, u8 velocity)
 	&& seq_core_global_transpose_enabled
 #endif
 	) {
-      seq_core_keyb_scale_root = note % 12;
+      u8 new_root = note % 12;
+      if( new_root != seq_core_keyb_scale_root ) {
+	seq_core_keyb_scale_root = new_root;
+	// Track 2: stack-resident FTS follows the keyb root, but only when the
+	// global root selection is "Keyb" (0) — re-render on change then. Every
+	// Bus1 note-on lands here, so both guards matter (16 full renders
+	// otherwise). The selection-change sites dirty on their own.
+	if( seq_core_global_scale_root_selection == 0 )
+	  SEQ_CORE_RenderDirtySetAll();
+      }
     }
   } else { // Note Off
     if( NOTESTACK_Pop(n, note) > 0 && n->len ) {
@@ -983,7 +992,10 @@ static s32 SEQ_MIDI_IN_Receive_ExtCtrlCC(u8 cc, u8 value)
 	break;
 
       case SEQ_MIDI_IN_EXT_CTRL_SCALE:
-	seq_core_global_scale = value;
+	if( value != seq_core_global_scale ) {
+	  seq_core_global_scale = value;
+	  SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
+	}
 	break;
 
       case SEQ_MIDI_IN_EXT_CTRL_PATTERN_G1:

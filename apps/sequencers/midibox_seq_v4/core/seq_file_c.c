@@ -331,14 +331,18 @@ s32 SEQ_FILE_C_Read(char *session)
 	      seq_core_steps_per_pattern = value;
 	  } else if( strcmp(parameter, "GlobalScale") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 255);
-	    if( value >= 0 )
+	    if( value >= 0 ) {
 	      seq_core_global_scale = value;
+	      SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
+	    }
 	  } else if( strcmp(parameter, "GlobalScaleCtrl") == 0 ) {
 	    // obsolete
 	  } else if( strcmp(parameter, "GlobalScaleRoot") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 255);
-	    if( value >= 0 )
+	    if( value >= 0 ) {
 	      seq_core_global_scale_root_selection = value;
+	      SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
+	    }
 	  } else if( strcmp(parameter, "LocalGrooveSelection") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 255);
 	    if( value >= 0 )

@@ -841,6 +841,9 @@ static void cmd_global_scale_set(mios32_midi_port_t port, const u8 *payload, u8 
   seq_core_global_scale                = scale;
   seq_core_global_scale_root_selection = root_selection;
   seq_core_keyb_scale_root             = keyb_root;
+  // Track 2: FTS is stack-resident — re-render so track_par_get pins read the
+  // new scale's output without needing a play/stop cycle.
+  SEQ_CORE_RenderDirtySetAll();
   reply[0] = scale;
   reply[1] = root_selection;
   reply[2] = keyb_root;

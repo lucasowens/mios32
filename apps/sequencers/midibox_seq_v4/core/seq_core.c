@@ -484,6 +484,220 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// Track 2 — pitch-chain migration (plan 2026-06-10). The emission-time pitch
+// chain (SEQ_CORE_Transpose → force-to-scale; the note limit follows in
+// Stage B) becomes a render-stack processor, so the output mirror holds the
+// HEARD pitches: bounce is faithful by construction (no bake), and FTS sits
+// upstream of CHORD_MASK/TENSION in slot order.
+//
+// Fenced at emission (NOT migrated — the legacy_pitch gate in SEQ_CORE_Tick):
+//  - Arpeggiator playmode: multi-arp cycles t->arp_pos per emission — runtime
+//    state a step-deterministic render cannot reproduce (user call 2026-06-10).
+//  - Chord par layers: the par byte is a chord INDEX, not a note — pitch only
+//    exists post-expansion, so the legacy emission chain keeps owning it.
+//  - Drum event mode: a 0 Note byte is NOT a rest there (it falls back to the
+//    per-drum lay_const note and still plays), so mirror-rest silence and the
+//    skip-0 idiom are both wrong for drums — transposer-no-key would write 0s
+//    and the kit would keep firing on DEFAULT notes instead of falling silent.
+//    Fenced until drum pitch semantics get their own design pass (plan §4).
+//
+// Accepted semantic edges vs the emission chain (plan §2):
+//  - A 0 Note byte stays a rest; "transpose note 0 (C-2) and play it" is
+//    unrepresentable in the mirror.
+//  - Transposer-with-no-key writes rests into the mirror (was velocity=0 at
+//    emission) — same silence, now bounce-visible. The stretched-glide release
+//    that velocity-0 events used to trigger is reproduced at emission (the
+//    no-events branch after GetEvents).
+//  - Morph blends already-pitched mirror values instead of pitching the
+//    blend. NOT equivalent: a 50% blend of two in-scale notes can pass
+//    through an off-scale value (C/D → C#) that legacy emission-FTS folded —
+//    small audible edge on morphed FTS tracks, accepted (decide by ear).
+//  - PitchBend under transpose: the wire MSB matches legacy; the LSB is now
+//    derived from the shifted value (legacy kept the unshifted LSB) —
+//    inaudible, byte-level only.
+/////////////////////////////////////////////////////////////////////////////
+
+// Per-step scale/root for the render-side FTS snap — mirrors
+// SEQ_CORE_FTS_GetScaleAndRoot, but reads the Scale/Root par layers from the
+// render buffer instead of SEQ_PAR_Get's output mirror (same values — no
+// processor mutates non-Note layers). `instr_base` is the render par buffer
+// (drum tracks are fenced — see section header — so addressing is layer-major).
+static void pitch_step_scale_root(const seq_cc_trk_t *tcc, const u8 *instr_base,
+                                  u16 num_steps, u16 step, u8 *scale, u8 *root)
+{
+  if( tcc->link_par_layer_scale >= 0 ) {
+    u8 s = instr_base[(u32)tcc->link_par_layer_scale * num_steps + step];
+    *scale = s ? (u8)(s - 1) : seq_core_global_scale;
+  } else {
+    *scale = seq_core_global_scale;
+  }
+
+  u8 root_selection = seq_core_global_scale_root_selection;
+  u8 fallback_root = (root_selection == 0) ? seq_core_keyb_scale_root
+                                           : (u8)(root_selection - 1);
+  if( tcc->link_par_layer_root >= 0 ) {
+    u8 r = instr_base[(u32)tcc->link_par_layer_root * num_steps + step] % 13;
+    *root = r ? (u8)(r - 1) : fallback_root;
+  } else {
+    *root = fallback_root;
+  }
+}
+
+// PITCH processor (Track 2). Reproduces SEQ_CORE_Transpose's Normal/Transpose/
+// ChordMask-playmode semantics + the emission force-to-scale snap, writing the
+// result into the render buffer:
+//  - Note layers: static oct/semi (±8, ≥8-wrap signed encoding) + the live
+//    transposer offset, TrimNote to 0..127, then the FTS snap (per-step
+//    Scale/Root layers respected) when FORCE_SCALE is set.
+//  - CC-ish layers (CC/PitchBend) in CC event mode: value shift only —
+//    SEQ_CORE_Transpose's is_cc path. The global transpose never moves CC
+//    values (its !is_cc gate), only Transpose playmode does.
+// p->bus carries tcc->busasg.bus (the transposer bus — NOT the chord-context
+// bus the CHORD_MASK/TENSION slots use). p->strength is not a dial here; the
+// chain's CCs are the controls and 0-transpose+FTS-off disarms the slot.
+static void pitch_render_range(u8 track, const seq_processor_slot_t *p,
+                               u8 *par_buf, u16 step_lo, u16 step_hi)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  // Fenced cases (see section header) — the sync never arms these; belt and braces.
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator
+      || tcc->event_mode == SEQ_EVENT_MODE_Drum )
+    return;
+
+  int inc_oct  = tcc->transpose_oct;   if( inc_oct  >= 8 ) inc_oct  -= 16;
+  int inc_semi = tcc->transpose_semi;  if( inc_semi >= 8 ) inc_semi -= 16;
+  int inc_static = 12*inc_oct + inc_semi;
+
+  // Live transposer offset. Transpose playmode moves notes AND CC values; the
+  // global transpose moves notes only. No key held → notes fall silent (rests
+  // in the mirror), and in Transpose playmode CC values drop to 0 (emission
+  // parity: velocity=0 aliases the CC value byte in the MIDI package).
+  u8 transposer = (tcc->playmode == SEQ_CORE_TRKMODE_Transpose);
+  u8 global_tr  = (!transposer && seq_core_global_transpose_enabled);
+  u8 silence = 0;
+  int tr_offset = 0;
+  if( transposer || global_tr ) {
+    int tr_note = SEQ_MIDI_IN_TransposerNoteGet(p->bus, tcc->trkmode_flags.HOLD,
+                                                tcc->trkmode_flags.FIRST_NOTE);
+    if( tr_note < 0 )
+      silence = 1;
+    else
+      tr_offset = tr_note - 0x3c; // C-3 is the base note
+  }
+  int inc_note = inc_static + tr_offset;
+  int inc_cc   = transposer ? inc_note : inc_static;
+
+  u8 force_scale = tcc->trkmode_flags.FORCE_SCALE ? 1 : 0;
+
+  u8 num_p_layers      = SEQ_PAR_NumLayersGet(track);
+  u16 num_p_steps      = SEQ_PAR_NumStepsGet(track);
+  if( step_hi > num_p_steps ) step_hi = num_p_steps;
+  if( step_lo >= step_hi ) return;
+
+  // CC + PitchBend carry the is_cc shift in CC event mode. ProgramChange and
+  // Aftertouch are deliberately EXCLUDED although legacy "transposed" them:
+  // seq_layer.c builds their wire bytes from evnt1, while the legacy shift
+  // wrote evnt2 (a don't-care for PC/AT) — so the legacy shift never reached
+  // the wire, and shifting the stored value here would invent audible program
+  // changes / pressure jumps that never existed.
+  u8 cc_mode = (tcc->event_mode == SEQ_EVENT_MODE_CC);
+  u8 par_layer;
+  for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
+    seq_par_layer_type_t lt = (seq_par_layer_type_t)tcc->lay_const[par_layer];
+    u8 is_note = (lt == SEQ_PAR_Type_Note);
+    u8 is_ccish = cc_mode && (lt == SEQ_PAR_Type_CC ||
+                              lt == SEQ_PAR_Type_PitchBend);
+    if( !is_note && !is_ccish )
+      continue;
+    u8 *base = &par_buf[(u32)par_layer*num_p_steps];
+    u16 step;
+    for(step=step_lo; step<step_hi; ++step) {
+      if( is_note ) {
+        u8 note = base[step];
+        if( !note )
+          continue; // rest
+        if( silence ) { base[step] = 0; continue; }
+        int n = (int)note + inc_note;
+        n = SEQ_CORE_TrimNote(n, 0, 127);
+        if( force_scale ) {
+          u8 scale, root;
+          pitch_step_scale_root(tcc, par_buf, num_p_steps, step, &scale, &root);
+          n = SEQ_SCALE_NoteValueGet((u8)n, scale, root);
+        }
+        base[step] = (u8)n;
+      } else {
+        // is_cc path: value 0 shifts too — no rest semantics for CC values.
+        if( transposer && silence ) { base[step] = 0; continue; }
+        int n = (int)base[step] + inc_cc;
+        n = SEQ_CORE_TrimNote(n, 0, 127);
+        base[step] = (u8)n;
+      }
+    }
+  }
+}
+
+// LIMIT processor (Track 2 Stage B). The final range fold — slot 3, AFTER
+// TENSION, so a pushed note still lands inside the window (emission parity:
+// the limit was "the last Fx in the chain"). Mirrors SEQ_CORE_Limit exactly:
+// active when either bound is set, unset upper = 127, swapped bounds
+// normalize, and SEQ_CORE_TrimNote OCTAVE-FOLDS (pitch class preserved)
+// rather than clamping. The per-step no_fx TRG layer escapes the fold
+// (emission parity), read from the trg buffer being built so a just-edited
+// no_fx bit and this render stay consistent. The nth-trigger bar-variant of
+// no_fx cannot exist in a bar-independent render — accepted edge (plan §4);
+// nth still suppresses the emission-side FX (humanize/LFO/echo).
+static void limit_render_range(u8 track, const seq_processor_slot_t *p,
+                               u8 *par_buf, const u8 *trg_buf,
+                               u16 step_lo, u16 step_hi)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  // Fenced cases (see the PITCH section header) — sync never arms these.
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator
+      || tcc->event_mode == SEQ_EVENT_MODE_Drum )
+    return;
+
+  u8 lower = tcc->limit_lower;
+  u8 upper = tcc->limit_upper;
+  if( !lower && !upper )
+    return;
+  if( !upper )
+    upper = 127;
+  if( lower > upper ) { u8 tmp = upper; upper = lower; lower = tmp; }
+
+  u8 num_p_layers = SEQ_PAR_NumLayersGet(track);
+  u16 num_p_steps = SEQ_PAR_NumStepsGet(track);
+  if( step_hi > num_p_steps ) step_hi = num_p_steps;
+  if( step_lo >= step_hi ) return;
+
+  // no_fx trg assignment: 0 = none, else layer index + 1 (SEQ_TRG_NoFxGet).
+  u8 nofx_asg = tcc->trg_assignments.no_fx;
+  u16 num_t_step8 = (u16)(SEQ_TRG_NumStepsGet(track) / 8);
+
+  u8 par_layer;
+  for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
+    if( (seq_par_layer_type_t)tcc->lay_const[par_layer] != SEQ_PAR_Type_Note )
+      continue;
+    u8 *base = &par_buf[(u32)par_layer*num_p_steps];
+    u16 step;
+    for(step=step_lo; step<step_hi; ++step) {
+      u8 note = base[step];
+      if( !note )
+        continue; // rest
+      if( nofx_asg && num_t_step8 ) {
+        u32 ix = (u32)(nofx_asg - 1) * num_t_step8 + (step >> 3);
+        // bounds guard (SEQ_TRG_Get parity): the 4-bit assignment can point
+        // past the allocated trg layers — treat OOB as "no escape", not garbage
+        if( ix < SEQ_TRG_MAX_BYTES && (trg_buf[ix] & (1 << (step & 7))) )
+          continue; // per-step no-fx escapes the fold (emission parity)
+      }
+      base[step] = (u8)SEQ_CORE_TrimNote(note, lower, upper);
+    }
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // Tension Workbench — the GRAVITY field (design doc §5; plan 2026-06-09).
 //
 // A ranked field over the 12 pitch classes with one bipolar dial (GRAVITY,
@@ -495,7 +709,15 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
 // track, mirrored into the slot's strength via SEQ_CORE_TensionSlotSync.
 /////////////////////////////////////////////////////////////////////////////
 
-#define SEQ_CORE_TENSION_SLOT 1  // chord_mask owns slot 0; tension owns slot 1
+// Slot homes (Track 2 re-home). Slot index = stack order: PITCH planes/tidies
+// first, CHORD_MASK snaps over it (the chord wins over the scale), TENSION
+// pushes/pulls, LIMIT folds the result back into range last — so a gravity
+// push is no longer re-corrected by the FTS snap (the Track-1 "FTS off on
+// gripped tracks" POC rule dissolves) but still respects the range window.
+#define SEQ_CORE_PITCH_SLOT     0
+#define SEQ_CORE_CHORDMASK_SLOT 1
+#define SEQ_CORE_TENSION_SLOT   2
+#define SEQ_CORE_LIMIT_SLOT     3
 
 // 12-bit pitch-class barrel rotate (mod 12, masked to 0x0FFF — a raw u16 shift
 // would leak bits across PC 11→12). Up = toward higher PC.
@@ -729,11 +951,17 @@ static void sweep_window_render(u8 track)
     if( p->id == SEQ_PROCESSOR_ID_NONE || !p->enabled )
       continue;
     switch( p->id ) {
+      case SEQ_PROCESSOR_ID_PITCH:
+        pitch_render_range(track, p, par_buf, step_lo, step_hi);
+        break;
       case SEQ_PROCESSOR_ID_CHORD_MASK:
         chord_mask_render_range(track, p, par_buf, step_lo, step_hi);
         break;
       case SEQ_PROCESSOR_ID_TENSION:
         tension_render_range(track, p, par_buf, step_lo, step_hi);
+        break;
+      case SEQ_PROCESSOR_ID_LIMIT:
+        limit_render_range(track, p, par_buf, trg_buf, step_lo, step_hi);
         break;
       default:
         break;
@@ -770,11 +998,17 @@ void SEQ_CORE_RenderTrack(u8 track)
     if( p->id == SEQ_PROCESSOR_ID_NONE || !p->enabled )
       continue;
     switch( p->id ) {
+      case SEQ_PROCESSOR_ID_PITCH:
+        pitch_render_range(track, p, par_buf, 0, num_p_steps);
+        break;
       case SEQ_PROCESSOR_ID_CHORD_MASK:
         chord_mask_render_range(track, p, par_buf, 0, num_p_steps);
         break;
       case SEQ_PROCESSOR_ID_TENSION:
         tension_render_range(track, p, par_buf, 0, num_p_steps);
+        break;
+      case SEQ_PROCESSOR_ID_LIMIT:
+        limit_render_range(track, p, par_buf, trg_buf, 0, num_p_steps);
         break;
       default:
         break;
@@ -805,7 +1039,7 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
   if( track >= SEQ_CORE_NUM_TRACKS )
     return;
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
-  seq_processor_slot_t *slot = &seq_processor_stack[track][0];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
 
   if( tcc->playmode == SEQ_CORE_TRKMODE_ChordMask ) {
     slot->id        = SEQ_PROCESSOR_ID_CHORD_MASK;
@@ -852,6 +1086,94 @@ void SEQ_CORE_TensionSlotSync(u8 track)
     slot->drum_mask = 0xFFFF;
     SEQ_CORE_RenderTouched(track);
   }
+}
+
+// Track 2 bridge (the chord-mask phase-C pattern): tcc stays the persistent
+// truth + the user-facing surface (TRKMODE/transpose/FTS pages and their CCs);
+// the PITCH slot mirrors it. Armed only when the chain is non-neutral — an
+// armed slot costs a render whenever dirty, and the live-varying cases
+// (Transpose playmode / global transpose) force one every tick via
+// SEQ_CORE_RenderTracks. Arpeggiator playmode never arms (fenced at emission).
+void SEQ_CORE_PitchSlotSync(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][SEQ_CORE_PITCH_SLOT];
+
+  // NOTE: seq_core_global_transpose_enabled has no runtime writer on this fork
+  // (init-0 only) — if one ever appears, it must re-sync ALL tracks, since a
+  // neutral track won't arm on the toggle otherwise.
+  u8 active = 0;
+  if( tcc->playmode != SEQ_CORE_TRKMODE_Arpeggiator
+      && tcc->event_mode != SEQ_EVENT_MODE_Drum ) {  // fenced cases (section header)
+    active = (tcc->playmode == SEQ_CORE_TRKMODE_Transpose)
+          || tcc->transpose_oct || tcc->transpose_semi
+          || tcc->trkmode_flags.FORCE_SCALE
+          || seq_core_global_transpose_enabled;
+  }
+
+  if( active ) {
+    slot->id        = SEQ_PROCESSOR_ID_PITCH;
+    slot->enabled   = 1;
+    slot->strength  = 127;             // not a dial — the chain's CCs are the controls
+    slot->bus       = tcc->busasg.bus; // transposer bus (NOT the chord context)
+    slot->drum_mask = 0xFFFF;          // legacy chain was whole-track
+    SEQ_CORE_RenderTouched(track);
+  } else if( slot->id == SEQ_PROCESSOR_ID_PITCH ) {
+    slot->id        = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled   = 0;
+    slot->strength  = 0;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  }
+}
+
+// Track 2 Stage B bridge: the LIMIT slot mirrors tcc->limit_lower/upper. Same
+// shape as the PITCH sync: armed iff non-neutral, arp/drum fenced, tcc stays
+// the persistent truth + the FX_LIMIT page's surface. Purely source-state
+// (no live input), so it renders on events only — never implicit-dirty.
+void SEQ_CORE_LimitSlotSync(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][SEQ_CORE_LIMIT_SLOT];
+
+  u8 active = 0;
+  if( tcc->playmode != SEQ_CORE_TRKMODE_Arpeggiator
+      && tcc->event_mode != SEQ_EVENT_MODE_Drum ) {
+    active = (tcc->limit_lower || tcc->limit_upper);
+  }
+
+  if( active ) {
+    slot->id        = SEQ_PROCESSOR_ID_LIMIT;
+    slot->enabled   = 1;
+    slot->strength  = 127;    // not a dial — the limit CCs are the controls
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  } else if( slot->id == SEQ_PROCESSOR_ID_LIMIT ) {
+    slot->id        = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled   = 0;
+    slot->strength  = 0;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  }
+}
+
+// PITCH is implicit-dirty (per tick) only when its inputs are live — the
+// transposer bus / global transpose can change between any two ticks without a
+// CC write. Static transpose+FTS render on events instead (CC writes touch via
+// the sync, par edits via SEQ_PAR_Set's auto-dirty, global scale/root changes
+// via RenderDirtySetAll at the write sites) — re-rendering every armed track
+// per tick would make every FTS track a full per-tick render for no live input.
+static u8 pitch_slot_live(u8 track)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  return (tcc->playmode == SEQ_CORE_TRKMODE_Transpose) || seq_core_global_transpose_enabled;
 }
 
 // Set the global GRAVITY dial (clamped −64..+63) and re-render the tracks the
@@ -1042,6 +1364,20 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
   tcc->chordmask_drum_l   = 0xFF;
   tcc->chordmask_drum_h   = 0xFF;
 
+  // Track 2: PITCH, TENSION and LIMIT are doubly-bound the same way — the
+  // bounced source already holds their output, so a re-armed slot would
+  // re-apply it (double-transpose / re-snap / re-grip; the limit re-fold is
+  // idempotent but the posture should clear like the others — matches
+  // SEQ_CC_ResetGenerativeForBounce on the capture path).
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Transpose )
+    tcc->playmode = SEQ_CORE_TRKMODE_Normal;
+  tcc->transpose_oct  = 0;
+  tcc->transpose_semi = 0;
+  tcc->trkmode_flags.FORCE_SCALE = 0;
+  tcc->tension_grip = 0;
+  tcc->limit_lower = 0;
+  tcc->limit_upper = 0;
+
   // Re-render so the output mirror equals the new source (identity copy).
   SEQ_CORE_RenderTouched(track);
   seq_render_dirty[track] = 1;
@@ -1050,163 +1386,12 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
 
 
 /////////////////////////////////////////////////////////////////////////////
-// Fork: bake the deterministic force-to-scale snap into a captured track's Note
-// par-layers, so the frozen tape holds the exact pitches that were HEARD — and
-// FORCE_SCALE can then stay reset (the §9 freeze-faithfulness axis split).
-//
-// Why bake instead of preserve the FORCE_SCALE flag: the snap is EMISSION-time
-// (the tick, applied to each played note AFTER transpose — see the
-// trkmode_flags.FORCE_SCALE block in SEQ_CORE_Tick), and is NEVER baked into
-// OutputActive, so the captured Note layer holds the RAW, pre-scale note.
-// Preserving the flag would re-snap LIVE against whatever seq_core_global_scale/
-// root is at playback time — a later key change would silently re-pitch the
-// frozen copy. Baking the heard pitch makes the copy immune to that (the mandate:
-// a frozen copy must still sound like what was heard, full stop).
-//
-// Reproduces the DETERMINISTIC emission pitch chain for each step:
-//     heard = noteLimit( forceScale( transpose( raw_par_note ) ) )
-//   - scale/root per step mirroring SEQ_CORE_FTS_GetScaleAndRoot (global scale/
-//     root + per-step Scale/Root par-layers — which ResetGenerativeForBounce then
-//     neutralizes to None, so they MUST be resolved HERE, before that reset).
-//   - the static transpose offset is reproduced ONLY when it was deterministic at
-//     emission (Normal playmode, global transpose off — matching the Normal-mode
-//     path of SEQ_CORE_Transpose). In Transpose/Arp playmode or with global
-//     transpose on, the offset folds in live-keyboard input we cannot replay, so
-//     the raw captured note is snapped as-is.
-//   - the note limit (SEQ_CORE_Limit, a Pre-FX applied AFTER the snap) is baked in
-//     too, since its bounds are static CCs that ResetGenerativeForBounce clears.
-//     (The per-step no_fx Nth gate that can skip the limit at emission is
-//     generative and not reproduced — a documented micro-caveat.)
-// The random/generative shapers between the par read and the snap (groove timing,
-// humanize, LFO) are NOT reproduced — they are reset on the generation axis and
-// were never in the captured tape either.
-//
-// Reads AND writes the SOURCE buffer (seq_par_layer_value) DIRECTLY, NOT via
-// SEQ_PAR_Get/Set: SEQ_PAR_Set writes the source but SEQ_PAR_Get reads the
-// double-buffered OUTPUT mirror (seq_par.c), which for a freshly-written capture
-// destination still holds pre-capture data until the next render+flip — so the
-// captured notes (and per-step Scale/Root layers) live ONLY in the source buffer
-// at this point. The index math mirrors SEQ_PAR_Get/Set with par_instrument = 0.
-//
-// Contract: call on a track whose live par buffer (seq_par_layer_value) ALREADY
-// holds the captured output and whose tcc STILL carries the SOURCE's pre-reset
-// config (FORCE_SCALE, playmode, transpose, limits, link_par_layer_scale/root) —
-// i.e. AFTER the capture copy, BEFORE SEQ_CC_ResetGenerativeForBounce. No-op
-// unless FORCE_SCALE is set. Marks the track render-dirty so the output mirror
-// refreshes from the baked source.
-//
-// Scope (round 1 — force-scale): non-drum Note par-layers only.
-//   - Chord par-layers store a chord INDEX (expanded + snapped per-voice at
-//     emission), not a note, so they can't be snapped at the par level — Chord
-//     layers are left raw (rare alongside FORCE_SCALE; a noted follow-up).
-//   - Drum tracks are not baked: a drum note can fall back to a shared per-drum
-//     CONSTANT, and per-step Scale/Root layers would snap that one constant to
-//     different notes on different steps — unbakeable into a single value (and
-//     force-scaled drums are exotic).
-//   - Note value 0 is a rest in a non-drum Note layer (GetEvents emits nothing) —
-//     left untouched so a rest stays a rest.
-// No critical section: this is a per-byte SEQ_PAR_Set sweep over the just-captured
-// buffer, like the memcpy in the capture verbs — a torn single-byte read by the
-// tick is benign and the post-verb state is consistent (capture already carries a
-// deliberate brief glitch on the affected track).
+// (Track 2, 2026-06-10: SEQ_CORE_BakeForceScale lived here. The pitch chain
+//  — transpose, force-to-scale, note limit — renders into the output mirror
+//  now, so every capture verb copies the HEARD pitch by construction and the
+//  per-effect bake program is over. Arp playmode is fenced at emission; its
+//  capture was never pitch-faithful, with or without the bake.)
 /////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CORE_BakeForceScale(u8 track)
-{
-  if( track >= SEQ_CORE_NUM_TRACKS )
-    return -1;
-
-  seq_cc_trk_t *tcc = &seq_cc_trk[track];
-
-  // Only force-scale tracks carry an un-baked snap; everything else already
-  // captured the heard pitch directly into the Note layer.
-  if( !tcc->trkmode_flags.FORCE_SCALE )
-    return 0;
-
-  // Drum mode is out of scope (see header) — leave the captured notes as-is.
-  if( tcc->event_mode == SEQ_EVENT_MODE_Drum )
-    return 0;
-
-  // Reproduce the static transpose offset only when it was deterministic at
-  // emission. SEQ_CORE_Transpose's Normal-playmode path applies just
-  // transpose_oct/transpose_semi (the >=8 wrap = signed -8..+7); any other
-  // playmode (or global transpose enabled) folds in live-keyboard input that
-  // cannot be replayed, so we snap the raw captured note in those cases.
-  int inc = 0;
-  if( tcc->playmode == SEQ_CORE_TRKMODE_Normal && !seq_core_global_transpose_enabled ) {
-    int inc_oct  = tcc->transpose_oct;   if( inc_oct  >= 8 ) inc_oct  -= 16;
-    int inc_semi = tcc->transpose_semi;  if( inc_semi >= 8 ) inc_semi -= 16;
-    inc = 12*inc_oct + inc_semi;
-  }
-
-  // Note limit bounds (mirror SEQ_CORE_Limit): no limit unless either is set;
-  // an unset upper means 127; lower>upper swaps. Resolved once — static CCs.
-  u8 lim_lo = tcc->limit_lower;
-  u8 lim_hi = tcc->limit_upper;
-  u8 do_limit = (lim_lo || lim_hi);
-  if( do_limit ) {
-    if( !lim_hi )
-      lim_hi = 127;
-    if( lim_lo > lim_hi ) { u8 tmp = lim_hi; lim_hi = lim_lo; lim_lo = tmp; }
-  }
-
-  u16 num_steps  = (u16)SEQ_PAR_NumStepsGet(track);
-  u8  num_layers = (u8)SEQ_PAR_NumLayersGet(track);
-  if( !num_steps || !num_layers )
-    return 0;
-
-  // Source buffer, read+written directly (see header — SEQ_PAR_Get reads the
-  // not-yet-refreshed output mirror). par_instrument is 0 for non-drum.
-  u8 *src = seq_par_layer_value[track];
-
-  u16 step;
-  for(step=0; step<num_steps; ++step) {
-    // Per-step scale/root — mirrors SEQ_CORE_FTS_GetScaleAndRoot, reading the
-    // Scale/Root par-layers from the SOURCE buffer (a 0 value means "fall back to
-    // the global", a non-zero value is the selection+1).
-    u8 scale, root;
-    if( tcc->link_par_layer_scale >= 0 ) {
-      u32 ix = (u32)tcc->link_par_layer_scale * num_steps + step;
-      u8 s = (ix < SEQ_PAR_MAX_BYTES) ? src[ix] : 0;
-      scale = s ? (s - 1) : seq_core_global_scale;
-    } else {
-      scale = seq_core_global_scale;
-    }
-    u8 root_selection = seq_core_global_scale_root_selection;
-    if( tcc->link_par_layer_root >= 0 ) {
-      u32 ix = (u32)tcc->link_par_layer_root * num_steps + step;
-      u8 r = ((ix < SEQ_PAR_MAX_BYTES) ? src[ix] : 0) % 13;
-      root = r ? (r - 1) : ((root_selection == 0) ? seq_core_keyb_scale_root : (root_selection - 1));
-    } else {
-      root = (root_selection == 0) ? seq_core_keyb_scale_root : (root_selection - 1);
-    }
-
-    u8 layer;
-    for(layer=0; layer<num_layers; ++layer) {
-      if( tcc->lay_const[layer] != SEQ_PAR_Type_Note )
-        continue; // only Note layers carry snappable note values
-
-      u32 ix = (u32)layer * num_steps + step;
-      if( ix >= SEQ_PAR_MAX_BYTES )
-        continue;
-      u8 v = src[ix];
-      if( !v )
-        continue; // 0 == rest in a Note layer — leave it
-
-      int n = (int)v + inc;
-      n = SEQ_CORE_TrimNote(n, 0, 127);                // transpose clamp
-      n = SEQ_SCALE_NoteValueGet((u8)n, scale, root);  // the emission force-scale snap
-      if( do_limit )
-        n = SEQ_CORE_TrimNote(n, lim_lo, lim_hi);       // post-snap note limit (Pre-FX)
-      src[ix] = (u8)n;
-    }
-  }
-
-  // Direct source writes bypass SEQ_PAR_Set's auto-dirty; mark the track so the
-  // next render refreshes the output mirror from the baked source.
-  SEQ_CORE_RenderDirtySet(track);
-
-  return 0;
-}
 
 
 // Static snapshot buffers for the capture-to-slot verb: preserve the source
@@ -1255,10 +1440,9 @@ s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_patte
   //    (forced quiet render inside the primitive → sweep-safe, lossless).
   SEQ_CORE_CaptureTrackOutput(src_track, seq_par_layer_value[src_track], seq_trg_layer_value[src_track]);
 
-  // 2b. Bake the force-to-scale snap into the captured notes while the source's
-  //     scale context is still intact (before the reset neutralizes FORCE_SCALE +
-  //     Scale/Root layers), so the frozen tape holds the heard pitches.
-  SEQ_CORE_BakeForceScale(src_track);
+  // (Track 2 closed the bake program: the pitch chain renders into the mirror,
+  //  so the capture above already holds the heard pitches — SEQ_CORE_BakeForceScale
+  //  is gone. Bounce correctness is a property of the architecture now.)
 
   // 3. Sanitize generative CC so the frozen slot plays back as tape, not
   //    re-modulated material.
@@ -1341,11 +1525,7 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
   //    raw copy because dst geometry now equals src geometry.
   SEQ_CORE_CaptureTrackOutput(src_track, seq_par_layer_value[dst_track], seq_trg_layer_value[dst_track]);
 
-  // 2b. Bake force-to-scale into dst's captured notes. dst's tcc now mirrors the
-  //     source (full-config inherit above incl. FORCE_SCALE + Scale/Root links),
-  //     so the per-step snap resolves identically — done before the reset strips
-  //     that context.
-  SEQ_CORE_BakeForceScale(dst_track);
+  // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
 
   // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated.
   SEQ_CC_ResetGenerativeForBounce(dst_track);
@@ -1449,11 +1629,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     SEQ_CC_LinkUpdate(dst_track);
     memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
-    // Bake force-to-scale into the captured notes now living on dst_track. dst's
-    // tcc carries the source's full config (FORCE_SCALE + Scale/Root links copied
-    // above), so the per-step snap resolves as the source heard it — before the
-    // reset neutralizes that context.
-    SEQ_CORE_BakeForceScale(dst_track);
+    // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
     SEQ_CC_ResetGenerativeForBounce(dst_track);
 
     // 5. Write the dst group (now carrying the captured track) back to the slot.
@@ -1469,6 +1645,15 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
     seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
     SEQ_CC_LinkUpdate(dst_base+t);
+    // Track 2: steps 3/4 above moved the processor slots (PatternRead replays
+    // CCs through SEQ_CC_Set; the CC inherit too) but this restore is a raw
+    // memcpy — re-sync the slot bridges so a live Transpose/FTS/LIMIT/GRIP
+    // track doesn't come back with a disarmed slot under a non-neutral tcc
+    // (silently raw playback until the next CC touch).
+    SEQ_CORE_ChordMaskSlotSync(dst_base+t);
+    SEQ_CORE_TensionSlotSync(dst_base+t);
+    SEQ_CORE_PitchSlotSync(dst_base+t);
+    SEQ_CORE_LimitSlotSync(dst_base+t);
     SEQ_CORE_RenderDirtySet(dst_base+t);
   }
   memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
@@ -1484,13 +1669,17 @@ void SEQ_CORE_RenderTracks(void)
     // chord_mask + tension depend on live inputs (the bus PC-set / the global
     // GRAVITY dial), not just source state — force a re-render every tick on any
     // track carrying an enabled chord_mask or tension slot, so the next emitted
-    // note reflects the current held chord / knob. Phase D will optimize via
-    // sweep/quiet detection.
+    // note reflects the current held chord / knob. PITCH joins them only while
+    // its own input is live (transposer bus / global transpose — see
+    // pitch_slot_live); static transpose/FTS render on events. Phase D will
+    // optimize via sweep/quiet detection.
     u8 slot;
     for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
       const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
-      if( (p->id == SEQ_PROCESSOR_ID_CHORD_MASK || p->id == SEQ_PROCESSOR_ID_TENSION)
-          && p->enabled ) {
+      if( !p->enabled )
+        continue;
+      if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK || p->id == SEQ_PROCESSOR_ID_TENSION
+          || (p->id == SEQ_PROCESSOR_ID_PITCH && pitch_slot_live(track)) ) {
         seq_render_dirty[track] = 1;
         break;
       }
@@ -1724,6 +1913,17 @@ s32 SEQ_CORE_Handler(void)
       SEQ_MIDI_ROUTER_SendMIDIClockEvent(0xfc, 0);
       SEQ_CORE_PlayOffEvents();
       SEQ_MIDPLY_PlayOffEvents();
+
+      // Complete an in-flight RESOLVE ramp: the measure it was ramping into no
+      // longer exists, and RESOLVE-while-stopped already means "land now" — so
+      // STOP mid-ramp lands the remaining glide at 0 immediately (Boundary
+      // clears the active flag, pins 0, touches the field tracks). Without
+      // this, stopping in the glide-already-at-0 window (it reaches 0 BEFORE
+      // the downbeat by design) strands tension_resolve_active=1 and the NEXT
+      // play's first downbeat silently eats whatever the dial was set to in
+      // between (Track-1 latent bug, surfaced by the Track-2 HIL). By-ear
+      // revisit allowed: freeze-at-mid-ramp (bare Cancel) is the alternative.
+      SEQ_CORE_TensionResolveBoundary();
 
       int track;
       for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
@@ -2486,17 +2686,23 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 	
 	// Loopback Port: propagate root&scale if assigned to parameter layer
 	if( loopback_port ) {
+	  // Track 2: FTS lives in the render stack, so a global scale/root move
+	  // must dirty the armed tracks (guarded on change — an unconditional
+	  // SetAll here would force 16 full renders every step this track plays).
+	  // Renders pick it up in the next tick's prologue batch.
 	  if( tcc->link_par_layer_scale >= 0 ) {
 	    u8 scale = SEQ_PAR_Get(track, t->step, tcc->link_par_layer_scale, 0);
-	    if( scale > 0 ) {
+	    if( scale > 0 && (u8)(scale - 1) != seq_core_global_scale ) {
 	      seq_core_global_scale = scale - 1;
+	      SEQ_CORE_RenderDirtySetAll();
 	    }
 	  }
 
 	  if( tcc->link_par_layer_root > 0 ) {
 	    u8 root = SEQ_PAR_Get(track, t->step, tcc->link_par_layer_root, 0) % 13;
-	    if( root > 0 ) {
+	    if( root > 0 && (u8)(root - 1) != seq_core_global_scale_root_selection ) {
 	      seq_core_global_scale_root_selection = root - 1;
+	      SEQ_CORE_RenderDirtySetAll();
 	    }
 	  }
 	}
@@ -2510,6 +2716,32 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
         s32 number_of_events = 0;
 	number_of_events = SEQ_LAYER_GetEvents(track, t->step, layer_events, 0, 1);
 #endif
+
+	if( number_of_events == 0
+	    && t->state.STRETCHED_GL && t->state.SUSTAINED
+	    && tcc->playmode == SEQ_CORE_TRKMODE_Transpose
+	    && tcc->event_mode != SEQ_EVENT_MODE_Drum
+	    && seq_processor_stack[track][SEQ_CORE_PITCH_SLOT].enabled
+	    && SEQ_MIDI_IN_TransposerNoteGet(tcc->busasg.bus, tcc->trkmode_flags.HOLD,
+	                                     tcc->trkmode_flags.FIRST_NOTE) < 0 ) {
+	  // Track 2: transposer-with-no-key renders RESTS into the mirror, so
+	  // GetEvents returns no events here and the legacy glide-release path
+	  // (velocity-0 events → gen_off_events in the first pass) can't run —
+	  // a glided note would ring until the next keyed step. Release the held
+	  // glide at the step boundary instead. Genuine source rests never took
+	  // that path (no events pre-migration either) and still glide through.
+	  SEQ_MIDI_OUT_ReSchedule(track, SEQ_MIDI_OUT_OffEvent,
+	                          bpm_tick + t->bpm_tick_delay + t->step_length,
+	                          track_record_enabled ? seq_record_played_notes : NULL);
+	  t->state.SUSTAINED = 0;
+	  t->state.STRETCHED_GL = 0;
+	  {
+	    u32 *dst_ptr = (u32 *)&t->glide_notes[0];
+	    int gi;
+	    for(gi=0; gi<4; ++gi)
+	      *dst_ptr++ = 0;
+	  }
+	}
 
 	if( number_of_events > 0 ) {
 	  int i;
@@ -2577,8 +2809,30 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 	      }
 	    }
 
-            // transpose notes/CCs
-            SEQ_CORE_Transpose(track, instrument, t, tcc, p);
+            // Track 2: the pitch chain (transpose + force-to-scale; the note
+            // limit follows in Stage B) lives in the render stack — the mirror
+            // value this event was built from is already the heard pitch. The
+            // legacy emission chain remains only for what the stack cannot
+            // represent: Arpeggiator playmode (multi-arp runtime state; fenced,
+            // user call 2026-06-10), Drum event mode (0 is lay_const fallback
+            // there, not a rest — see the processor section header), and Chord
+            // par layers (the par byte is a chord index — pitch only exists
+            // post-expansion).
+            u8 legacy_pitch = (tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator)
+                           || (tcc->event_mode == SEQ_EVENT_MODE_Drum);
+            if( !legacy_pitch && tcc->event_mode != SEQ_EVENT_MODE_Drum ) {
+              seq_par_layer_type_t lt = (seq_par_layer_type_t)tcc->lay_const[e->layer_tag & 0x0f];
+              legacy_pitch = (lt == SEQ_PAR_Type_Chord1 || lt == SEQ_PAR_Type_Chord2
+                              || lt == SEQ_PAR_Type_Chord3);
+            }
+
+            if( legacy_pitch ) {
+              // transpose notes/CCs (legacy emission chain)
+              SEQ_CORE_Transpose(track, instrument, t, tcc, p);
+            } else if( p->type == NoteOn && p->note == 0 ) {
+              // disabled note — was SEQ_CORE_Transpose's job before migration
+              p->velocity = 0;
+            }
 
             // glide trigger
             if( e->len > 0 && tcc->event_mode != SEQ_EVENT_MODE_Drum ) {
@@ -2641,24 +2895,46 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 
 	      // apply Pre-FX before force-to-scale
 	      if( !no_fx ) {
+		u8 prefx_note = p->note;
 		SEQ_HUMANIZE_Event(track, t->step, e);
-			
+
 		if( !robotize_flags.NOFX ) {
 		  SEQ_LFO_Event(track, e);
+		}
+
+		// Track 2 Stage C: FTS + the note limit live in the render
+		// stack, so an emission-side note mutator (humanize-note /
+		// LFO-note) would land off-scale / out-of-window un-caught.
+		// Narrow re-snap + re-fold ONLY when a mutator actually moved
+		// the note — stack output (including a TENSION push) passes
+		// through untouched otherwise. Robotize needs no scale
+		// carve-out: it walks scale degrees itself under FORCE_SCALE.
+		// Legacy events skip this — their full chain runs just below.
+		if( !legacy_pitch && p->note != prefx_note ) {
+		  if( tcc->trkmode_flags.FORCE_SCALE ) {
+		    u8 scale, root_selection, root;
+		    SEQ_CORE_FTS_GetScaleAndRoot(track, t->step, instrument, tcc, &scale, &root_selection, &root);
+		    SEQ_SCALE_Note(p, scale, root);
+		  }
+		  if( tcc->limit_lower || tcc->limit_upper )
+		    SEQ_CORE_Limit(t, tcc, e); // fold the mutated note back into the window
 		}
 	      }
 
 	      t->state.ROBOSUSTAINED = ( robotize_flags.SUSTAIN ) ? 1 : 0 ;// set robosustain flag
 
-	      // force to scale
-	      if( tcc->trkmode_flags.FORCE_SCALE ) {
+	      // force to scale — legacy emission events only (arp / chord
+	      // expansion); stack-rendered notes are already snapped in the mirror
+	      if( legacy_pitch && tcc->trkmode_flags.FORCE_SCALE ) {
 		u8 scale, root_selection, root;
 		SEQ_CORE_FTS_GetScaleAndRoot(track, t->step, instrument, tcc, &scale, &root_selection, &root);
 		SEQ_SCALE_Note(p, scale, root);
 	      }
 
-	      // apply Pre-FX after force-to-scale
-	      if( !no_fx ) {
+	      // apply Pre-FX after force-to-scale — legacy emission events only
+	      // (arp / drum / chord expansion); stack-rendered notes are already
+	      // folded by the LIMIT slot (Track 2 Stage B)
+	      if( legacy_pitch && !no_fx ) {
 		SEQ_CORE_Limit(t, tcc, e); // should be the last Fx in the chain!
 	      }
 

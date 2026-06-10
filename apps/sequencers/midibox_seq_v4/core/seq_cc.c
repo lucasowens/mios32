@@ -321,18 +321,27 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
     tcc->lay_const[cc] = value;
     if( tcc->event_mode != SEQ_EVENT_MODE_Drum )
       SEQ_CC_LinkUpdate(track);
+    SEQ_CORE_PitchSlotSync(track); // layer types feed the PITCH render (Note/CC/Scale/Root)
+    SEQ_CORE_LimitSlotSync(track); // ...and the LIMIT render (which layers are Note)
   } else {
     switch( cc ) {
       case SEQ_CC_MODE:
 	tcc->playmode = value;
-	SEQ_CORE_ChordMaskSlotSync(track); // ChordMask ↔ slot 0 (phase C bridge)
+	SEQ_CORE_ChordMaskSlotSync(track); // ChordMask ↔ its slot (phase C bridge)
 	SEQ_CORE_TensionSlotSync(track);   // keep the tension slot consistent too
+	SEQ_CORE_PitchSlotSync(track);     // Transpose/Arp playmode arms/fences PITCH
+	SEQ_CORE_LimitSlotSync(track);     // arp fence applies to LIMIT too
 	break;
-      case SEQ_CC_MODE_FLAGS: tcc->trkmode_flags.ALL = value; break;
+      case SEQ_CC_MODE_FLAGS:
+	tcc->trkmode_flags.ALL = value;
+	SEQ_CORE_PitchSlotSync(track); // FORCE_SCALE (+ HOLD/FIRST_NOTE) live here
+	break;
   
-      case SEQ_CC_MIDI_EVENT_MODE: 
-	tcc->event_mode = value; 
+      case SEQ_CC_MIDI_EVENT_MODE:
+	tcc->event_mode = value;
 	SEQ_CC_LinkUpdate(track);
+	SEQ_CORE_PitchSlotSync(track); // drum fence + CC-mode branch depend on this
+	SEQ_CORE_LimitSlotSync(track); // drum fence applies to LIMIT too
 	break;
 
       case SEQ_CC_MIDI_CHANNEL: tcc->midi_chn = value; break;
@@ -351,10 +360,17 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	// Phase G/step-7 polish: BUSASG no longer drives the chord_mask slot's
 	// bus — the processor reads tcc->chordmask_bus instead (independent of
 	// the track's own bus assignment).
+	SEQ_CORE_PitchSlotSync(track); // PITCH reads the transposer bus from here
 	break;
 
-      case SEQ_CC_LIMIT_LOWER: tcc->limit_lower = value; break;
-      case SEQ_CC_LIMIT_UPPER: tcc->limit_upper = value; break;
+      case SEQ_CC_LIMIT_LOWER:
+	tcc->limit_lower = value;
+	SEQ_CORE_LimitSlotSync(track);
+	break;
+      case SEQ_CC_LIMIT_UPPER:
+	tcc->limit_upper = value;
+	SEQ_CORE_LimitSlotSync(track);
+	break;
     
       case SEQ_CC_DIRECTION: tcc->dir_mode = value; break;
       case SEQ_CC_STEPS_REPLAY: tcc->steps_replay = value; break;
@@ -371,8 +387,14 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_LOOP: tcc->loop = value; break;
       case SEQ_CC_CLKDIV_FLAGS: tcc->clkdiv.flags = value; break;
     
-      case SEQ_CC_TRANSPOSE_SEMI: tcc->transpose_semi = value; break;
-      case SEQ_CC_TRANSPOSE_OCT: tcc->transpose_oct = value; break;
+      case SEQ_CC_TRANSPOSE_SEMI:
+	tcc->transpose_semi = value;
+	SEQ_CORE_PitchSlotSync(track);
+	break;
+      case SEQ_CC_TRANSPOSE_OCT:
+	tcc->transpose_oct = value;
+	SEQ_CORE_PitchSlotSync(track);
+	break;
       case SEQ_CC_GROOVE_VALUE: tcc->groove_value = value; break;
       case SEQ_CC_GROOVE_STYLE: tcc->groove_style.ALL = value; break;
       case SEQ_CC_MORPH_MODE: tcc->morph_mode = value; break;
@@ -387,7 +409,10 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_ASG_SKIP: tcc->trg_assignments.skip = value; break;
       case SEQ_CC_ASG_RANDOM_GATE: tcc->trg_assignments.random_gate = value; break;
       case SEQ_CC_ASG_RANDOM_VALUE: tcc->trg_assignments.random_value = value; break;
-      case SEQ_CC_ASG_NO_FX: tcc->trg_assignments.no_fx = value; break;
+      case SEQ_CC_ASG_NO_FX:
+	tcc->trg_assignments.no_fx = value;
+	SEQ_CORE_LimitSlotSync(track); // the LIMIT render honors no_fx per step — re-render
+	break;
       case SEQ_CC_ASG_ROLL_GATE: tcc->trg_assignments.roll_gate = value; break;
 
       case SEQ_CC_PAR_ASG_DRUM_LAYER_A:
@@ -511,7 +536,10 @@ s32 SEQ_CC_MIDI_Set(u8 track, u8 cc, u8 value)
     // forward morph value
     return SEQ_MORPH_ValueSet(value);
   } else if( cc == 0x03 ) {
-    seq_core_global_scale = value;
+    if( value != seq_core_global_scale ) {
+      seq_core_global_scale = value;
+      SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
+    }
     return 1;
   } else if( cc >= 0x10 && cc <= 0x5f ) {
     u8 mapped_cc = cc+0x20;

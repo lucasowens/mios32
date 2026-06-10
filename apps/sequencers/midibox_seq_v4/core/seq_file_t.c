@@ -459,6 +459,17 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
   // update CC links (again)
   SEQ_CC_LinkUpdate(track);
 
+  // Track 2: this reader writes playmode/trkmode_flags/transpose/limit DIRECTLY
+  // into tcc (not via SEQ_CC_Set), so the processor-slot bridges never fire —
+  // without an explicit re-sync an imported preset's transpose/FTS/limit (or
+  // ChordMask playmode / GRIP) would stay silently disarmed until some
+  // unrelated CC write. Re-sync everything the preset can carry + re-render.
+  SEQ_CORE_ChordMaskSlotSync(track);
+  SEQ_CORE_TensionSlotSync(track);
+  SEQ_CORE_PitchSlotSync(track);
+  SEQ_CORE_LimitSlotSync(track);
+  SEQ_CORE_RenderDirtySet(track);
+
   if( status < 0 ) {
 #if DEBUG_VERBOSE_LEVEL >= 1
     DEBUG_MSG("[SEQ_FILE_T] ERROR while reading file, status: %d\n", status);
