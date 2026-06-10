@@ -118,8 +118,14 @@ Adding a new small-range field: prefer a bitfield. Adding a new CC: place it in 
 | 0x70–0x76 | Echo parameters |
 | 0x78–0x7b | Fx MIDI routing |
 | 0x80–0x95 | Robotize (extended block — **not in base 0x00..0x7f persistence loop**) |
+| 0x96–0x99 | ChordMask (strength / bus / drum-mask L+H) — **past the persisted ext range, see below** |
 
-CCs ≥ 0x80 require the v2 per-track ext block in `seq_file_b.c` to persist.
+CCs ≥ 0x80 require the v2 per-track ext block in `seq_file_b.c` to persist — and the
+v2 block stops at `SEQ_FILE_B_TRK_EXT_CC_LAST = 0x95` ([seq_file_b.c:62](../core/seq_file_b.c#L62)),
+so **0x96–0x99 currently reset on every reload** (verified against source
+2026-06-09; design doc §10 open bug, wider than its original 0x96-only record).
+Scheduled fix: Tension Workbench bundle extends the range behind a new ext tag
+(design doc §8 second build); GRIP's CC will land inside the extended range.
 
 ### Extension-block format ([seq_file_b.c:45](../core/seq_file_b.c#L45))
 
