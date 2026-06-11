@@ -368,6 +368,9 @@ Two intensity time-scales, two different tools:
   mute/unmute or per-group pattern change (existing measure-quantized machinery); the
   256-slot pattern bank and existing song mode handle pre-planned chains. **No new
   macro-level feature work is needed** — this rides entirely on upstream.
+  *(Revised 2026-06-11: the skeleton becomes phrase-centric — phrases of track-grain
+  refs are the scene system, and "no new macro-level feature work" is withdrawn to
+  that extent. See §9 2026-06-11 block.)*
 - **Muscle (within-group / moment-to-moment) = processor dials + generator params.**
   Density-thin/fill (gate), mask strength (note), mutation amount (generator),
   robotize (vel/len). This is where "live psychedelic sculpting" actually happens.
@@ -397,6 +400,11 @@ against the backbone.
   renamed slots are exempt) so the performer is never blocked mid-set. *No scratch
   ring in v1* — direct SD save; revisit only if a timing test (§A4 #8) shows the write
   bumps a tick.
+  > **Superseded 2026-06-11:** quick-capture is replaced by **the tape** — an
+  > append-only, session-scoped take list that never aims and never overwrites.
+  > The `CAP_NNN` wrap-oldest scheme is withdrawn; bank-full refuse+flash survives
+  > only for *aimed* gestures. Storage fork open. See §9 (2026-06-11 block) and
+  > `doc/plans/2026-06-11-save-model-groups-performing-curating.md`.
 - **Track slots (net-new).** A captured single-track buffer (trg/par + that track's
   CCs), layerable independently — this is what makes §4 polyphonic sampling concrete.
   Gesture: hold a track-select button + CAPTURE → next free RAM slot, auto-named
@@ -443,12 +451,21 @@ and drift** — function/symbol names are the durable anchors. See
   many-groups; copying makes an independent instance that drifts. States don't *grow*;
   you get more *of them* or more *contrast*. A whole-box organism is coordinated
   groups, not one expanded state.
+  *(Revised 2026-06-11: groups demote to shelving — the performer-facing recall
+  grain becomes the track, and "organism = coordinated groups" softens to "organism
+  = a phrase." Switching machinery stays group-grain. See §9 2026-06-11 block.)*
 
 ### Save/recall (intentional)
 Switching patterns without saving loses changes (jam freely, commit deliberately).
 Recall brings a state back *as saved* and **relaunches/regenerates** — it was on disk,
 not running in the background. Reconstructed continuity, not literal concurrency
 (see §5 recall semantics — this is the desired behavior).
+
+> **Reversed 2026-06-11** (direction; mechanism provisional): the lose-on-switch
+> clause is overturned — the working state will always persist (auto-writeback on
+> switch) and protection becomes the explicit CHECKPOINT/REVERT act. The
+> recall-relaunches clause is **unchanged**. See §9 (2026-06-11) and
+> `doc/plans/2026-06-11-save-model-groups-performing-curating.md`.
 
 ### Pattern infrastructure
 - 4 banks × 64 patterns = 256 group-states; 20-char names
@@ -782,16 +799,22 @@ Append-only-ish; revise an entry only with a dated note.
 - **Track slots are net-new**, hybrid persistence (RAM default, explicit SD-promote
   deferred). Justified by §4 polyphonic sampling, which patterns can't express.
 - **Quick-capture = SAVE-button** (single→next free `CAP_NNN` in active bank, wrap
-  oldest auto-named; long→traditional UI). No scratch ring in v1.
+  oldest auto-named; long→traditional UI). No scratch ring in v1. *(Superseded
+  2026-06-11: replaced by the tape — append-only take list, wrap-oldest withdrawn.
+  See the 2026-06-11 block.)*
 - **Windowing rides any buffer incl. live tracks**, always-available; default
   verbatim. Engine-reseed is a separate object. Four dedicated encoders, per-track
   source, track-focus model.
 - **3-frozen-+-1-alive** = canonical anchored-chaos recipe.
 - **Morph-across-seam uses existing bounce**, no new verb in v1.
-- **Concurrency is group-granular, 4 max.**
+- **Concurrency is group-granular, 4 max.** *(Revised 2026-06-11: still true of the
+  switching machinery, but groups demote to shelving — recall grain = track. See the
+  2026-06-11 block.)*
 - **Set-density is two-scale** (closes old open-Q): macro = groups stacking (existing
   tooling, **no new macro features**); within-group = processor/generator dials (the
-  muscle, where the fork's value lives).
+  muscle, where the fork's value lives). *(Revised 2026-06-11: macro becomes
+  phrase-centric; "no new macro features" withdrawn to that extent. See the
+  2026-06-11 block.)*
 
 **Platform / build (§6, §8)**
 - **Drum-pitch via a Note par-layer is the first build** — one-line unlock, inherits
@@ -1638,6 +1661,82 @@ drifted toward a build journal, burying the multi-session spine it exists to be.
   changes); edit-page note display always shows the heard pitch
   (PRINT_TRANSPOSED_NOTES re-apply removed — it would double-transpose).
 
+**2026-06-11 — Save model, groups, phrases (direction reversals, user-confirmed;
+mechanisms provisional — see `doc/plans/2026-06-11-save-model-groups-performing-curating.md`)**
+- **The save model inverts** (reverses §6 "Save/recall (intentional)"). The working
+  state always persists — auto-writeback of a dirty group on pattern switch;
+  protection becomes the explicit act (**CHECKPOINT** = bless an anchor, **REVERT** =
+  one gesture back). Rationale: manual-save's protection costs a gesture exactly when
+  attention is zero, so the loss mode was the default path. User's call: lose-on-
+  switch "leads to constant losses"; the PATTERN-hold model "is more useful because
+  it's auto saved." **Recall = relaunch/regenerate survives unchanged.** Mechanism
+  (writeback hook, checkpoint storage, stall-race precondition, gen-state tag) is
+  design-ahead, not committed.
+- **Groups demote to shelving** (revises "Concurrency is group-granular" / §6 "a
+  state = a group"). The performer-facing recall grain becomes the **track**
+  (track-grain load fills the missing grain cell: track-save/group-save/group-load
+  exist, track-load doesn't); groups survive as storage layout + the 4-group
+  switching machinery, not as a mental-model object. Rationale: the group pain was
+  located 2026-06-11 as *conceptual overhead*, and a six-box comparison (Hapax /
+  Digitone II / Cirklon / Octatrack / Deluge / OXI One — plan doc §9) found no
+  instrument that recalls in semantic-free groups: a grain boundary earns its cost
+  only when it aligns with a musical concept.
+- **An organism is a phrase** (revises "no new macro features" / §5 "macro rides
+  upstream"). Phrase mode is promoted to the scene system: phrases reference
+  track-grain states with two-face recall (tap = posture, FREEZE-held = tape); song
+  mode does NOT grow linear DAW depth — its action vocabulary (Tempo, jumps, loops,
+  mixer maps, mutes) survives as arrangement tooling. Candidate principle from the
+  comparison: **phrases reference CHECKPOINTed states, not working slots** —
+  assignment references drift under auto-persist (Hapax's documented weakness,
+  solved Cirklon-style by anchoring to committed versions).
+- **Invariants that survive any re-envisioning: faithfulness (heard = saved) and
+  deterministic returnability.** User granted full license to rethink everything
+  else; losing either guts the north star.
+- **First bundle = RECOMBINE** (track-grain load + pull gesture; licenses the
+  SD-overwrite undo keystone, which extends the shipped ENGAGE undo). Picked over
+  fearless-switching (heavier preconditions: stall-race fix, gen-state tag), the
+  tape (storage fork open), and terrain-hands (orthogonal, runnable anytime).
+- **Refinement (same day, after a clips/scenes challenge from the user):
+  organism-primary — no grid on the performance surface.** "Groups demote to
+  shelving" sharpened: the performer-facing model is four nouns — the **organism**
+  (live 16 tracks, sculpted), the **tape**, the **anchor** (checkpoint), the
+  **waypoint** (phrase). *A set is a path, not a grid.* The clip-grid view of
+  storage (the bank format re-projects exactly to 16 per-track columns × 64 named
+  sections) belongs to the curation surface only — grid-shaped thinking is
+  quarantined to the librarian, which decides the performing-vs-curating
+  two-surface split in the same stroke. Track pull = **transfusion into the
+  organism, not launch** — two-faced at pull time (tape or posture/spring; the
+  spring pull has no session-view analog anywhere). Rationale: clips/scenes is
+  grid-primary (the grid is the instrument, performing = navigating prepared
+  material, states are dead); this design inverts it (the running state is the
+  instrument, storage is its memory).
+- **CHECKPOINT / REVERT confirmed as the protection verbs (same day).**
+  Bless-the-anchor / one-gesture-back are committed performance-surface
+  vocabulary. Open at mechanism design: checkpoint *storage* (parallel checkpoint
+  bank vs record-pair — existing banks lack 2× slack for pairing) and checkpoint
+  *grain* under organism-primary (group vs track vs whole-organism). Phrases pin
+  CHECKPOINTed states (see refinement bullet).
+- **The tape supersedes §5.5 quick-capture (same day).** Discovery capture becomes
+  an **append-only, session-scoped take list**: never aims, never overwrites,
+  never blocks — which dissolves the quick-capture vs no-smart-defaults conflict
+  (append-only destroys nothing). The `CAP_NNN` wrap-oldest scheme is withdrawn;
+  bank-full refuse+flash survives only on *aimed* gestures. The tape is the
+  performing→curating handoff artifact; the librarian audits it morning-after.
+  Storage fork open (session file vs RAM+SD journal vs dedicated bank — leaning
+  against the bank: it breaks the hard-wired bank↔group identity). Precedent: the
+  Cirklon workscene (jam, SAVE appends a take — decades of field validation).
+- **Second-row hardware verbs confirmed (direction, same day): the touchable
+  tension meter and the chord hand.** Row-as-meter: mirror `tension_meter` to the
+  16 LEDs (bipolar, detent between LED 8/9, fill outward); **press = set GRAVITY
+  at that position** (the isolator-throw gesture; manual turns already abort
+  RESOLVE and jump). Chord hand: a select-row chord/keyboard mode writing the bus
+  notestack — closes the "cross-bus chord workflow (no UI yet)" gap; SHADE-aware
+  degree mapping (the row always plays the current terrain). Both obey the
+  row-mode ownership rule (page-scoped or held-modifier, never a free-floating
+  global toggle). Build details (blink convention vs the pages-manual §7.1
+  brightness driver; velocity-less accent modifier) decided at the workbench by
+  ear — the TERRAIN-HANDS bundle.
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -1839,6 +1938,26 @@ very tense" vs "all notes slightly tense" as separate moves).*
   (chord-mask/tension process drum note layers already).
 - STOP-mid-RESOLVE semantics: now lands at 0 (boundary). If by ear the landing
   feels wrong mid-performance, the alternative is freeze-at-mid-ramp (one line).
+
+**Save-model rethink (2026-06-11) — directions decided (§9), mechanisms open;
+working detail in `doc/plans/2026-06-11-save-model-groups-performing-curating.md`**
+- Tape storage: session file vs RAM+SD journal vs dedicated bank (the bank option
+  breaks the hard-wired bank↔group identity — leaning against).
+- Checkpoint storage: parallel checkpoint bank vs record-pair-in-new-banks (existing
+  banks lack 2× slack for pairing).
+- Gen-state extension-tag scope (loop array / locks / MULT / anchor) — forced by
+  auto-writeback, else the sculpted-loop orphan stays the last loss mode.
+- Track-grain pull gesture (symmetry candidate: hold track button + aim, mirroring
+  PATTERN-hold push). Don't overdesign before the verb exists.
+- Phrase format: MBSEQ_S.V4 record-version bump vs new file (carrier verified
+  friendly — `song_size` already parameterized).
+- Performance fence for auto-writeback (Digitone II PERFORM KIT lesson): is a live
+  processor sweep mid-transition *editing the state* or *playing the moment*?
+- ~~Still-unblessed proposals riding the rethink~~ — **all blessed 2026-06-11**
+  (the tape with its §5.5 supersession placed, row tension meter, chord hand,
+  two-surface model, CHECKPOINT/REVERT verbs). The rethink's remaining opens are
+  the mechanism forks above, plus checkpoint *grain* under organism-primary
+  (group vs track vs whole-organism).
 
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).

@@ -16,6 +16,12 @@ Generated: 2026-05-18.
    Silent destruction of work when saving over an existing map/pattern/song slot. Three sites, one fix pattern. Highest-impact, lowest-risk item on the list.
 2. **Pattern-change stall race** — [seq_pattern.c:135](../core/seq_pattern.c#L135).
    "stall here if previous pattern change hasn't been finished yet!" — affects live pattern switching, a headline workflow.
+   *(Re-read 2026-06-11: the TODO marks a **missing** stall — in the deferred branch a
+   new request silently overwrites a pending unserviced `seq_pattern_req[group]`. The
+   SD read itself blocks inside `portENTER_CRITICAL()` in `SEQ_PATTERN_Handler` (can
+   exceed 65 ms), covered by the pre-generated forward-delay ticks. Becomes
+   load-bearing if pattern switches gain an auto-writeback — write+read in the same
+   window; see `doc/plans/2026-06-11-save-model-groups-performing-curating.md`.)*
 3. **Record-while-reverse correctness** — [seq_record.c:454](../core/seq_record.c#L454), [:588](../core/seq_record.c#L588).
    Notes land on wrong steps when a reverse-direction track is in record mode. Two sites.
 4. **Invalid-bank error feedback** — [seq_ui_disk.c:692](../core/seq_ui_disk.c#L692), [seq_ui_pattern.c:140](../core/seq_ui_pattern.c#L140).
@@ -41,6 +47,12 @@ Generated: 2026-05-18.
 16. **CV-divider `get_dec` 64-bit support** — [seq_file_gc.c:282](../core/seq_file_gc.c#L282), [:294](../core/seq_file_gc.c#L294).
 17. **Pattern-remix sync with `SEQ_PATTERN_Handler()`** — [seq_ui_pattern_remix.c:705](../core/seq_ui_pattern_remix.c#L705).
 18. **Song/`DirectTrack` alignment** — [seq_ui_song.c:61-62](../core/seq_ui_song.c#L61). Drift hazard between two button paths.
+
+- *(unnumbered, added 2026-06-11)* **Guide-track clamp uses group count** —
+  [seq_file_s.c:351](../core/seq_file_s.c#L351): `seq_song_guide_track` is clamped
+  against `SEQ_CORE_NUM_GROUPS` (4) while the adjacent comment says the range is
+  0..16 — guide tracks 5–16 are silently zeroed on song load. Found during the
+  2026-06-11 group-coupling census (no TODO marker in source, hence unnumbered).
 
 ## Tier 4 — BLM / Pattern Remix polish (only affects accessory-hardware users)
 

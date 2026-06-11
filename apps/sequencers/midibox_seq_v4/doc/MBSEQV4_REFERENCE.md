@@ -185,8 +185,11 @@ Render-stack harmony processor (design doc §8 second build, shipped 2026-06-10)
   silently zeroing GRAVITY at the next play's first downbeat.
 - **Cockpit:** `seq_ui_gravity.c`, `SEQ_UI_PAGE_GRAVITY` (enum value 60), reached via
   GP16 from FX_SCALE. GP1 GRAVITY / GP2 SHADE (writes `seq_core_global_scale` along the
-  brightness ladder indices {15,12,16,13,17,14,18}) / GP3 GRIP / GP8 RESOLVE. LCD2 row0
-  = bipolar fill meter (`tension_meter`) with zone-boundary ticks.
+  brightness ladder indices {15,12,16,13,17,14,18}) / GP3 GRIP / GP4 track select
+  (enc + button) / GP8 RESOLVE. The select row keeps its stock global track-select on
+  this page — that, plus GP3, is the per-track GRIP edit path. LCD2 row0 = bipolar
+  fill meter (`tension_meter`) with zone-boundary ticks; row1 = 16-char per-track
+  GRIP bar.
 
 **Gotchas:**
 - `SEQ_LCD_PrintFormattedString` has **no `+` flag** — `"%+4d"` renders as literal
