@@ -202,6 +202,26 @@ s32 SEQ_LAYER_ResetLatchedValues(void)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Fork: per-track variant for track-grain loads — clears one track's latched
+// pitchbender/program change/aftertouch/CC values. (The mainline function
+// above resets all 16 tracks, which a single-track pull must not do.)
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_LAYER_ResetLatchedValuesTrack(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return -1;
+
+  pb_last_value[track] = 0xff; // invalid value - PB value will be send in any case
+  pc_last_value[track] = 0xff; // invalid value - PC value will be send in any case
+  at_last_value[track] = 0xff; // invalid value - AT value will be send in any case
+
+  memset(cc_last_value[track], 0xff, sizeof(cc_last_value[track])); // invalid value - CC value will be send in any case
+
+  return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // This function clears the latched track based program/bank change values
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_LAYER_ResetTrackPCBankLatchedValues(void)

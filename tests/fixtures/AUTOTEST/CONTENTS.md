@@ -136,3 +136,14 @@ If you change pattern content on the device, update this doc in the **same
 commit** as the tests that rely on the change. Phase 2 (committing the SD
 files themselves) is the durable answer to drift; until then this doc is
 the only source of truth.
+
+## Incident log
+
+- **2026-06-11** — A1–A3 found overwritten on SD (by-ear capture material; the
+  PATTERN-hold gesture can commit into any pattern slot of a group's bank,
+  including these baselines). Rebuilt **from the host** without touching the
+  device UI: load a pristine reserved slot (e.g. `pattern_load(0, 0, 20)` —
+  format-fresh: no gates, par-A all C-3, 16 steps) into group 0, toggle gates
+  via EDIT-page `press(Button.GP(n))`, `pattern_save(0, 0, idx)` per pattern,
+  verify with `trg_byte_get` + `track_par_get`. **Habit: run by-ear jam
+  sessions in a non-AUTOTEST session.**

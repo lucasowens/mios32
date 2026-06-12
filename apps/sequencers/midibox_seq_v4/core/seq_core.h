@@ -503,6 +503,26 @@ extern s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track);
 // (two SD ops) — task context only. Returns >=0 on success, negative on error.
 extern s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_pattern);
 
+// Fork pull verb (RECOMBINE) — load ONE stored track section
+// (src_bank, src_pattern, src_slot_track 0..3) into dst_track, RAM only, a
+// transfusion into the running organism: seq_pattern[] is never touched and
+// the dst group's other tracks never change. Arms the track undo with
+// dst_track's prior state, then runs the per-track census fan (sustain
+// cancel, latch reset + PC/bank send, unmute bit) and a bar-aligned restart.
+// Takes MUTEX_SDCARD + MUTEX_MIDIOUT — task context only. Returns 0 on
+// success, negative on error (live track untouched on pre-write failures).
+extern s32 SEQ_CORE_LoadTrackFromSlot(u8 dst_track, u8 src_bank, u8 src_pattern, u8 src_slot_track);
+
+// One-deep track undo — the RECOMBINE keystone (extends the ENGAGE-undo
+// pattern to full track state: geometry, name, CC image 0x00..0x9f, robotize
+// anchors, par/trg sources, play_section). Most recent arm wins; restore is
+// one-shot and bar-aligned. kind: LIVE = victim was live RAM (the pull verb);
+// an SD-slot victim kind is reserved for the push-side arm.
+#define SEQ_CORE_TRACK_UNDO_KIND_LIVE 0
+extern s32 SEQ_CORE_TrackUndoSnapLive(u8 track);
+extern s32 SEQ_CORE_TrackUndoRestore(void);
+extern s32 SEQ_CORE_TrackUndoInfoGet(u8 *valid, u8 *kind, u8 *track);
+
 // Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
 // free region between `_eusrstack` and the current MSP at paint time with a
 // sentinel pattern; later reads scan upward from `_eusrstack` to find the first

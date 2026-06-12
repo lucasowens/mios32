@@ -22,6 +22,7 @@
 #include "seq_core.h"
 #include "seq_midi_port.h"
 #include "seq_pattern.h"
+#include "file.h"
 #include "seq_file.h"
 #include "seq_file_b.h"
 #include "seq_trg.h"
@@ -75,6 +76,10 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_TENSION_RESOLVE      0x6c
 #define CMD_PATTERN_SAVE         0x6d
 #define CMD_BANK_CREATE          0x6e
+#define CMD_TRACK_LOAD           0x6f
+#define CMD_TRACK_UNDO           0x70
+#define CMD_TRACK_UNDO_QUERY     0x71
+#define CMD_SESSION_CREATE       0x72
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1198,6 +1203,119 @@ static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload
 }
 
 
+// CMD_TRACK_LOAD payload: [dst_track, src_bank, src_pattern, src_slot_track]
+// Reply: [dst_track, bank, pattern, slot_track, load_ok, dispatch_status]
+//   dispatch_status 0x01 = ok, 0x02 = bad payload, 0x03 = invalid track.
+//
+// The RECOMBINE pull verb: reads ONE stored track section into dst_track (any
+// bank x pattern x section -> any live track), arms the track undo, runs the
+// per-track census fan, bar-aligns. slot_track is deliberately NOT masked so
+// out-of-range refusal (load_ok=0) is pinnable. Synchronous SD read (100ms+).
+static void cmd_track_load(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_TRACK_LOAD, reply, sizeof(reply));
+    return;
+  }
+  u8 dst_track   = payload[0];
+  u8 bank        = payload[1];
+  u8 pattern     = payload[2] & 0x7f;
+  u8 slot_track  = payload[3];
+
+  reply[0] = dst_track;
+  reply[1] = bank;
+  reply[2] = pattern;
+  reply[3] = slot_track;
+
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) {
+    reply[5] = 0x03;
+  } else {
+    s32 r = SEQ_CORE_LoadTrackFromSlot(dst_track, bank, pattern, slot_track);
+    reply[4] = (r >= 0) ? 0x01 : 0x00;
+    reply[5] = 0x01;
+  }
+  send_reply(port, CMD_TRACK_LOAD, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_UNDO payload: none.
+// Reply: [restored_track (0x7f = none), restored_ok, dispatch_status]
+//
+// One-shot restore of the track undo victim (most recent destructive
+// track-grain verb). RAM only, synchronous.
+static void cmd_track_undo(mios32_midi_port_t port)
+{
+  u8 reply[3] = { 0x7f, 0x00, 0x01 };
+  s32 r = SEQ_CORE_TrackUndoRestore();
+  if( r >= 0 ) {
+    reply[0] = (u8)r & 0x7f;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_TRACK_UNDO, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_UNDO_QUERY payload: none.
+// Reply: [valid, kind, track, dispatch_status] — non-consuming state peek.
+static void cmd_track_undo_query(mios32_midi_port_t port)
+{
+  u8 valid = 0, kind = 0, track = 0;
+  SEQ_CORE_TrackUndoInfoGet(&valid, &kind, &track);
+  u8 reply[4] = { valid, kind, (u8)(track & 0x7f), 0x01 };
+  send_reply(port, CMD_TRACK_UNDO_QUERY, reply, sizeof(reply));
+}
+
+
+// CMD_SESSION_CREATE payload: [name_bytes...]  (1..8 ASCII chars, 7-bit)
+// Reply: [armed_ok, dispatch_status]
+//   dispatch_status 0x01 ok, 0x02 bad payload, 0x03 dir create failed,
+//   0x04 session already exists (refused — never clobbers).
+// Creates /SESSIONS/<name> and arms the ASYNC format (the low-prio task in
+// app.c writes the bank/config files — takes seconds — then loads the new
+// session and stores its name). Poll CMD_SESSION_NAME_GET until it returns
+// the new name. Mirrors the SAVE menu's New Session flow (DoSessionSaveOrNew
+// in seq_ui_menu.c). NOTE: arming stops the sequencer and clears live state.
+static void cmd_session_create(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 || plen > 8 ) {
+    send_reply(port, CMD_SESSION_CREATE, reply, sizeof(reply));
+    return;
+  }
+
+  char name[9];
+  u8 i;
+  for(i=0; i<plen; ++i)
+    name[i] = (char)payload[i];
+  name[plen] = 0;
+
+  char path[30];
+  sprintf(path, "%s/%s", SEQ_FILE_SESSION_PATH, name);
+
+  s32 status;
+  MUTEX_SDCARD_TAKE;
+  if( FILE_DirExists(path) == 1 ) {
+    status = -2; // exists — refuse
+  } else {
+    FILE_MakeDir(path);
+    status = (FILE_DirExists(path) == 1) ? 0 : -1;
+  }
+  MUTEX_SDCARD_GIVE;
+
+  if( status == -2 ) {
+    reply[1] = 0x04;
+  } else if( status < 0 ) {
+    reply[1] = 0x03;
+  } else {
+    SEQ_FILE_CreateSession(name, 1); // arms the async format
+    reply[0] = 0x01;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_SESSION_CREATE, reply, sizeof(reply));
+}
+
+
 // CMD_PATTERN_LOAD payload: [group, bank, pattern]
 // Reply payload: [group, bank, pattern, load_ok, dispatch_status]
 //   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
@@ -1671,6 +1789,18 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TENSION_RESOLVE:
             cmd_tension_resolve(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_LOAD:
+            cmd_track_load(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_UNDO:
+            cmd_track_undo(port);
+            break;
+          case CMD_TRACK_UNDO_QUERY:
+            cmd_track_undo_query(port);
+            break;
+          case CMD_SESSION_CREATE:
+            cmd_session_create(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

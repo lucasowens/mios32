@@ -46,6 +46,7 @@ typedef enum {
 extern s32 SEQ_LAYER_Init(u32 mode);
 
 extern s32 SEQ_LAYER_ResetLatchedValues(void);
+extern s32 SEQ_LAYER_ResetLatchedValuesTrack(u8 track);
 
 extern s32 SEQ_LAYER_ResetTrackPCBankLatchedValues(void);
 extern s32 SEQ_LAYER_SendPCBankValues(u8 track, u8 force, u8 send_now);

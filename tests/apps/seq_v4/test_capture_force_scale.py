@@ -78,7 +78,14 @@ def _setup_force_scale_source(board: Board) -> None:
 
     for step, (raw, _snapped) in SEED_TO_SNAPPED.items():
         board.track_par_set(SRC_TRACK, NOTE_LAYER, 0, step, raw)
+    # Sweep-regime staleness: the writes above leave the track in the sweep
+    # window (only a slice near the stopped position renders), so wait it out
+    # and re-write the seeds — the next render is a full quiet pass (the
+    # test_pitch_chain _quiet_render_retrigger idiom).
     time.sleep(SETTLE)
+    for step, (raw, _snapped) in SEED_TO_SNAPPED.items():
+        board.track_par_set(SRC_TRACK, NOTE_LAYER, 0, step, raw)
+    time.sleep(0.05)
 
     # Track 2: the snap is stack-resident, so the output mirror already holds the
     # HEARD (snapped) pitch — the capture copy is faithful with no bake. This

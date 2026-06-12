@@ -692,6 +692,287 @@ DEBUG_MSG("Skipping Track %d\n", track);
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Fork: reads ONE track section of a pattern slot into an arbitrary live
+// track — the missing grain cell (track-save/group-save/group-load exist;
+// this is track-load). Fully general: any bank x pattern x section -> any of
+// the 16 live tracks. The slot's other sections and the rest of the file are
+// untouched; only dst_track's live state changes.
+//
+// Adapted from SEQ_FILE_B_PatternRead: the remix-skip arm walks preceding
+// sections (per-track geometry, no fixed stride), the load arm streams the
+// wanted section, the ext-block arm dispatches the section's V1/V2/V3 tag.
+// Unlike PatternRead (which writes the track name into live state before its
+// status check), the fixed section header is read into locals and checked
+// BEFORE the first live write — every pre-write failure (bad bank/pattern/
+// section, slot storing fewer tracks, header read error) leaves the live
+// track untouched. Past that point a failed bulk read can leave the track
+// half-written; callers arm the track undo first (SEQ_CORE_LoadTrackFromSlot).
+//
+// Does NOT touch seq_pattern[]/seq_pattern_name[] (a pull is a transfusion,
+// not a pattern switch) and runs no post-load side effects — the census fan
+// (sustain cancel, PC/bank send, latch reset, unmute, bar-align) lives in the
+// calling verb.
+//
+// returns < 0 on errors (error codes are documented in seq_file.h)
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
+{
+  if( bank >= SEQ_FILE_B_NUM_BANKS )
+    return SEQ_FILE_B_ERR_INVALID_BANK;
+
+  if( slot_track >= SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+
+  if( dst_track >= SEQ_CORE_NUM_TRACKS )
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+
+  seq_file_b_info_t *info = &seq_file_b_info[bank];
+
+  if( !info->valid )
+    return SEQ_FILE_B_ERR_NO_FILE;
+
+  if( pattern >= info->header.num_patterns )
+    return SEQ_FILE_B_ERR_INVALID_PATTERN;
+
+  // re-open file
+  if( FILE_ReadReOpen((file_t*)&info->file) < 0 )
+    return -1; // file cannot be re-opened
+
+  // change to file position
+  s32 status;
+  u32 offset = 10 + sizeof(seq_file_b_header_t) + pattern * info->header.pattern_size;
+  if( (status=FILE_ReadSeek(offset)) < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // pattern header: skip the pattern name (the slot name describes the whole
+  // group slot; the pulled track carries its own 80-char section name)
+  u8 dummy_pattern_name[20];
+  status |= FILE_ReadBuffer(dummy_pattern_name, 20);
+
+  u8 num_tracks;
+  status |= FILE_ReadByte(&num_tracks);
+
+  u8 dummy_byte;
+  status |= FILE_ReadByte(&dummy_byte); // mixer_map
+  status |= FILE_ReadByte(&dummy_byte); // sysex_setup
+  status |= FILE_ReadByte(&dummy_byte); // reserved1
+
+  if( num_tracks > SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    num_tracks = SEQ_CORE_NUM_TRACKS_PER_GROUP;
+
+  if( status < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // refuse a section index the slot doesn't store. NOTE: this is NOT a
+  // reliable unwritten-slot guard — SEQ_FILE_B_Create's slot zero-fill is
+  // #if 0'd, so a header-only bank refuses via ERR_READ (short header read)
+  // instead, and a sparsely-written bank's never-written slots hold undefined
+  // FatFs gap data that can read as nonzero num_tracks and load garbage.
+  // Accepted gap: stock SEQ_FILE_Format writes all 64 slots; only testctrl
+  // bank_create + selective pattern_save creates sparse banks.
+  if( slot_track >= num_tracks ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+  }
+
+  // walk the sections before slot_track: each section's size depends on its
+  // own stored geometry, so locating section N means reading the 6 geometry
+  // fields of every preceding section and seeking past its data
+  u8 track_i;
+  for(track_i=0; track_i<slot_track; ++track_i) {
+    u8 dummy_name[80];
+    status |= FILE_ReadBuffer(dummy_name, 80);
+
+    u8 skip_p_instruments, skip_t_instruments, skip_p_layers, skip_t_layers;
+    u16 skip_p_size, skip_t_size;
+    status |= FILE_ReadByte(&skip_p_instruments);
+    status |= FILE_ReadByte(&skip_t_instruments);
+    status |= FILE_ReadByte(&skip_p_layers);
+    status |= FILE_ReadByte(&skip_t_layers);
+    status |= FILE_ReadHWord(&skip_p_size);
+    status |= FILE_ReadHWord(&skip_t_size);
+
+    u32 skip_par = skip_p_instruments * skip_p_layers * skip_p_size;
+    u32 skip_trg = skip_t_instruments * skip_t_layers * skip_t_size;
+    u32 new_pos = FILE_ReadGetCurrentPosition() + 128 + skip_par + skip_trg;
+    if( status < 0 || (status=FILE_ReadSeek(new_pos)) < 0 ) {
+      FILE_ReadClose((file_t*)&info->file);
+      return SEQ_FILE_B_ERR_READ;
+    }
+  }
+
+  // section slot_track: fixed part into locals, status-checked before the
+  // first live write
+  char name_buffer[80];
+  status |= FILE_ReadBuffer((u8 *)name_buffer, 80);
+
+  u8 num_p_instruments, num_t_instruments, num_p_layers, num_t_layers;
+  u16 p_layer_size, t_layer_size;
+  status |= FILE_ReadByte(&num_p_instruments);
+  status |= FILE_ReadByte(&num_t_instruments);
+  status |= FILE_ReadByte(&num_p_layers);
+  status |= FILE_ReadByte(&num_t_layers);
+  status |= FILE_ReadHWord(&p_layer_size);
+  status |= FILE_ReadHWord(&t_layer_size);
+
+  u8 cc_buffer[128];
+  status |= FILE_ReadBuffer(cc_buffer, 128);
+
+  if( status < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // ---- first live write below this line ----
+
+  memcpy(seq_core_trk[dst_track].name, name_buffer, 80);
+  seq_core_trk[dst_track].name[80] = 0;
+
+  u8 cc;
+  for(cc=0; cc<128; ++cc)
+    SEQ_CC_Set(dst_track, cc, cc_buffer[cc]);
+
+  // partitionate parameter layer and clear all steps
+  SEQ_PAR_TrackInit(dst_track, p_layer_size, num_p_layers, num_p_instruments);
+
+  // reading Parameter layers. Unlike PatternRead, the bulk reads stay
+  // status-bearing: the caller branches on the return code (a swallowed
+  // failure here would report success for a half-written track — and when
+  // slot_track is the last stored section, no later read would catch it).
+  u32 par_size = num_p_instruments * num_p_layers * p_layer_size;
+  u32 par_size_taken = (par_size > SEQ_PAR_MAX_BYTES) ? SEQ_PAR_MAX_BYTES : par_size;
+  if( par_size_taken )
+    status |= FILE_ReadBuffer((u8 *)&seq_par_layer_value[dst_track], par_size_taken);
+
+  // read remaining bytes into dummy buffer
+  while( par_size > par_size_taken ) {
+    u8 dummy;
+    status |= FILE_ReadByte(&dummy);
+    ++par_size_taken;
+  }
+
+  // partitionate trigger layer and clear all steps
+  SEQ_TRG_TrackInit(dst_track, t_layer_size*8, num_t_layers, num_t_instruments);
+
+  // reading Trigger layers
+  u32 trg_size = num_t_instruments * num_t_layers * t_layer_size;
+  u32 trg_size_taken = (trg_size > SEQ_TRG_MAX_BYTES) ? SEQ_TRG_MAX_BYTES : trg_size;
+  if( trg_size_taken )
+    status |= FILE_ReadBuffer((u8 *)&seq_trg_layer_value[dst_track], trg_size_taken);
+
+  // read remaining bytes into dummy buffer
+  while( trg_size > trg_size_taken ) {
+    u8 dummy;
+    status |= FILE_ReadByte(&dummy);
+    ++trg_size_taken;
+  }
+
+  // re-arm render-cache dirty *after* the bulk load (same concurrent-tick
+  // race note as in SEQ_FILE_B_PatternRead)
+  SEQ_CORE_RenderDirtySet(dst_track);
+
+  // finally update CC links again, because some of them depend on SEQ_PAR_NumLayersGet()!!!
+  SEQ_CC_LinkUpdate(dst_track);
+
+  // a mid-bulk failure means the track is half-written — report it (the
+  // calling verb restores the armed undo victim); skip the ext phase
+  if( status < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // ext block for slot_track: walk the remaining sections to the ext base,
+  // peek the shared tag (all tracks within a pattern carry the same tag),
+  // then index slot_track's block directly. Absent/unknown tag -> old file,
+  // leave the in-RAM ext CCs / anchors alone (same semantic as PatternRead).
+  //
+  // The ext phase is OPTIONAL and uses its own status: the mandatory section
+  // is fully committed by now, so an I/O failure past this point degrades to
+  // "loaded without ext" (success) instead of misreporting a refusal — the
+  // caller must still run its post-load fan on the swapped content.
+  s32 ext_status = 0;
+  for(track_i=slot_track+1; track_i<num_tracks && ext_status >= 0; ++track_i) {
+    u8 dummy_name[80];
+    ext_status |= FILE_ReadBuffer(dummy_name, 80);
+
+    u8 skip_p_instruments, skip_t_instruments, skip_p_layers, skip_t_layers;
+    u16 skip_p_size, skip_t_size;
+    ext_status |= FILE_ReadByte(&skip_p_instruments);
+    ext_status |= FILE_ReadByte(&skip_t_instruments);
+    ext_status |= FILE_ReadByte(&skip_p_layers);
+    ext_status |= FILE_ReadByte(&skip_t_layers);
+    ext_status |= FILE_ReadHWord(&skip_p_size);
+    ext_status |= FILE_ReadHWord(&skip_t_size);
+
+    u32 skip_par = skip_p_instruments * skip_p_layers * skip_p_size;
+    u32 skip_trg = skip_t_instruments * skip_t_layers * skip_t_size;
+    if( ext_status >= 0 )
+      ext_status |= FILE_ReadSeek(FILE_ReadGetCurrentPosition() + 128 + skip_par + skip_trg);
+  }
+
+  if( ext_status >= 0 ) {
+    u32 ext_base = FILE_ReadGetCurrentPosition();
+    u8 first_tag = 0;
+    if( FILE_ReadByte(&first_tag) >= 0 ) {
+      u8 per_track_ext_size = 0;
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V2_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V1 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V1_SIZE;
+
+      if( per_track_ext_size &&
+	  FILE_ReadSeek(ext_base + slot_track * per_track_ext_size) >= 0 ) {
+	u8 tag = 0;
+	ext_status |= FILE_ReadByte(&tag);
+
+	// the stride above came from first_tag, so only a matching tag may be
+	// parsed at the indexed position — a valid-but-different tag means a
+	// corrupt/foreign file (mixed tags are never written): leave the
+	// in-RAM ext values alone
+	if( ext_status >= 0 && tag == first_tag ) {
+	  if( tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // 32 (0x80..0x9f)
+	    ext_status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
+	    if( ext_status >= 0 ) {
+	      u8 i;
+	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+		SEQ_CC_Set(dst_track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
+					    SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	    }
+	  } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
+	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT_V2];  // 22 frozen (0x80..0x95)
+	    ext_status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2);
+	    if( ext_status >= 0 ) {
+	      u8 i;
+	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT_V2; ++i)
+		SEQ_CC_Set(dst_track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
+					    SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	    }
+	  } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V1 ) {
+	    ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
+					  SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	  }
+	}
+      }
+    }
+  }
+
+  // close file (so that it can be re-opened)
+  FILE_ReadClose((file_t*)&info->file);
+
+  return 0; // no error (ext_status failures degraded to "loaded without ext")
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // writes a pattern of a given group into bank
 // returns < 0 on errors (error codes are documented in seq_file.h)
 /////////////////////////////////////////////////////////////////////////////

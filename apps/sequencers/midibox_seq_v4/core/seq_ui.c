@@ -184,6 +184,25 @@ static u8 pattern_capture_group = 0xff;   // chosen dest group letter, 0xff = cu
 static u8 pattern_capture_dst_track = 0xff; // chosen dest track (select row), 0xff = default to source's track index
 static char pattern_capture_status[24] = ""; // last commit result, shown in the held overlay (the popup is masked while PATTERN is held)
 
+// Track-hold PULL gesture state (RECOMBINE — the mirror of the PATTERN-hold
+// push: the push aims a destination slot, the pull aims a SOURCE slot).
+// DESTINATION = the held select-row track (the transfusion target; its stock
+// release-select still fires, so the cursor follows the pull). While held:
+//   select row (another button) -> SOURCE column (bank = col/4, section =
+//                                  col%4); default = the held track's own column
+//   GP1-8  (top row)            -> source pattern letter (A..H); default = the
+//                                  letter currently loaded in the column's group
+//   GP9-16 (top row)            -> source pattern number (1..8) -> COMMIT:
+//                                  SEQ_CORE_LoadTrackFromSlot, bar-aligned,
+//                                  track undo armed by the verb
+// Known cost (review by ear): while a select-row button is held, the stock
+// multi-track chord-select on the OTHER select buttons is shadowed by the
+// column pick.
+static u8 pull_held_track = 0xff;   // select-row button currently held, 0xff = none
+static u8 pull_src_column = 0xff;   // chosen source column, 0xff = held track's own
+static u8 pull_letter = 0xff;       // chosen source letter, 0xff = column group's current
+static char pull_status[24] = "";   // last commit result, shown in the held overlay
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Prototypes
@@ -573,6 +592,23 @@ static void pattern_capture_slottrack_msg(s32 status, seq_pattern_t dst, u8 dst_
   }
 }
 
+// Print the result of a pull (slot section -> live track, the RECOMBINE
+// transfusion). Mirrors pattern_capture_slottrack_msg.
+static void pull_commit_msg(s32 status, u8 bank, u8 letter, u8 num, u8 section, u8 dst_track)
+{
+  if( status < 0 ) {
+    SEQ_UI_Msg_Track("pull failed");
+    sprintf(pull_status, "FAILED %d:%c%d.S%d",
+            bank + 1, 'A' + (letter & 0x07), (num & 0x07) + 1, section + 1);
+  } else {
+    char msg[12];
+    sprintf(msg, "<%c%d.S%d", 'A' + (letter & 0x07), (num & 0x07) + 1, section + 1);
+    SEQ_UI_Msg_Track(msg);
+    sprintf(pull_status, "pulled %d:%c%d.S%d>T%d",
+            bank + 1, 'A' + (letter & 0x07), (num & 0x07) + 1, section + 1, dst_track + 1);
+  }
+}
+
 static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
 {
   if( !depressed ) // selection button has been pressed while Bookm/Step/Track/Param/Trigger/Instr/Mute/Phrase button pressed: don't take over new sel view anymore
@@ -643,6 +679,32 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     }
     pattern_capture_slottrack_msg(cap_r, dst, dst_track);
     // group + dst track stay set so the user can rapid-fire to more patterns.
+    return 0;
+  }
+
+  // Pull gesture (RECOMBINE): while a select-row track button is held, the top
+  // row aims the SOURCE pattern and the number press commits the pull — the
+  // mirror image of the PATTERN-hold capture above. (PATTERN-held events never
+  // reach here: the capture intercepts cover all GPs while PATTERN is down.)
+  if( !depressed && pull_held_track != 0xff && gp < 8 ) {
+    pull_letter = (u8)gp; // source pattern letter (stash; number press commits)
+    return 0;
+  }
+
+  if( !depressed && pull_held_track != 0xff && gp >= 8 && gp < 16 ) {
+    // source column: the explicit select-row pick, or the held track's own
+    u8 src_col = (pull_src_column != 0xff) ? pull_src_column : pull_held_track;
+    u8 src_bank = src_col / SEQ_CORE_NUM_TRACKS_PER_GROUP;     // bank = column's group (dedicated-bank identity)
+    u8 src_section = src_col % SEQ_CORE_NUM_TRACKS_PER_GROUP;  // section within the slot
+    // letter defaults to what the column's group currently has loaded
+    u8 letter = (pull_letter != 0xff) ? pull_letter : (u8)seq_pattern[src_bank].group;
+    u8 src_pattern = (u8)(((letter & 0x07) << 3) | ((gp - 8) & 0x07));
+
+    // The transfusion: one stored section into the held track, bar-aligned;
+    // the verb arms the track undo with the held track's prior state.
+    s32 r = SEQ_CORE_LoadTrackFromSlot(pull_held_track, src_bank, src_pattern, src_section);
+    pull_commit_msg(r, src_bank, letter, (u8)(gp - 8), src_section, pull_held_track);
+    // aim stays set so the user can rapid-fire pulls from neighboring patterns
     return 0;
   }
 
@@ -1250,7 +1312,36 @@ static s32 SEQ_UI_Button_Paste(s32 depressed)
 
 static s32 SEQ_UI_Button_Clear(s32 depressed)
 {
+  static u8 select_clear_fired = 0;
+
   seq_ui_button_state.CLEAR = depressed ? 0 : 1;
+
+  // SELECT+CLEAR = track undo (RECOMBINE): CLEAR destroys, SELECT+CLEAR
+  // un-destroys — one gesture back from the last pull (bar-aligned restore,
+  // armed by SEQ_CORE_LoadTrackFromSlot). The midiphy panel has no UNDO
+  // button, so this is the pull's performance-surface undo. SELECT+CLEAR
+  // NEVER falls through to a destructive clear — with nothing armed it just
+  // reports, so a slipped SELECT can't cost material.
+  if( depressed && select_clear_fired ) {
+    select_clear_fired = 0;
+    return 0; // swallow the release of a SELECT+CLEAR press
+  }
+  if( !depressed && seq_ui_button_state.SELECT_PRESSED ) {
+    select_clear_fired = 1;
+    u8 track_undo_valid = 0;
+    SEQ_CORE_TrackUndoInfoGet(&track_undo_valid, NULL, NULL);
+    if( track_undo_valid ) {
+      s32 t = SEQ_CORE_TrackUndoRestore();
+      if( t >= 0 ) {
+        char msg[16];
+        sprintf(msg, "pull undone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+    } else {
+      SEQ_UI_Msg_Track("no pull to undo");
+    }
+    return 1;
+  }
 
   if( ui_page == SEQ_UI_PAGE_MIXER ) {
     if( !depressed ) {
@@ -1334,8 +1425,34 @@ static s32 SEQ_UI_Button_Clear(s32 depressed)
 static s32 SEQ_UI_Button_Undo(s32 depressed)
 {
   static seq_ui_page_t prev_page = SEQ_UI_PAGE_NONE;
+  static u8 track_undo_fired = 0;
 
   seq_ui_button_state.UNDO = depressed ? 0 : 1;
+
+  // Track undo first (RECOMBINE): if a pull armed the track-undo slot, the
+  // UNDO button restores that victim — the "one gesture back" of the pull
+  // (bar-aligned, runs the per-track fan). One-shot: once consumed, UNDO
+  // falls back to the mainline copy/paste undo below. Known arbitration gap
+  // (by-ear watch list): a copy/paste/clear edit made AFTER a pull still
+  // loses to the unconsumed pull victim.
+  if( depressed && track_undo_fired ) {
+    track_undo_fired = 0;
+    return 0; // swallow the release of a track-undo press
+  }
+  if( !depressed ) {
+    u8 track_undo_valid = 0;
+    SEQ_CORE_TrackUndoInfoGet(&track_undo_valid, NULL, NULL);
+    if( track_undo_valid ) {
+      track_undo_fired = 1;
+      s32 t = SEQ_CORE_TrackUndoRestore();
+      if( t >= 0 ) {
+        char msg[16];
+        sprintf(msg, "pull undone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+      return 1;
+    }
+  }
 
   if( ui_page == SEQ_UI_PAGE_MIXER ) {
     if( depressed ) return -1;
@@ -1614,6 +1731,10 @@ static s32 SEQ_UI_Button_Pattern(s32 depressed)
     pattern_capture_group = 0xff;
     pattern_capture_dst_track = 0xff;
     pattern_capture_status[0] = 0;
+    // disarm a pull hold: while PATTERN is held the select-row intercept above
+    // eats the held button's release, which would leave the pull armed with no
+    // button down (phantom pulls on later GP presses)
+    pull_held_track = 0xff;
     return 0;
   }
 
@@ -1976,6 +2097,36 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
       seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
       pattern_capture_dst_track = (u8)sel_button;
       pattern_held_gp_consumed = 1;
+    }
+    return 0;
+  }
+
+  // Pull gesture (RECOMBINE): the FIRST held select-row button is the pull
+  // destination; while it is held, OTHER select-row presses pick the SOURCE
+  // column (intercepted — this shadows the stock multi-track chord-select).
+  // The held button's own press/release flows through unchanged, so the stock
+  // release-select still fires and the cursor follows the transfusion target.
+  if( pull_held_track == 0xff ) {
+    if( !depressed && button_state == 0xffff ) {
+      // sole press: arm the hold (do not consume — stock handling continues)
+      pull_held_track = (u8)sel_button;
+      pull_src_column = 0xff;
+      pull_letter = 0xff;
+      pull_status[0] = 0;
+    }
+  } else if( sel_button == pull_held_track ) {
+    if( depressed )
+      pull_held_track = 0xff; // disarm (do not consume)
+  } else if( !seq_ui_button_state.PATTERN_PRESSED ) {
+    // another select press while held -> source column pick. Maintain
+    // button_state exactly as the normal handler would (see the stuck-bit
+    // note on the PATTERN intercept above).
+    if( depressed ) {
+      button_state |= (1 << sel_button);
+    } else {
+      button_state &= ~(1 << sel_button);
+      seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
+      pull_src_column = (u8)sel_button;
     }
     return 0;
   }
@@ -3288,6 +3439,55 @@ s32 SEQ_UI_LCD_Handler(void)
     SEQ_LCD_CursorSet(40, 1);
     {
       u8 cur_num = seq_pattern[src_group].num;
+      int i;
+      for(i=0; i<8; ++i) {
+        char prefix = (i == cur_num) ? '.' : ' ';
+        SEQ_LCD_PrintFormattedString("%c%d   ", prefix, i + 1);
+      }
+    }
+  } else if( pull_held_track != 0xff &&
+             (pull_src_column != 0xff || pull_letter != 0xff || pull_status[0]) ) {
+    // Pull gesture overlay (mirror of the capture overlay above). Destination =
+    // the held select-row track; the top row aims the SOURCE pattern. Gated on
+    // the first aim input so a quick track-select tap doesn't flash the page.
+    u8 src_col = (pull_src_column != 0xff) ? pull_src_column : pull_held_track;
+    u8 src_bank = src_col / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    u8 src_section = src_col % SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    u8 cur_letter = seq_pattern[src_bank].group;
+
+    // LCD 1 row 0: title — source column -> the held (destination) track.
+    SEQ_LCD_CursorSet(0, 0);
+    //                                "1234567890123456789012345678901234567890"
+    SEQ_LCD_PrintFormattedString("PULL %d:S%d -> T%-2d  (sel=src col)       ",
+                                 src_bank + 1, src_section + 1, pull_held_track + 1);
+
+    // LCD 1 row 1: source pattern letters A..H (GP1-8). Picked letter
+    // bracketed; the column group's loaded letter shows a dot prefix.
+    SEQ_LCD_CursorSet(0, 1);
+    {
+      int i;
+      for(i=0; i<8; ++i) {
+        char letter = 'A' + i;
+        char prefix = (i == cur_letter) ? '.' : ' ';
+        if( i == pull_letter )
+          SEQ_LCD_PrintFormattedString("%c[%c] ", prefix, letter);
+        else
+          SEQ_LCD_PrintFormattedString("%c %c  ", prefix, letter);
+      }
+    }
+
+    // LCD 2 row 0: last commit result, else the layout hint.
+    SEQ_LCD_CursorSet(40, 0);
+    if( pull_status[0] )
+      SEQ_LCD_PrintFormattedString("%-40s", pull_status);
+    else
+      SEQ_LCD_PrintString("GP1-8 ltr GP9-16 pat  sel=src col       ");
+
+    // LCD 2 row 1: source pattern numbers 1..8 (GP9-16). The column group's
+    // currently-loaded number is dotted as a reference.
+    SEQ_LCD_CursorSet(40, 1);
+    {
+      u8 cur_num = seq_pattern[src_bank].num;
       int i;
       for(i=0; i<8; ++i) {
         char prefix = (i == cur_num) ? '.' : ' ';

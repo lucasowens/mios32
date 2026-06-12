@@ -38,6 +38,7 @@
 #define SEQ_FILE_B_ERR_WRITE           -133 // error while writing file (exact error status cannot be determined anymore)
 #define SEQ_FILE_B_ERR_NO_FILE         -134 // no or invalid bank file
 #define SEQ_FILE_B_ERR_P_TOO_LARGE     -135 // during pattern write: pattern too large for slot in bank
+#define SEQ_FILE_B_ERR_INVALID_TRACK   -136 // invalid track section (out of range, or slot stores fewer tracks)
 
 // used by seq_file_m.c
 #define SEQ_FILE_M_ERR_INVALID_BANK    -144 // invalid bank number

@@ -21,7 +21,7 @@ import argparse
 from dataclasses import dataclass, field
 
 from .board import Board, BoardNotFound
-from .sysex import CC, Page
+from .sysex import CC, Button, Page, RESET_UNMUTE_ALL
 
 
 # A3 in the AUTOTEST session: every gate lit, track-0 par-layer-0 = Note (C-3
@@ -114,8 +114,103 @@ def build_tension(
     return res
 
 
+# --------------------------------------------------------------------------- recombine
+
+RECOMBINE_SESSION = "PULLJAM"
+
+# "Tuesday's kicks" — three kick variants stored as bank-0 patterns A1..A3
+# (section 0 = kick, section 1 = offbeat hats), ready to pull live.
+KICK_NOTE = 36   # C1, GM kick
+HAT_NOTE = 42    # F#1, GM closed hat
+KICK_VARIANTS = {
+    0: [0, 4, 8, 12],            # A1: four on the floor
+    1: [0, 4, 7, 8, 12, 14],     # A2: pushed (and-of-2, and-of-4 ghosts)
+    2: [0, 6, 8, 10, 12],        # A3: broken
+}
+HAT_STEPS = [2, 6, 10, 14]
+
+# "Tonight's bass" — a minor-ish 16-step groove on group 1's first track.
+BASS_LINE = {0: 36, 3: 36, 6: 43, 8: 36, 11: 46, 14: 43}  # C2 / G2 / A#2
+
+
+def _rebuild_track(board: Board, track: int, gates: list[int],
+                   notes: dict[int, int] | int) -> None:
+    """CLEAR the track, light the gate steps via EDIT-page GP toggles, write
+    the notes into par layer 0."""
+    board.page_set(Page.EDIT)
+    board.ui_track_set(track)
+    board.press(Button.CLEAR)
+    for s in gates:
+        board.press(Button.GP(s + 1))
+    note_map = notes if isinstance(notes, dict) else {s: notes for s in gates}
+    for s, n in note_map.items():
+        board.track_par_set(track, 0, 0, s, n)
+
+
+def build_recombine(
+    board: Board,
+    *,
+    port: int | None = None,   # mios32 port for kick/hat/bass; None = session default
+    channel: int = 0,          # kick+hat channel; bass lands on channel+1
+    verbose: bool = True,
+    **_ignored,                # tolerate the CLI's tension-specific options
+) -> RigResult:
+    """The RECOMBINE Stage-C rig: a dedicated jam session (never AUTOTEST!)
+    with three stored kick variants in bank 0 (A1..A3) and a live bass groove
+    in group 1 — 'pull Tuesday's kick under tonight's bass'.
+
+    The playable loop: press PLAY (bass runs in group 1) →
+      hold select-row [6] (track 6 = the empty pull target next to the bass) →
+      tap select-row [1] (source column 1 -> bank 0, kick section) →
+      GP1 (letter A) → GP9/10/11 = pull kick A1/A2/A3, lands on the bar →
+      UNDO button = one gesture back (restores the track, bar-aligned)."""
+    res = RigResult(name="recombine", lead_track=5)
+
+    # session_load returns the ACTIVE name after the call (the prior session's
+    # name when the load failed because PULLJAM doesn't exist yet).
+    try:
+        active = board.session_load(RECOMBINE_SESSION)
+    except Exception:
+        active = ""
+    if active != RECOMBINE_SESSION:
+        board.session_create(RECOMBINE_SESSION)
+        res.notes.append(f"created session '{RECOMBINE_SESSION}'")
+    else:
+        res.notes.append(f"loaded session '{RECOMBINE_SESSION}' (rebuilding content)")
+    board.reset()
+
+    # Bank 0 = "Tuesday's" drum material: A1..A3 kick variants + hats.
+    for pattern_idx, kick_steps in KICK_VARIANTS.items():
+        _rebuild_track(board, 0, kick_steps, KICK_NOTE)
+        _rebuild_track(board, 1, HAT_STEPS, HAT_NOTE)
+        assert board.pattern_save(0, 0, pattern_idx), f"save A{pattern_idx+1}"
+    res.notes.append("bank 0: A1=4-floor A2=pushed A3=broken kicks (S1) + hats (S2)")
+
+    # Group 1 / bank 1 = "tonight's" bass, loaded live.
+    _rebuild_track(board, 4, sorted(BASS_LINE), BASS_LINE)
+    assert board.pattern_save(1, 1, 0), "save bass B1"
+    res.notes.append("group 2 track 5: live bass groove (saved as its B1)")
+
+    if port is not None:
+        board.track_config(0, port, channel)
+        board.track_config(1, port, channel)
+        board.track_config(4, port, channel + 1)
+        res.notes.append(f"kick/hat ch{channel + 1}, bass ch{channel + 2} on port {port:#x}")
+
+    board.reset(RESET_UNMUTE_ALL)       # everything audible
+    board.page_set(Page.EDIT)
+    board.ui_track_set(5)               # cursor on the pull target
+    res.notes.append("PLAY, then: hold sel[6], tap sel[1], GP1, GP9/10/11 = pull kicks")
+    res.notes.append("SELECT+CLEAR = one gesture back (track undo)")
+
+    if verbose:
+        _print_result(res)
+    return res
+
+
 RIGS = {
     "tension": build_tension,
+    "recombine": build_recombine,
 }
 
 

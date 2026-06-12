@@ -1662,6 +1662,246 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
 }
 
 
+/////////////////////////////////////////////////////////////////////////////
+// Fork: one-deep track undo — the RECOMBINE keystone (design doc §9
+// 2026-06-11). Snapshot of one track's full persisted state, armed
+// automatically by destructive track-grain verbs before they overwrite the
+// victim. One-deep and global like the generator's ENGAGE undo: the most
+// recent arm wins, restore is one-shot. `kind` distinguishes a live-RAM
+// victim (the pull verb) from a future SD-slot victim (the push-side arm of
+// SEQ_CORE_CaptureToSlotTrack, restore = load-modify-save back to the slot);
+// only LIVE is implemented so far.
+/////////////////////////////////////////////////////////////////////////////
+
+// full persisted CC image: base 0x00..0x7f + ext block range 0x80..0x9f
+#define TRACK_UNDO_CC_COUNT 0xa0
+
+typedef struct {
+  u8 valid;
+  u8 kind;          // SEQ_CORE_TRACK_UNDO_KIND_*
+  u8 track;
+  u8 play_section;  // runtime state, never in the pattern file
+  u16 par_steps;
+  u8  par_layers;
+  u8  par_instruments;
+  u16 trg_steps;
+  u8  trg_layers;
+  u8  trg_instruments;
+  char name[81];
+  u8 cc[TRACK_UNDO_CC_COUNT];
+  u8 anchors[sizeof(((seq_cc_trk_t *)0)->robotize_bar_anchors)]; // 64
+  u8 par[SEQ_PAR_MAX_BYTES];
+  u8 trg[SEQ_TRG_MAX_BYTES];
+} seq_core_track_undo_t;   // ~1.65 KB
+
+static seq_core_track_undo_t CCM_SECTION track_undo;
+
+/////////////////////////////////////////////////////////////////////////////
+// Arm the track undo with dst_track's live state. Called by destructive
+// track-grain verbs immediately before they overwrite the track. RAM only,
+// no mutex; runs in task context.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_TrackUndoSnapLive(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  track_undo.valid = 0; // invalidate while the snapshot is in flight
+  track_undo.kind = SEQ_CORE_TRACK_UNDO_KIND_LIVE;
+  track_undo.track = track;
+  track_undo.play_section = seq_core_trk[track].play_section;
+  track_undo.par_steps        = (u16)SEQ_PAR_NumStepsGet(track);
+  track_undo.par_layers       = (u8)SEQ_PAR_NumLayersGet(track);
+  track_undo.par_instruments  = (u8)SEQ_PAR_NumInstrumentsGet(track);
+  track_undo.trg_steps        = (u16)SEQ_TRG_NumStepsGet(track);
+  track_undo.trg_layers       = (u8)SEQ_TRG_NumLayersGet(track);
+  track_undo.trg_instruments  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+  memcpy(track_undo.name, seq_core_trk[track].name, 81);
+
+  int i;
+  for(i=0; i<TRACK_UNDO_CC_COUNT; ++i) {
+    s32 v = SEQ_CC_Get(track, i);
+    track_undo.cc[i] = (v >= 0) ? (u8)v : 0;
+  }
+  memcpy(track_undo.anchors, seq_cc_trk[track].robotize_bar_anchors, sizeof(track_undo.anchors));
+  memcpy(track_undo.par, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
+  memcpy(track_undo.trg, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+
+  track_undo.valid = 1;
+  return 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Restore the track undo victim — one gesture back from a destructive
+// track-grain verb. One-shot (consumes the snapshot). Mirrors the TrackRead
+// write path: CC replay through SEQ_CC_Set (which re-syncs the processor
+// slots), TrackInit with the victim geometry, bulk par/trg, name/anchors/
+// play_section. The restore is itself a live gesture: sustain cancelled,
+// bar-aligned drop. Returns the restored track (>=0), -1 if no snapshot.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_TrackUndoRestore(void)
+{
+  if( !track_undo.valid )
+    return -1;
+
+  u8 track = track_undo.track;
+  track_undo.valid = 0; // one-shot
+
+  // RAM-only write phase under tick exclusion (fast — no SD I/O): a tick
+  // between the CC replay and the bulk memcpys would render/emit torn state.
+  portENTER_CRITICAL();
+
+  memcpy(seq_core_trk[track].name, track_undo.name, 81);
+
+  int i;
+  for(i=0; i<TRACK_UNDO_CC_COUNT; ++i)
+    SEQ_CC_Set(track, i, track_undo.cc[i]);
+
+  SEQ_PAR_TrackInit(track, track_undo.par_steps, track_undo.par_layers, track_undo.par_instruments);
+  memcpy(seq_par_layer_value[track], track_undo.par, SEQ_PAR_MAX_BYTES);
+
+  SEQ_TRG_TrackInit(track, track_undo.trg_steps, track_undo.trg_layers, track_undo.trg_instruments);
+  memcpy(seq_trg_layer_value[track], track_undo.trg, SEQ_TRG_MAX_BYTES);
+
+  memcpy(seq_cc_trk[track].robotize_bar_anchors, track_undo.anchors, sizeof(track_undo.anchors));
+  seq_core_trk[track].play_section = track_undo.play_section;
+
+  SEQ_CORE_RenderDirtySet(track);
+  SEQ_CC_LinkUpdate(track);
+
+  portEXIT_CRITICAL();
+
+  // Force a full quiet render — same emission-freshness contract as the pull
+  // verb (a sweep-regime tick could consume the dirty flag window-only).
+  seq_render_touched_ms[track] = 0;
+  seq_render_dirty[track] = 1;
+  SEQ_CORE_RenderTrack(track);
+
+  // The restore is itself a track-grain load — mirror the pull verb's
+  // external fan rows, or the rig stays on the PULLED track's program/bank
+  // and the latches still describe the pulled track's layer assignments.
+  // (The UNMUTE row stays out: an undo must not change mute state.)
+  SEQ_CORE_CancelSustainedNotes(track);
+
+  if( !seq_core_options.PATTERN_CHANGE_DONT_RESET_LATCHED_PC )
+    SEQ_LAYER_ResetLatchedValuesTrack(track);
+
+  MUTEX_MIDIOUT_TAKE;
+  SEQ_LAYER_SendPCBankValues(track, 0, 1);
+  MUTEX_MIDIOUT_GIVE;
+
+  SEQ_CORE_ManualSynchToMeasure(1 << track);
+
+  return track;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Track undo state peek (UI LED / harness pin). Any out pointer may be NULL.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_TrackUndoInfoGet(u8 *valid, u8 *kind, u8 *track)
+{
+  if( valid ) *valid = track_undo.valid;
+  if( kind )  *kind  = track_undo.kind;
+  if( track ) *track = track_undo.track;
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Fork: pull ONE stored track section into a live track — the RECOMBINE verb
+// (track-grain load, the missing grain cell). A transfusion into the running
+// organism, not a pattern switch: seq_pattern[] / seq_pattern_name[] are
+// never touched and the destination group's other tracks never change.
+//
+// Arms the track undo with dst_track's state first (UNDO is the live safety
+// net — one gesture back), then streams the section via SEQ_FILE_B_TrackRead
+// and runs the group-load side-effect fan translated per-track (the §3.4
+// census): sustain cancel, latched-value reset + PC/bank send, the
+// UNMUTE_ON_PATTERN_CHANGE bit, and a bar-aligned restart via
+// SYNC_MEASURE. RATOPC is deliberately subsumed by that restart: the group
+// flow's immediate reset lands on the bar only because the handler runs at
+// the boundary — a pull happens mid-bar, where an immediate reset would drop
+// the track off-phase. The mixer-map coupling is skipped deliberately.
+//
+// Per the no-smart-default rule dst is NOT gated on "empty"; the caller's
+// pick is deliberate. Pulling from an unwritten slot is refused before any
+// live write (the undo then holds a snapshot identical to live state — a
+// harmless restore; one-deep means the previous victim is consumed either
+// way, same contract as the ENGAGE undo).
+//
+// MUST run in task context (MUTEX_SDCARD around the read, MUTEX_MIDIOUT
+// around the PC/bank send). Returns 0 on success, negative on error
+// (SEQ_FILE_B codes; live track untouched on pre-write failures).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_LoadTrackFromSlot(u8 dst_track, u8 src_bank, u8 src_pattern, u8 src_slot_track)
+{
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  SEQ_CORE_TrackUndoSnapLive(dst_track);
+
+  // Pre-generate output across the stall, then exclude ticks for the whole
+  // live-write window — the proven group-change recipe (SEQ_PATTERN_Change's
+  // forward-delay margin + SEQ_PATTERN_Handler's critical section; SDCARD
+  // must be taken BEFORE entering the critical section or the take hangs).
+  // Without the exclusion, the mid-read CC replay arms the sweep regime and
+  // ticks render/emit the half-loaded source for the whole SD-read window.
+  if( SEQ_BPM_IsRunning() ) {
+    MUTEX_MIDIOUT_TAKE;
+    SEQ_CORE_AddForwardDelay(seq_core_pattern_switch_margin_ms);
+    MUTEX_MIDIOUT_GIVE;
+  }
+
+  MUTEX_SDCARD_TAKE;
+  portENTER_CRITICAL();
+  s32 status = SEQ_FILE_B_TrackRead(src_bank, src_pattern, src_slot_track, dst_track);
+  portEXIT_CRITICAL();
+  MUTEX_SDCARD_GIVE;
+
+  if( status < 0 ) {
+    // ERR_READ is the only code TrackRead can return after its first live
+    // write (mid-bulk SD failure -> half-written track). Make the verb
+    // transactional: put the armed victim back (the restore runs its own
+    // fan). Harmless when the failure was pre-write — the snapshot is then
+    // identical to live state.
+    if( status == SEQ_FILE_B_ERR_READ )
+      SEQ_CORE_TrackUndoRestore();
+    return status;
+  }
+
+  // Force a full quiet render: the mirror is the emission source, and the
+  // RenderDirtySet armed inside TrackRead can be consumed by a sweep-regime
+  // tick that refreshed only a window — the organism would play stale notes
+  // until the next full pass (CaptureToTrack precedent).
+  seq_render_touched_ms[dst_track] = 0;
+  seq_render_dirty[dst_track] = 1;
+  SEQ_CORE_RenderTrack(dst_track);
+
+  // ---- per-track census fan (mirrors SEQ_PATTERN_Load's group fan) ----
+
+  SEQ_CORE_CancelSustainedNotes(dst_track);
+
+  if( seq_core_options.UNMUTE_ON_PATTERN_CHANGE ) {
+    u16 mask = 1 << dst_track;
+    MIOS32_IRQ_Disable();
+    seq_core_trk_muted &= ~mask;
+    seq_core_trk_synched_mute &= ~mask;
+    seq_core_trk_synched_unmute &= ~mask;
+    MIOS32_IRQ_Enable();
+  }
+
+  if( !seq_core_options.PATTERN_CHANGE_DONT_RESET_LATCHED_PC )
+    SEQ_LAYER_ResetLatchedValuesTrack(dst_track);
+
+  MUTEX_MIDIOUT_TAKE;
+  SEQ_LAYER_SendPCBankValues(dst_track, 0, 1);
+  MUTEX_MIDIOUT_GIVE;
+
+  // bar-aligned drop (also delivers RATOPC's musical intent, see above)
+  SEQ_CORE_ManualSynchToMeasure(1 << dst_track);
+
+  return 0;
+}
+
+
 void SEQ_CORE_RenderTracks(void)
 {
   u8 track;

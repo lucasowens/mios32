@@ -60,6 +60,10 @@ from .sysex import (
     CMD_STATUS_OK,
     CMD_TICK_QUERY,
     CMD_TRACK_CONFIG,
+    CMD_SESSION_CREATE,
+    CMD_TRACK_LOAD,
+    CMD_TRACK_UNDO,
+    CMD_TRACK_UNDO_QUERY,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -946,9 +950,9 @@ class Board:
     ) -> bool:
         """Persist the working group's current in-RAM pattern (all 4 tracks) to
         the (bank, pattern) slot on SD. Use to snapshot a host-built rig so it
-        survives reboot. Returns True if the write committed. NOTE: a track's
-        GRIP CC is not yet in the persisted range (Tension Workbench Stage D), so
-        a reloaded rig restores notes/gates/config but GRIP must be re-applied."""
+        survives reboot. Returns True if the write committed. The V3 ext block
+        persists CCs 0x80..0x9f, so GRIP (0x9a) and the chord-mask CCs travel
+        with the save (pinned by test_tension_persist)."""
         if not 0 <= group <= 3:
             raise ValueError(f"group out of range: {group}")
         if not 0 <= bank <= 7:
@@ -963,6 +967,102 @@ class Board:
         if payload[4] != CMD_STATUS_OK:
             raise RuntimeError(f"PATTERN_SAVE dispatch status {payload[4]:#04x}")
         return payload[3] == CMD_STATUS_OK
+
+    def session_create(self, name: str, timeout: float = 60.0) -> None:
+        """Create a NEW session (/SESSIONS/<name>) with default content and
+        wait until it is active. The firmware arms an async format (a low-prio
+        task writes the four bank files + config — several seconds), so this
+        polls session_name_get until it reports the new name. Refuses if the
+        session already exists (use session_load for that). Arming stops the
+        sequencer and clears live state."""
+        name = name.upper()  # FAT directory names are uppercase
+        encoded = name.encode("ascii")
+        if not 1 <= len(encoded) <= 8:
+            raise ValueError(f"session name must be 1..8 ASCII chars: {name!r}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SESSION_CREATE, encoded))
+        payload = self.wait_for_sysex(CMD_SESSION_CREATE, timeout=8.0, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short SESSION_CREATE reply: {payload!r}")
+        if payload[1] == 0x04:
+            raise RuntimeError(f"session {name!r} already exists")
+        if payload[1] != CMD_STATUS_OK or payload[0] != 0x01:
+            raise RuntimeError(f"SESSION_CREATE failed, status {payload[1]:#04x}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            try:
+                if self.session_name_get() == name:
+                    # The name is stored BEFORE load_sd_content re-reads all
+                    # files of the new session (4 banks, seconds of SD I/O) —
+                    # an immediate SD verb would time out on the mutex.
+                    time.sleep(6.0)
+                    return
+            except (TimeoutError, RuntimeError):
+                continue  # device busy formatting; keep polling
+        raise TimeoutError(f"session {name!r} did not become active in {timeout}s")
+
+    def track_load(
+        self,
+        dst_track: int,
+        bank: int,
+        pattern: int,
+        slot_track: int,
+        timeout: float = 4.0,
+    ) -> bool:
+        """Pull ONE stored track section into a live track (the RECOMBINE verb,
+        SEQ_CORE_LoadTrackFromSlot). Any bank x pattern x section -> any of the
+        16 live tracks; the dst group's other tracks and seq_pattern[] are
+        untouched. Arms the track undo with dst's prior state. Returns True if
+        the load committed; False = refused (e.g. unwritten slot, slot_track out
+        of range) — slot_track is deliberately not range-checked here so refusal
+        behavior is pinnable. Synchronous SD read."""
+        if not 0 <= dst_track <= 15:
+            raise ValueError(f"dst_track out of range: {dst_track}")
+        if not 0 <= bank <= 7:
+            raise ValueError(f"bank out of range: {bank}")
+        if not 0 <= pattern <= 127:
+            raise ValueError(f"pattern out of range: {pattern}")
+        if not 0 <= slot_track <= 127:
+            raise ValueError(f"slot_track not 7-bit safe: {slot_track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(CMD_TRACK_LOAD, bytes([dst_track, bank, pattern, slot_track]))
+        )
+        payload = self.wait_for_sysex(CMD_TRACK_LOAD, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short TRACK_LOAD reply: {payload!r}")
+        if payload[5] != CMD_STATUS_OK:
+            raise RuntimeError(f"TRACK_LOAD dispatch status {payload[5]:#04x}")
+        return payload[4] == CMD_STATUS_OK
+
+    def track_undo(self, timeout: float = 2.0) -> int | None:
+        """One-shot restore of the track undo victim (most recent destructive
+        track-grain verb — e.g. a track_load). Returns the restored track
+        number, or None if no snapshot was armed."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_UNDO, b""))
+        payload = self.wait_for_sysex(CMD_TRACK_UNDO, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short TRACK_UNDO reply: {payload!r}")
+        if payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"TRACK_UNDO dispatch status {payload[2]:#04x}")
+        if payload[1] != CMD_STATUS_OK:
+            return None
+        return payload[0]
+
+    def track_undo_query(self, timeout: float = 2.0) -> tuple[bool, int, int]:
+        """Non-consuming peek at the track undo slot.
+
+        Returns (valid, kind, track); kind 0 = live-RAM victim."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_UNDO_QUERY, b""))
+        payload = self.wait_for_sysex(CMD_TRACK_UNDO_QUERY, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short TRACK_UNDO_QUERY reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise RuntimeError(f"TRACK_UNDO_QUERY dispatch status {payload[3]:#04x}")
+        return (payload[0] == 1, payload[1], payload[2])
 
     def set_force_scale(self, track: int, on: bool, timeout: float = 1.0) -> None:
         """Toggle a track's FORCE_SCALE flag (bit 3 of MODE_FLAGS). The Tension
