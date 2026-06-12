@@ -462,6 +462,72 @@ silently skipped the source track on reload (leaving the sanitized RAM in place)
 the SD reload couldn't restore it at all. The snapshot path makes source byte-identical
 after the capture regardless.
 
+### Track-grain load (the pull) + track undo (RECOMBINE bundle, shipped + by-ear GO 2026-06-12)
+
+The mirror of the capture verbs: load ONE stored track section into an arbitrary
+live track. Fills the missing grain cell (track-save / group-save / group-load
+existed; track-load didn't).
+
+- **`SEQ_FILE_B_TrackRead(bank, pattern, slot_track, dst_track)`**
+  ([seq_file_b.c](../core/seq_file_b.c)) — streams a single section into any live
+  track; adapted from `PatternRead`'s remix-skip / load / ext-block arms (per-track
+  geometry walk, no fixed stride). Contract: the fixed section header is read into
+  locals and status-checked **before the first live write** — every pre-write
+  failure (bad bank/pattern/section, `slot_track >= num_tracks`, header error)
+  leaves the live track untouched; new error `SEQ_FILE_B_ERR_INVALID_TRACK -136`.
+  Unlike `PatternRead`, the bulk par/trg reads are **status-bearing** (PatternRead
+  silently swallows `FILE_Read*` failures — inherited mainline flaw, not fixed
+  there). The optional ext phase uses a separate `ext_status` and degrades to
+  "loaded without ext"; the indexed ext read additionally requires
+  `tag == first_tag` (the stride came from track 0's tag — random-access indexing
+  makes a stride/tag disagreement possible where PatternRead's sequential read
+  can't). NOTE: the `slot_track >= num_tracks` refusal is not a reliable
+  unwritten-slot guard — `SEQ_FILE_B_Create`'s slot zero-fill is `#if 0`'d, so
+  sparse banks (testctrl `bank_create` + selective saves) hold undefined FatFs gap
+  data; stock `SEQ_FILE_Format` writes all 64 slots.
+- **`SEQ_CORE_LoadTrackFromSlot(dst_track, bank, pattern, slot_track)`**
+  ([seq_core.c](../core/seq_core.c), by the capture cluster) — the verb. Arms the
+  track undo, then runs the proven group-change recipe around the read:
+  `SEQ_CORE_AddForwardDelay(margin)` (only while running) + `MUTEX_SDCARD` +
+  `portENTER_CRITICAL()` (without it, the mid-read CC replay arms the sweep regime
+  and ticks emit the half-loaded source for the whole SD window). On a post-write
+  `ERR_READ` the verb is **transactional**: it auto-restores the armed undo victim.
+  Then the group-load side-effect fan translated per-track (the §3.4 census):
+  `SEQ_CORE_CancelSustainedNotes`, **new** `SEQ_LAYER_ResetLatchedValuesTrack`
+  (mainline reset is all-16-tracks only), `SEQ_LAYER_SendPCBankValues` under
+  `MUTEX_MIDIOUT`, the `UNMUTE_ON_PATTERN_CHANGE` bit; **RATOPC is subsumed** by
+  an unconditional `ManualSynchToMeasure(1 << dst)` (an immediate reset mid-bar
+  would drop the track off-phase; SYNC_MEASURE delivers the intent on the bar);
+  mixer coupling skipped; `seq_pattern[]` never touched (a pull is a transfusion,
+  not a switch). Finally a **forced full quiet render** (`touched_ms=0; dirty=1;
+  RenderTrack`) — `RenderDirtySet` alone can be consumed by a sweep-regime tick
+  that refreshed only a window, and the mirror is the emission source.
+- **Track undo** — one-deep global victim snapshot in CCM (~1.65 KB: geometry,
+  name[81], full CC image 0x00..0x9f, robotize anchors, par/trg sources,
+  play_section; `kind` field reserves an SD-slot-victim variant for a future
+  push-side arm). `SnapLive` armed inside every pull; `Restore` is one-shot,
+  write phase under `portENTER_CRITICAL`, then the same external fan rows
+  (latch reset + PC/bank send — without them the rig stays on the pulled track's
+  program after an undo) + forced render + bar-aligned drop. CCM 52.9 → 54.4/64 KB.
+- **Gestures** ([seq_ui.c](../core/seq_ui.c)) — the pull intercepts live beside
+  the PATTERN-hold capture intercepts (same `button_state` stuck-bit maintenance):
+  hold select-row = destination (its own press/release flows through stock, so
+  release-select still fires and the cursor follows the transfusion); held +
+  other select = source column (shadows stock multi-track chord-select while
+  held); GP1-8 letter, GP9-16 commit; LCD overlay gated on the first aim input.
+  `SEQ_UI_Button_Pattern`'s press disarms a live pull hold (its select-row
+  intercept would otherwise eat the release → phantom pulls). **SELECT+CLEAR =
+  track undo** (user-picked; every shipped hwcfg maps `BUTTON_UNDO 0 0`); it
+  never falls through to a destructive clear. The unmapped-UNDO-button handler
+  also prefers the track undo (for hwcfgs that map it); known arbitration gap:
+  an armed-but-unconsumed pull victim wins over a copy/paste edit made after it.
+- **testctrl**: `TRACK_LOAD 0x6f`, `TRACK_UNDO 0x70`, `TRACK_UNDO_QUERY 0x71`,
+  `SESSION_CREATE 0x72` (makes /SESSIONS/<name>, arms the async format; host
+  polls `SESSION_NAME_GET`, then waits ~6 s for `load_sd_content`'s SD I/O).
+  Host: `Board.track_load/track_undo/track_undo_query/session_create`; rigs:
+  `recombine` (builds the PULLJAM jam session). Pins: `test_track_load.py` (5),
+  `test_pull_gesture.py` (4).
+
 ---
 
 ## 4. Feature catalog by version

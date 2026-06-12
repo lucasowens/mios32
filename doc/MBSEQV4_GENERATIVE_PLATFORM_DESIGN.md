@@ -49,13 +49,13 @@ A5. RAM budget (corrected)
 
 ## 1. North star — what we're building and why
 
-The goal is **live psychedelic/alien sculpting — discovery *with* the audience.**
+The goal is **live psychedelic/experimental sculpting — discovery *with* the listener.**
 Be the pilot on a journey the passengers experience in real time. The destination
 is not known in advance; discovery and sculpture *are* the pursuit. (~30 years
 playing live techno; this builds on the live-modular-patching ethos: risky, not
 always pretty, but expressive and dimensional.)
 
-The pilot loop: **sculpt to a magical place → capture it → travel off → return or
+The pilot loop: **sculpt to an interesting place → capture it → travel off → return or
 divert → capture → repeat.** Revisit states, take them new directions, blend.
 
 Two qualities are non-negotiable and shape everything:
@@ -1696,6 +1696,14 @@ mechanisms provisional — see `doc/plans/2026-06-11-save-model-groups-performin
   SD-overwrite undo keystone, which extends the shipped ENGAGE undo). Picked over
   fearless-switching (heavier preconditions: stall-race fix, gen-state tag), the
   tape (storage fork open), and terrain-hands (orthogonal, runnable anytime).
+  *(SHIPPED + by-ear hard GO 2026-06-12 — verb `SEQ_CORE_LoadTrackFromSlot` +
+  one-deep track undo (CCM, kind field reserves the push-side SD victim) +
+  track-hold pull gesture + SELECT+CLEAR undo; HIL 117/117. The §5 hypothesis
+  confirmed by use: the user's restated group pain — "being forced to choose 4
+  tracks to move together… a decision I don't ever feel ready to make" — is a
+  premature ensemble commitment, and the pull makes ensemble membership a
+  performance decision. As-built facts in REFERENCE §3; user manual section
+  "The Pull".)*
 - **Refinement (same day, after a clips/scenes challenge from the user):
   organism-primary — no grid on the performance surface.** "Groups demote to
   shelving" sharpened: the performer-facing model is four nouns — the **organism**
@@ -1947,8 +1955,12 @@ working detail in `doc/plans/2026-06-11-save-model-groups-performing-curating.md
   banks lack 2× slack for pairing).
 - Gen-state extension-tag scope (loop array / locks / MULT / anchor) — forced by
   auto-writeback, else the sculpted-loop orphan stays the last loss mode.
-- Track-grain pull gesture (symmetry candidate: hold track button + aim, mirroring
-  PATTERN-hold push). Don't overdesign before the verb exists.
+- ~~Track-grain pull gesture~~ — **RESOLVED 2026-06-12 (built + GO)**: the
+  track-hold mirror — hold select-row = destination, held+select = source column,
+  GP letter + number commits, SELECT+CLEAR = one gesture back. Remaining opens
+  carried on the bundle's watch list: two-face choice at pull time (deferred
+  post-tape), multi-track chord-select shadowed while a track is held, slot
+  NAME in the pull overlay (backlog).
 - Phrase format: MBSEQ_S.V4 record-version bump vs new file (carrier verified
   friendly — `song_size` already parameterized).
 - Performance fence for auto-writeback (Digitone II PERFORM KIT lesson): is a live

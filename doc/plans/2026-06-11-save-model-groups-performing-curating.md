@@ -493,6 +493,17 @@ quadrantChart
 
 ### 9.3 The groups answer (D3)
 
+> **User's articulation, 2026-06-12 (during Stage-C prep — the sharpest
+> statement of the pain on record):** the struggle is "general organization,
+> how to manage a large live set, being forced to choose 4 tracks to move
+> together at the same time (biggest one) — what goes in each group that I
+> want to orchestrate together vs in another group… it's a decision I don't
+> ever feel like I'm ready to make." I.e. the group boundary demands a
+> **premature ensemble commitment**: an arrangement decision forced at
+> setup time that can only be made correctly mid-performance. The pull makes
+> ensemble membership a performance decision; phrases (any-combination
+> waypoints) answer the set-management half.
+
 Across all six boxes, **nobody recalls in groups of 4 — except the OXI One**, and
 there the boundary is *semantic*: each of its 4 sequencers is a different machine
 type, so the grain aligns with something the performer already thinks about. The

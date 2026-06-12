@@ -2,11 +2,12 @@
 
 This manual documents the features added to MIDIbox SEQ V4 in this fork, on top of upstream V4.098. Each section follows the style of the official ucapps.de manuals (intro, usecases, action-named subsections with 2×80 LCD mockups, Tips & Tricks footer).
 
-Three features are documented here:
+Four features are documented here:
 
 1. **Robotize Loop** — bar-anchor PRNG control over the Robotizer Fx (sculpt randomness one measure at a time)
 2. **GENERATE Page** — the former EUCLID page expanded into five generator types (Euclidean, Cellular, Polyrhythm, Subdivide, L-System)
 3. **Capture / Bounce** — freeze a track's computed output (lossless) into a pattern via the PATTERN-hold gesture; build variation libraries and multitimbral canvases
+4. **The Pull** — load one stored track into any live track, on the bar, while everything keeps playing (the mirror of Capture); SELECT+CLEAR is the one-gesture undo
 
 For developer-facing topics (the testctrl SysEx interface, the Python hardware-in-the-loop pytest harness, the top-level orchestration Makefile, and the source-level design catalog) see `MBSEQV4_REFERENCE.md` and `tests/README.md`.
 
@@ -394,6 +395,65 @@ tracks.
 
 ---
 
+## The Pull (track-grain load)
+
+Patterns store and load four tracks at a time — until now, getting one stored
+track back meant loading its whole pattern into a group, four tracks moving
+together. The Pull is the missing move: **load ONE stored track into ANY live
+track, landing on the bar, while everything keeps playing.** It is the mirror
+of the PATTERN-hold Capture: Capture pushes one track *into* storage; the
+Pull brings one track back *out* — any bank × pattern × section, onto any of
+the 16 live tracks. Nothing else moves: the destination group's other tracks,
+the loaded-pattern display, and everything you're tweaking stay untouched.
+
+Together they make storage a two-way shelf: jam, capture the good moments,
+and any future night pull them back under whatever is running.
+
+### The gesture
+
+1. **Hold a select-row track button** — that track is the destination. (A
+   quick tap is still a plain track select, unchanged.)
+2. *(optional)* **Tap another select-row button** — the source *column*
+   (column = bank × section: buttons 1–4 are bank 1's four track slots,
+   5–8 bank 2's, and so on). Default: the held track's own column.
+3. **GP1–8** — the source pattern letter (A–H). Default: the letter that
+   column's group currently has loaded.
+4. **GP9–16** — the pattern number, and **COMMIT**: the stored track drops
+   onto the held track at the next measure. Keep holding and tap other
+   numbers to walk variations bar-by-bar.
+5. Release: the held track becomes the selected track — the cursor follows
+   the transfusion, ready to tweak.
+
+While aiming, the LCD shows the pull overlay (source column and letters on
+the left display, numbers and the last result on the right), mirroring the
+Capture overlay.
+
+### SELECT + CLEAR — one gesture back
+
+Every pull first snapshots the destination track (notes, gates, full config,
+name). **SELECT+CLEAR restores it, on the bar** — pulled the wrong thing, or
+done with the experiment? One gesture and the track is back. One-deep: the
+most recent pull wins. With nothing to undo, SELECT+CLEAR just says so — it
+**never** falls through to a destructive clear.
+
+### Tips & Tricks
+
+* A wrong pull costs one bar + SELECT+CLEAR — cheaper than remembering what's
+  where. Aim, listen, undo. Storage coordinates carry no musical commitment,
+  so organize banks like crates (kicks in one column, basses in another) and
+  let muscle memory do the live navigation.
+* Pulling works on running material: the bar-aligned drop means a kick swap
+  lands like a quantized clip launch.
+* The pulled copy carries its full stored config — length, groove, drum
+  layout, even GRIP — so it sounds the way it was captured, wherever it lands.
+* Capture and Pull are designed as a pair: PATTERN-hold to bank a moment
+  mid-jam, track-hold to bring history back under tonight's material.
+* Heads-up: while a track button is held, the other select-row buttons aim
+  the source column, so multi-track chord-select is unavailable during a
+  pull. Release the hold and it's back.
+
+---
+
 ## Cross-Cutting Notes
 
 ### Where files live
@@ -429,4 +489,4 @@ patterns still load (the v2 byte-count is frozen, read path dispatches on tag).
 
 ---
 
-*Last update: 2026-06-10*
+*Last update: 2026-06-12*
