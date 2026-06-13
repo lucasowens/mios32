@@ -32,6 +32,7 @@
 #include "seq_cv.h"
 #include "seq_midi_in.h"
 #include "seq_core.h"
+#include "seq_pattern.h"
 #include "seq_song.h"
 #include "seq_midply.h"
 #include "seq_groove.h"
@@ -1111,6 +1112,10 @@ static s32 OpenSession(void)
     SEQ_UI_Msg(SEQ_UI_MSG_USER, 2000, "Session doesn't", "exist anymore?!?");
     return -2;
   }
+
+  // FEARLESS SWITCHING: persist any dirty group into the OUTGOING session
+  // before the name changes — "nothing lost" must survive a session hop.
+  SEQ_PATTERN_WritebackAllDirty();
 
   // remember previous session and switch to new name
   char prev_session_name[13];

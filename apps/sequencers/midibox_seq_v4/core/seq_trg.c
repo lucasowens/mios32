@@ -21,6 +21,7 @@
 #include "seq_core.h"
 #include "seq_trg.h"
 #include "seq_cc.h"
+#include "seq_pattern.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -299,6 +300,7 @@ s32 SEQ_TRG_Set(u8 track, u16 step, u8 trg_layer, u8 trg_instrument, u8 value)
   else
     seq_trg_layer_value[track][step_ix] &= ~step_mask;
   SEQ_CORE_RenderDirtySet(track);
+  SEQ_PATTERN_DirtySetTrack(track); // FEARLESS SWITCHING: live diverged from slot
 
   return 0; // no error
 }
@@ -324,6 +326,7 @@ s32 SEQ_TRG_Set8(u8 track, u8 step8, u8 trg_layer, u8 trg_instrument, u8 value)
 
   seq_trg_layer_value[track][step_ix] = value;
   SEQ_CORE_RenderDirtySet(track);
+  SEQ_PATTERN_DirtySetTrack(track); // FEARLESS SWITCHING: live diverged from slot
 
   return 0; // no error
 }

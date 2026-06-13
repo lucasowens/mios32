@@ -29,6 +29,7 @@
 #include "seq_core.h"
 #include "seq_cc.h"
 #include "seq_par.h"
+#include "seq_pattern.h"
 #include "seq_layer.h"
 #include "seq_random.h"
 
@@ -415,6 +416,7 @@ s32 SEQ_GENERATOR_Undo(void)
   u8 track = undo_slot.track;
   memcpy(seq_par_layer_value[track], undo_slot.par_snapshot, SEQ_PAR_MAX_BYTES);
   seq_render_dirty[track] = 1;
+  SEQ_PATTERN_DirtySetTrack(track); // direct-memcpy writer bypasses the SEQ_PAR_Set chokepoint
 
   // Disengage every generator on this track so the restored source isn't
   // overwritten on the next measure.

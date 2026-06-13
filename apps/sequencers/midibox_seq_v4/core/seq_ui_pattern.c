@@ -27,6 +27,7 @@
 #include "seq_file_t.h"
 #include "seq_bpm.h"
 #include "seq_core.h"
+#include "seq_pattern.h"
 #include "seq_midi_in.h"
 
 
@@ -561,6 +562,7 @@ s32 SEQ_UI_PATTERN_MultiClear(u8 only_selected)
       // clear all triggers
       memset((u8 *)&seq_trg_layer_value[track], 0, SEQ_TRG_MAX_BYTES);
       SEQ_CORE_RenderDirtySet(track);
+      SEQ_PATTERN_DirtySetTrack(track); // direct memset bypasses the SEQ_TRG_Set chokepoint
 
       // cancel sustain if there are no steps played by the track anymore.
       SEQ_CORE_CancelSustainedNotes(track);

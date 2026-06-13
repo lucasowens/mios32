@@ -21,6 +21,7 @@
 #include "seq_ui.h"
 
 #include "seq_core.h"
+#include "seq_pattern.h"
 #include "seq_layer.h"
 #include "seq_par.h"
 #include "seq_trg.h"
@@ -905,6 +906,11 @@ static s32 CLEAR_Track(u8 track, paste_clear_mode_t paste_clear_mode)
     DEBUG_MSG("[CLEAR_Track] unsupported paste_clear_mode=%d\n", paste_clear_mode);
   }
 
+  // FEARLESS: every mode above is an edit, but several write through direct
+  // memset / preset-copy helpers that bypass the Set chokepoints — flag once
+  // here so a cleared track survives the next switch.
+  SEQ_PATTERN_DirtySetTrack(track);
+
   // cancel sustain if there are no steps played by the track anymore.
   SEQ_CORE_CancelSustainedNotes(track);
 
@@ -930,6 +936,7 @@ static s32 UNDO_Track(void)
   memcpy((u8 *)&seq_par_layer_value[undo_track], (u8 *)undo_par_layer, SEQ_PAR_MAX_BYTES);
   memcpy((u8 *)&seq_trg_layer_value[undo_track], (u8 *)undo_trg_layer, SEQ_TRG_MAX_BYTES);
   SEQ_CORE_RenderDirtySet(undo_track);
+  SEQ_PATTERN_DirtySetTrack(undo_track); // direct memcpys bypass the Set chokepoints
 
   // copy track name
   memcpy((u8 *)seq_core_trk[undo_track].name, (u8 *)undo_trk_name, 81);

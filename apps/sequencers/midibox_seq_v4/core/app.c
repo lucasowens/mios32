@@ -773,10 +773,11 @@ void SEQ_TASK_Period1S(void)
   if( seq_ui_saveall_req ) {
     s32 status = 0;
 
-    // store all patterns
+    // store all patterns (via SEQ_PATTERN_Save so the FEARLESS dirty bits
+    // clear — slot == live for every group after a save-all)
     int group;
     for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group)
-      status |= SEQ_FILE_B_PatternWrite(seq_file_session_name, seq_pattern[group].bank, seq_pattern[group].pattern, group, 1);
+      status |= SEQ_PATTERN_Save(group, seq_pattern[group]);
 
     // store config (e.g. to store current song/mixermap/pattern numbers
     SEQ_FILE_C_Write(seq_file_session_name);

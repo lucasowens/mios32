@@ -22,6 +22,7 @@
 #include "seq_ui.h"
 #include "seq_core.h"
 #include "seq_cc.h"
+#include "seq_pattern.h"
 #include "seq_par.h"
 #include "seq_layer.h"
 #include "seq_morph.h"
@@ -516,6 +517,10 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
   }
 
   portEXIT_CRITICAL();
+
+  // FEARLESS SWITCHING: live diverged from slot. Loads re-clear at the end of
+  // SEQ_PATTERN_Load (the bank read replays CCs through this chokepoint).
+  SEQ_PATTERN_DirtySetTrack(track);
 
   return 0; // no error
 }

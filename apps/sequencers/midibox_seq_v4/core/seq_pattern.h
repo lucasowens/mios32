@@ -57,6 +57,11 @@ extern s32 SEQ_PATTERN_Handler(void);
 extern s32 SEQ_PATTERN_Load(u8 group, seq_pattern_t pattern);
 extern s32 SEQ_PATTERN_Save(u8 group, seq_pattern_t pattern);
 
+extern void SEQ_PATTERN_DirtySetTrack(u8 track);
+extern void SEQ_PATTERN_DirtyClearGroup(u8 group);
+extern s32 SEQ_PATTERN_WritebackIfDirty(u8 group);
+extern s32 SEQ_PATTERN_WritebackAllDirty(void);
+
 extern s32 SEQ_PATTERN_PeekName(seq_pattern_t pattern, char *pattern_name);
 extern s32 SEQ_PATTERN_PeekPatternsOfGroup(seq_pattern_t pattern);
 
@@ -75,5 +80,13 @@ extern char seq_pattern_name[SEQ_CORE_NUM_GROUPS][21];
 extern mios32_sys_time_t seq_pattern_start_time;
 extern u16 seq_pattern_remix_map;
 extern u8 seq_pattern_log_load_time;
+
+// FEARLESS SWITCHING (design §9 2026-06-11 save-model inversion): live state
+// diverged from the group's working slot. Bit per group. Set by the source-
+// write chokepoints (SEQ_PAR_Set / SEQ_TRG_Set* / SEQ_CC_Set) + the direct
+// writers that bypass them; cleared when slot==live again (group load, save
+// to the working slot, writeback).
+extern u8 seq_pattern_dirty;
+extern u32 seq_pattern_writeback_count; // diagnostic (HIL pins writeback-fired/skipped)
 
 #endif /* _SEQ_PATTERN_H */

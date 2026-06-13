@@ -56,6 +56,16 @@ u8 seq_pattern_log_load_time; // can be changed in terminal with "set seq_patter
 u8 seq_pattern_mixer_num;
 u16 seq_pattern_remix_map;
 
+u8 seq_pattern_dirty;
+u32 seq_pattern_writeback_count;
+
+// Gates the writeback: bit per group, set once the group has actually loaded
+// slot content this power-cycle. Boot-time init paths (track presets, CC
+// defaults) run through the SEQ_CC_Set chokepoint BEFORE any session loads —
+// without this gate the first session load's SEQ_PATTERN_Change would commit
+// that boot debris over slots that never sounded.
+static u8 pattern_loaded;
+
 /////////////////////////////////////////////////////////////////////////////
 // Initialisation
 /////////////////////////////////////////////////////////////////////////////
@@ -65,6 +75,9 @@ s32 SEQ_PATTERN_Init(u32 mode)
   seq_pattern_mixer_num = 0;
   seq_pattern_remix_map = 0;
   seq_pattern_log_load_time = 0;
+  seq_pattern_dirty = 0;
+  seq_pattern_writeback_count = 0;
+  pattern_loaded = 0;
 	
   // pre-init pattern numbers
   u8 group;
@@ -108,6 +121,78 @@ char *SEQ_PATTERN_NameGet(u8 group)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// FEARLESS SWITCHING — the save-model inversion (design §9 2026-06-11): the
+// working state always persists; protection is the explicit CHECKPOINT/REVERT
+// act. Live state that diverged from the group's working slot (dirty) is
+// written back to that slot before any pattern load replaces it.
+/////////////////////////////////////////////////////////////////////////////
+
+// Marks the track's group dirty. Called from the source-write chokepoints
+// (SEQ_PAR_Set / SEQ_TRG_Set / SEQ_TRG_Set8 / SEQ_CC_Set — the render mirror
+// never passes through them, so per-tick rendering can't false-dirty) and
+// from direct-memcpy writers that bypass them (SEQ_GENERATOR_Undo). Loads
+// re-clear at the end of SEQ_PATTERN_Load, so load paths that replay CCs
+// through SEQ_CC_Set don't leave a stale flag.
+// IRQ-guarded: the mask is a read-modify-write shared across tasks.
+void SEQ_PATTERN_DirtySetTrack(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty |= (1 << (track / SEQ_CORE_NUM_TRACKS_PER_GROUP));
+  MIOS32_IRQ_Enable();
+}
+
+// Discard the group's divergence bookkeeping WITHOUT writing — for flows
+// whose intent is "the slot content wins over stale live state" (e.g. the
+// cross-group bounce: capture into a slot, then bring that slot up live; a
+// writeback in between would clobber the fresh capture with the pre-capture
+// live state).
+void SEQ_PATTERN_DirtyClearGroup(u8 group)
+{
+  if( group >= SEQ_CORE_NUM_GROUPS )
+    return;
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty &= ~(1 << group);
+  MIOS32_IRQ_Enable();
+}
+
+// Write the group's live state back to its working slot if dirty. The dirty
+// bit is cleared inside SEQ_PATTERN_Save (target == working slot). Safe in
+// both switch contexts: task context (immediate change) and inside
+// SEQ_PATTERN_Handler's SDCARD-mutex + critical section (the nested
+// MUTEX_SDCARD_TAKE in Save follows the same pattern SEQ_PATTERN_Load
+// already relies on there).
+s32 SEQ_PATTERN_WritebackIfDirty(u8 group)
+{
+  if( group >= SEQ_CORE_NUM_GROUPS )
+    return -1;
+  if( !(seq_pattern_dirty & (1 << group)) )
+    return 0;
+  if( !(pattern_loaded & (1 << group)) )
+    return 0; // never loaded -> "dirty" is boot-init debris, not a jam
+
+  ++seq_pattern_writeback_count;
+  if( seq_pattern_log_load_time ) {
+    DEBUG_MSG("[SEQ_PATTERN:%d] Writeback G%d -> %c%d", SEQ_BPM_TickGet(), group+1, 'A'+seq_pattern[group].group, seq_pattern[group].num+1);
+  }
+  return SEQ_PATTERN_Save(group, seq_pattern[group]);
+}
+
+// All-groups variant for the session-switch path: must run while
+// seq_file_session_name still names the OUTGOING session, or the jam gets
+// written into the new session's banks.
+s32 SEQ_PATTERN_WritebackAllDirty(void)
+{
+  s32 status = 0;
+  u8 group;
+  for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group)
+    status |= SEQ_PATTERN_WritebackIfDirty(group);
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Requests a pattern change
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_PATTERN_Change(u8 group, seq_pattern_t pattern, u8 force_immediate_change)
@@ -126,13 +211,19 @@ s32 SEQ_PATTERN_Change(u8 group, seq_pattern_t pattern, u8 force_immediate_chang
 #if LED_PERFORMANCE_MEASURING
     MIOS32_BOARD_LED_Set(0x00000001, 1);
 #endif
+    SEQ_PATTERN_WritebackIfDirty(group);
     SEQ_PATTERN_Load(group, pattern);
 #if LED_PERFORMANCE_MEASURING
     MIOS32_BOARD_LED_Set(0x00000001, 0);
 #endif
   } else {
 
-    // TODO: stall here if previous pattern change hasn't been finished yet!
+    // A new request overwrites a pending unserviced one (the long-standing
+    // "stall here" TODO). Deliberately retired 2026-06-12: requests are
+    // per-group, so the overwrite loses only an intermediate switch TARGET
+    // (which never sounded). The writeback decision is NOT lost — it happens
+    // at service time in SEQ_PATTERN_Handler against seq_pattern[group],
+    // which still names the slot whose live state is in RAM.
 
     // in song mode it has to be considered, that this function is called multiple times
     // to request pattern changes for all groups
@@ -189,6 +280,12 @@ s32 SEQ_PATTERN_Handler(void)
   for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
     if( seq_pattern_req[group].REQ ) {
       seq_pattern_req[group].REQ = 0;
+
+      // FEARLESS SWITCHING: persist the outgoing slot's live state before
+      // anything replaces it. Must precede SEQ_PATTERN_Load (which updates
+      // seq_pattern[group] to the incoming slot). The forward-delay margin
+      // covers the added SD write (seq_core_pattern_switch_margin_ms).
+      SEQ_PATTERN_WritebackIfDirty(group);
 
       if( seq_core_options.PATTERN_MIXER_MAP_COUPLING ) {
 	u8 mixer_num = 0;
@@ -308,6 +405,15 @@ s32 SEQ_PATTERN_Load(u8 group, seq_pattern_t pattern)
     MUTEX_MIDIOUT_GIVE;
   }
 
+  // slot == live by construction now. This also swallows the false dirty the
+  // read itself raised (PatternRead replays CCs through the SEQ_CC_Set
+  // chokepoint), so it must stay at the END of the load. The group is now a
+  // legitimate writeback source (the loaded gate).
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty &= ~(1 << group);
+  pattern_loaded |= (1 << group);
+  MIOS32_IRQ_Enable();
+
   return status;
 }
 
@@ -321,6 +427,18 @@ s32 SEQ_PATTERN_Save(u8 group, seq_pattern_t pattern)
   MUTEX_SDCARD_TAKE;
   status = SEQ_FILE_B_PatternWrite(seq_file_session_name, pattern.bank, pattern.pattern, group, 1);
   MUTEX_SDCARD_GIVE;
+
+  // saving INTO the working slot makes slot == live again (covers the
+  // writeback path and any aimed save targeting the working slot; an aimed
+  // save to a DIFFERENT slot leaves the divergence — and the dirty bit —
+  // intact)
+  if( status >= 0 && group < SEQ_CORE_NUM_GROUPS &&
+      pattern.bank == seq_pattern[group].bank &&
+      pattern.pattern == seq_pattern[group].pattern ) {
+    MIOS32_IRQ_Disable();
+    seq_pattern_dirty &= ~(1 << group);
+    MIOS32_IRQ_Enable();
+  }
 
   return status;
 }
@@ -409,6 +527,13 @@ s32 SEQ_PATTERN_Fix(u8 group, seq_pattern_t pattern)
   }
 
   MUTEX_SDCARD_GIVE;
+
+  // Fix tramples the group's live RAM as temp storage (documented terminal-
+  // tool behavior) — that divergence must NOT be auto-committed to the
+  // group's working slot by a later switch.
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty &= ~(1 << group);
+  MIOS32_IRQ_Enable();
 
   return status;
 }

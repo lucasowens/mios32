@@ -147,3 +147,12 @@ the only source of truth.
   via EDIT-page `press(Button.GP(n))`, `pattern_save(0, 0, idx)` per pattern,
   verify with `trg_byte_get` + `track_par_get`. **Habit: run by-ear jam
   sessions in a non-AUTOTEST session.**
+- **2026-06-12** — A1 corrupted by the FEARLESS SWITCHING auto-writeback: the
+  per-test fixture parks group 0 on A1, a test edited track 0 and then hopped
+  sessions mid-test (the rigs builder), and the new writeback-on-hop committed
+  the edits into A1 (gates ffff, length 8). Restored from pristine slot
+  (0, 20). Recurrence fix: `Board.session_load` now defaults
+  `discard_dirty=True` (clears all four dirty bits before the hop); only
+  test_fearless_switching's hop test opts out, and it parks on a scratch slot
+  first. **Rule under the inversion: the slot a dirty group is parked on IS a
+  writeback target — never park on a baseline while editing.**

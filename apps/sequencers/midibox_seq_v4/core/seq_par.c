@@ -21,6 +21,7 @@
 #include "seq_par.h"
 #include "seq_cc.h"
 #include "seq_core.h"
+#include "seq_pattern.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -257,6 +258,7 @@ s32 SEQ_PAR_Set(u8 track, u16 step, u8 par_layer, u8 par_instrument, u8 value)
 
   seq_par_layer_value[track][step_ix] = value;
   SEQ_CORE_RenderDirtySet(track);
+  SEQ_PATTERN_DirtySetTrack(track); // FEARLESS SWITCHING: live diverged from slot
 
   return 0; // no error
 }

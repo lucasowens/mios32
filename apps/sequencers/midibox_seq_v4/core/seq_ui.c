@@ -667,6 +667,12 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     s32 cap_r = SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
     if( cap_r >= 0 ) {
       if( dst_group != src_group ) {
+        // FEARLESS: the capture just replaced that slot's record. If it's the
+        // dst group's WORKING slot, the switch below would first write the
+        // group's stale live state back over the fresh capture — here the
+        // slot content is the intent, so the divergence is discarded instead.
+        if( dst.bank == seq_pattern[dst_group].bank && dst.pattern == seq_pattern[dst_group].pattern )
+          SEQ_PATTERN_DirtyClearGroup(dst_group);
         SEQ_PATTERN_Change(dst_group, dst, 1); // cross-group: bring the merged pattern up live
         // The immediate (force=1) load skips the boundary handler's track restart,
         // so the loaded group would keep the previous pattern's stale step phase

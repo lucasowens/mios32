@@ -64,6 +64,9 @@ from .sysex import (
     CMD_TRACK_LOAD,
     CMD_TRACK_UNDO,
     CMD_TRACK_UNDO_QUERY,
+    CMD_DIRTY_QUERY,
+    CMD_DIRTY_SET,
+    CMD_PATTERN_CHANGE,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -1064,6 +1067,58 @@ class Board:
             raise RuntimeError(f"TRACK_UNDO_QUERY dispatch status {payload[3]:#04x}")
         return (payload[0] == 1, payload[1], payload[2])
 
+    def dirty_query(self, timeout: float = 2.0) -> tuple[int, int]:
+        """FEARLESS SWITCHING diagnostics: returns (dirty_mask, writeback_count).
+
+        dirty_mask is a bit per group (live state diverged from the group's
+        working slot). writeback_count counts auto-writebacks since boot
+        (21 LSBs)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_DIRTY_QUERY, b""))
+        payload = self.wait_for_sysex(CMD_DIRTY_QUERY, timeout=timeout, since=since)
+        if len(payload) < 5:
+            raise RuntimeError(f"short DIRTY_QUERY reply: {payload!r}")
+        if payload[4] != CMD_STATUS_OK:
+            raise RuntimeError(f"DIRTY_QUERY dispatch status {payload[4]:#04x}")
+        count = payload[1] | (payload[2] << 7) | (payload[3] << 14)
+        return (payload[0], count)
+
+    def dirty_set(self, group: int, value: bool, timeout: float = 2.0) -> int:
+        """Force a group's FEARLESS dirty bit (test-only knob). Returns the
+        dirty mask after the write."""
+        if not 0 <= group <= 3:
+            raise ValueError(f"group out of range: {group}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_DIRTY_SET, bytes([group, 1 if value else 0])))
+        payload = self.wait_for_sysex(CMD_DIRTY_SET, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short DIRTY_SET reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise RuntimeError(f"DIRTY_SET dispatch status {payload[3]:#04x}")
+        return payload[2]
+
+    def pattern_change(
+        self, group: int, bank: int, pattern: int, timeout: float = 6.0
+    ) -> bool:
+        """Switch group to (bank, pattern) via SEQ_PATTERN_Change — the REAL
+        switch path, including the FEARLESS auto-writeback of a dirty outgoing
+        group (unlike pattern_load, which is a raw read). With the sequencer
+        stopped this is synchronous (SD write+read — generous timeout)."""
+        if not 0 <= group <= 3:
+            raise ValueError(f"group out of range: {group}")
+        if not 0 <= bank <= 7:
+            raise ValueError(f"bank out of range: {bank}")
+        if not 0 <= pattern <= 127:
+            raise ValueError(f"pattern out of range: {pattern}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PATTERN_CHANGE, bytes([group, bank, pattern])))
+        payload = self.wait_for_sysex(CMD_PATTERN_CHANGE, timeout=timeout, since=since)
+        if len(payload) < 5:
+            raise RuntimeError(f"short PATTERN_CHANGE reply: {payload!r}")
+        if payload[4] != CMD_STATUS_OK:
+            raise RuntimeError(f"PATTERN_CHANGE dispatch status {payload[4]:#04x}")
+        return payload[3] == CMD_STATUS_OK
+
     def set_force_scale(self, track: int, on: bool, timeout: float = 1.0) -> None:
         """Toggle a track's FORCE_SCALE flag (bit 3 of MODE_FLAGS). The Tension
         Workbench POC rule wants FTS OFF on gripped tracks so the emission snap
@@ -1090,11 +1145,23 @@ class Board:
             )
         return payload[1 : 1 + nlen].decode("ascii", errors="replace")
 
-    def session_load(self, name: str, timeout: float = 8.0) -> str:
+    def session_load(
+        self, name: str, timeout: float = 8.0, discard_dirty: bool = True
+    ) -> str:
         """Switch the active session by name. Mirrors the SAVE/SESSIONS menu flow.
 
         The load chain reads B/M/S/G/BM/C across all banks for the named session,
         so it's significantly slower than `pattern_load` — 8s default timeout.
+
+        FEARLESS SWITCHING: on the device, a session hop auto-writes any dirty
+        group back to its working slot first ("nothing lost"). In the harness
+        that semantic is a baseline killer — the per-test fixture parks group 0
+        on AUTOTEST A1, so a test that edited track 0 and then hops sessions
+        would commit its debris INTO A1 (exactly how A1 was corrupted on
+        2026-06-12; see fixtures/AUTOTEST/CONTENTS.md incident log). Default
+        `discard_dirty=True` clears all four dirty bits before the hop so
+        harness session swaps never commit. Pass False only when a test pins
+        the writeback-on-hop behavior itself (test_fearless_switching).
 
         Returns the active session name AFTER the call (which will be `name` on
         success, or the previous name if the load failed and was rolled back).
@@ -1108,6 +1175,12 @@ class Board:
             )
         if not all(0x20 <= ord(c) < 0x80 for c in name):
             raise ValueError(f"session name must be 7-bit ASCII: {name!r}")
+        if discard_dirty:
+            try:
+                for group in range(4):
+                    self.dirty_set(group, False)
+            except (TimeoutError, RuntimeError):
+                pass  # firmware predates DIRTY_SET — nothing to discard
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_SESSION_LOAD, name.encode("ascii")))
         payload = self.wait_for_sysex(CMD_SESSION_LOAD, timeout=timeout, since=since)

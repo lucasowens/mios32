@@ -190,7 +190,7 @@ s32 SEQ_CORE_Init(u32 mode)
   }
   seq_core_steps_per_measure = 16-1;
   seq_core_steps_per_pattern = 16-1;
-  seq_core_pattern_switch_margin_ms = 50; // default
+  seq_core_pattern_switch_margin_ms = 100; // covers FEARLESS writeback (SD write+read in the switch window; was 50 read-only — measure with seq_pattern_log_load_time and trim)
   seq_core_pattern_switch_measured_ms = 0; // no measurement yet
   seq_core_global_scale = 0;
   seq_core_global_scale_root_selection = 0; // from keyboard
@@ -1604,6 +1604,10 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
   }
   memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
+  // ...including the pattern-dirty bit: steps 3/4 replay CCs through the
+  // SEQ_CC_Set chokepoint, but the trample is fully restored below — a clean
+  // group must not come out flagged for auto-writeback.
+  u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
 
   // 3. Read the target slot into the dst group (full load, remix_map=0).
   MUTEX_SDCARD_TAKE;
@@ -1657,6 +1661,10 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     SEQ_CORE_RenderDirtySet(dst_base+t);
   }
   memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
+
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty = (seq_pattern_dirty & ~(1 << dst_group)) | dirty_snap;
+  MIOS32_IRQ_Enable();
 
   return status;
 }

@@ -80,6 +80,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_TRACK_UNDO           0x70
 #define CMD_TRACK_UNDO_QUERY     0x71
 #define CMD_SESSION_CREATE       0x72
+#define CMD_DIRTY_QUERY          0x73
+#define CMD_DIRTY_SET            0x74
+#define CMD_PATTERN_CHANGE       0x75
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -382,6 +385,16 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
     // the final state is "only track 0 unmuted".
     seq_core_trk_muted = 0xFFFE;
   }
+
+  // FEARLESS SWITCHING: a harness reset is a state baseline — clear the
+  // divergence bookkeeping unconditionally. Without this, the robotize/CC
+  // clears above dirty every group on EVERY reset, and the next
+  // pattern-change / session-load would auto-writeback test debris into
+  // whatever slots seq_pattern[] names (the AUTOTEST A1-A3 baselines after
+  // boot — the one SD content the suite must never rewrite).
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty = 0;
+  MIOS32_IRQ_Enable();
 
   u8 reply[2] = { flags, 0x01 };
   send_reply(port, CMD_RESET_STATE, reply, sizeof(reply));
@@ -1316,11 +1329,99 @@ static void cmd_session_create(mios32_midi_port_t port, const u8 *payload, u8 pl
 }
 
 
+// CMD_DIRTY_QUERY — FEARLESS SWITCHING diagnostics. No payload.
+// Reply payload: [dirty_mask, wb_cnt_lo7, wb_cnt_mid7, wb_cnt_hi7, status]
+//   dirty_mask = seq_pattern_dirty (bit per group, 4 bits used)
+//   wb_cnt     = seq_pattern_writeback_count, 21 LSBs, 7 bits per byte
+static void cmd_dirty_query(mios32_midi_port_t port)
+{
+  u8 reply[5];
+  u32 cnt = seq_pattern_writeback_count;
+  reply[0] = seq_pattern_dirty & 0x7f;
+  reply[1] = (u8)(cnt & 0x7f);
+  reply[2] = (u8)((cnt >> 7) & 0x7f);
+  reply[3] = (u8)((cnt >> 14) & 0x7f);
+  reply[4] = 0x01;
+  send_reply(port, CMD_DIRTY_QUERY, reply, sizeof(reply));
+}
+
+
+// CMD_DIRTY_SET payload: [group, value]   value 0 = clear, 1 = set
+// Reply payload: [group, value, dirty_mask_after, status]
+// Test-only knob: lets the harness pin "clean switch skips writeback" without
+// rebooting, and force a writeback without making a real edit.
+static void cmd_dirty_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 2 ) {
+    send_reply(port, CMD_DIRTY_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 group = payload[0];
+  u8 value = payload[1];
+  reply[0] = group;
+  reply[1] = value;
+
+  if( group >= SEQ_CORE_NUM_GROUPS ) {
+    reply[3] = 0x03;
+  } else {
+    MIOS32_IRQ_Disable();
+    if( value )
+      seq_pattern_dirty |= (1 << group);
+    else
+      seq_pattern_dirty &= ~(1 << group);
+    MIOS32_IRQ_Enable();
+    reply[3] = 0x01;
+  }
+  reply[2] = seq_pattern_dirty & 0x7f;
+  send_reply(port, CMD_DIRTY_SET, reply, sizeof(reply));
+}
+
+
+// CMD_PATTERN_CHANGE payload: [group, bank, pattern]
+// Reply payload: [group, bank, pattern, change_ok, dispatch_status]
+// Unlike CMD_PATTERN_LOAD (a RAW load that deliberately bypasses the FEARLESS
+// writeback) this goes through SEQ_PATTERN_Change — the real switch path, so
+// a dirty outgoing group is written back first. With the sequencer stopped it
+// takes the immediate branch (synchronous: SD write+read; generous timeout).
+static void cmd_pattern_change(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[5] = { 0, 0, 0, 0, 0x02 };
+  if( plen < 3 ) {
+    send_reply(port, CMD_PATTERN_CHANGE, reply, sizeof(reply));
+    return;
+  }
+  u8 group   = payload[0];
+  u8 bank    = payload[1] & 0x07;
+  u8 pattern = payload[2] & 0x7f;
+
+  reply[0] = group;
+  reply[1] = bank;
+  reply[2] = pattern;
+
+  if( group >= SEQ_CORE_NUM_GROUPS ) {
+    reply[4] = 0x03;
+  } else {
+    seq_pattern_t pat;
+    pat.ALL = 0;
+    pat.bank = bank;
+    pat.pattern = pattern;
+    s32 r = SEQ_PATTERN_Change(group, pat, 0);
+    reply[3] = (r >= 0) ? 0x01 : 0x00;
+    reply[4] = 0x01;
+  }
+  send_reply(port, CMD_PATTERN_CHANGE, reply, sizeof(reply));
+}
+
+
 // CMD_PATTERN_LOAD payload: [group, bank, pattern]
 // Reply payload: [group, bank, pattern, load_ok, dispatch_status]
 //   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
 //
 // Synchronous: SD read can take 100ms+. Same timeout caveat as CMD_BOUNCE.
+// NOTE (FEARLESS): raw load — deliberately bypasses the dirty writeback so
+// tests can replace live state without committing it. Use CMD_PATTERN_CHANGE
+// to exercise the real switch path.
 static void cmd_pattern_load(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
   u8 reply[5] = { 0, 0, 0, 0, 0x02 };
@@ -1428,6 +1529,10 @@ static void cmd_session_load(mios32_midi_port_t port, const u8 *payload, u8 plen
   u8 dispatch_status = 0x02;  // empty payload by default
 
   if( plen >= 1 && plen <= 12 ) {
+    // FEARLESS SWITCHING: mirror the seq_ui_menu.c session-switch path —
+    // persist dirty groups into the OUTGOING session before the name changes.
+    SEQ_PATTERN_WritebackAllDirty();
+
     char prev_name[13];
     strcpy(prev_name, seq_file_session_name);
 
@@ -1801,6 +1906,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_SESSION_CREATE:
             cmd_session_create(port, payload_buf, payload_len);
+            break;
+          case CMD_DIRTY_QUERY:
+            cmd_dirty_query(port);
+            break;
+          case CMD_DIRTY_SET:
+            cmd_dirty_set(port, payload_buf, payload_len);
+            break;
+          case CMD_PATTERN_CHANGE:
+            cmd_pattern_change(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

@@ -469,6 +469,11 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
   SEQ_CORE_PitchSlotSync(track);
   SEQ_CORE_LimitSlotSync(track);
   SEQ_CORE_RenderDirtySet(track);
+  // FEARLESS: the whole import writes par/trg/CCs directly (never through the
+  // Set chokepoints) — without this the pattern-page paste was discarded on
+  // the next switch (no writeback fired). Runs even on a mid-read failure:
+  // partial writes diverged live state too.
+  SEQ_PATTERN_DirtySetTrack(track);
 
   if( status < 0 ) {
 #if DEBUG_VERBOSE_LEVEL >= 1
