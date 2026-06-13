@@ -90,6 +90,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_PHRASE_CAPTURE       0x7a
 #define CMD_PHRASE_RECALL        0x7b
 #define CMD_PHRASE_PRESENT       0x7c
+#define CMD_TRG_BYTE_SET         0x7d
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1799,6 +1800,51 @@ static void cmd_trg_byte_get(mios32_midi_port_t port, const u8 *payload, u8 plen
 }
 
 
+// CMD_TRG_BYTE_SET payload: [track, trg_layer, trg_instr, step8, val_lo7, val_hi1]
+//   Writes one byte (8 steps) of a trigger layer's SOURCE (seq_trg_layer_value)
+//   via SEQ_TRG_Set8 — the write half of CMD_TRG_BYTE_GET. Lets the harness
+//   rebuild trg fixtures (e.g. restore AUTOTEST A3's "gate every step" after a
+//   corrupting event_mode flip). The 8-bit gate byte can't fit one 7-bit MIDI
+//   byte, so the value arrives split: value = val_lo7 | (val_hi1 << 7) (0xff =
+//   0x7f,0x01). A subsequent pattern_save persists the source, so no render here.
+// Reply payload: [track, trg_layer, trg_instr, step8, value&0x7f, status]
+//   status 0x01 = ok, 0x02 = bad payload, 0x03 = invalid args.
+static void cmd_trg_byte_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[6] = { 0, 0, 0, 0, 0, 0x02 };
+  if( plen < 6 ) {
+    send_reply(port, CMD_TRG_BYTE_SET, reply, sizeof(reply));
+    return;
+  }
+  u8 track     = payload[0] & 0x0f;
+  u8 trg_layer = payload[1] & 0x7f;
+  u8 trg_instr = payload[2] & 0x7f;
+  u8 step8     = payload[3] & 0x7f;
+  u8 value     = (payload[4] & 0x7f) | ((payload[5] & 0x01) << 7);
+  reply[0] = track;
+  reply[1] = trg_layer;
+  reply[2] = trg_instr;
+  reply[3] = step8;
+  reply[4] = value & 0x7f;
+
+  u8 num_t_layers = (u8)SEQ_TRG_NumLayersGet(track);
+  u8 num_t_instr  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+  u8 num_t_step8  = (u8)(SEQ_TRG_NumStepsGet(track) / 8);
+  if( track >= SEQ_CORE_NUM_TRACKS ||
+      trg_layer >= num_t_layers || trg_instr >= num_t_instr ||
+      step8 >= num_t_step8 ) {
+    reply[5] = 0x03;
+    send_reply(port, CMD_TRG_BYTE_SET, reply, sizeof(reply));
+    return;
+  }
+
+  SEQ_TRG_Set8(track, step8, trg_layer, trg_instr, value);
+  seq_ui_display_update_req = 1;
+  reply[5] = 0x01;
+  send_reply(port, CMD_TRG_BYTE_SET, reply, sizeof(reply));
+}
+
+
 // CMD_MSP_QUERY: no payload. Reply payload is pack7-encoded:
 //   raw[0..3]   = high_water_bytes   (peak MSP usage since paint, LE u32)
 //   raw[4..7]   = paint_extent_bytes (painted region size, LE u32)
@@ -2083,6 +2129,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_PHRASE_PRESENT:
             cmd_phrase_present(port, payload_buf, payload_len);
+            break;
+          case CMD_TRG_BYTE_SET:
+            cmd_trg_byte_set(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

@@ -32,6 +32,7 @@ from .sysex import (
     CMD_SESSION_NAME_GET,
     CMD_MSP_QUERY,
     CMD_TRG_BYTE_GET,
+    CMD_TRG_BYTE_SET,
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
     CMD_GENERATOR_QUERY,
@@ -1360,6 +1361,53 @@ class Board:
         layer_bytes = bytes(raw[0:expected:2])
         output_bytes = bytes(raw[1:expected:2])
         return layer_bytes, output_bytes
+
+    def trg_byte_set(
+        self,
+        track: int,
+        step8: int,
+        value: int,
+        trg_layer: int = 0,
+        instrument: int = 0,
+        timeout: float = 1.0,
+    ) -> bool:
+        """Write one trigger byte (8 steps) of a layer's source — the write half
+        of trg_byte_get, for rebuilding trg fixtures (e.g. restoring AUTOTEST
+        A3's gate-every-step). bit 0 = step (8*step8), bit 7 = step (8*step8+7);
+        value 0xff lights all 8 gates. The 8-bit value is split lo7+hi1 on the
+        wire (a gate byte can't fit one 7-bit MIDI byte). Returns True on commit,
+        False on invalid-args refuse (status 0x03) — lets a caller probe the
+        track's step length by walking step8 until it refuses.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= trg_layer <= 7:
+            raise ValueError(f"trg_layer out of range: {trg_layer}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        if not 0 <= step8 <= 127:
+            raise ValueError(f"step8 out of range: {step8}")
+        if not 0 <= value <= 255:
+            raise ValueError(f"value out of range: {value}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(
+                CMD_TRG_BYTE_SET,
+                bytes([track, trg_layer, instrument, step8,
+                       value & 0x7f, (value >> 7) & 0x01]),
+            )
+        )
+        payload = self.wait_for_sysex(CMD_TRG_BYTE_SET, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(f"short TRG_BYTE_SET reply: {payload!r}")
+        if payload[5] == 0x03:
+            return False  # invalid args (e.g. step8 past the track's length)
+        if payload[5] != CMD_STATUS_OK:
+            raise RuntimeError(
+                f"TRG_BYTE_SET status {payload[5]:#04x} for track={track} "
+                f"layer={trg_layer} instr={instrument} step8={step8}"
+            )
+        return True
 
     def msp_query(self, timeout: float = 1.0) -> dict:
         """Read MSP/handler-stack high-water (phase D.0 measurement).
