@@ -425,6 +425,14 @@ s32 SEQ_PATTERN_PhrasePresent(u8 n)
   return (phrase_present_mask & (1 << n)) ? 1 : 0;
 }
 
+// session-scoped occupancy as a 16-bit mask (bit n = phrase n captured this
+// session) — for the Stage B PHRASE-view navigation-map LEDs (one read instead
+// of 16 PhrasePresent calls in the LED path).
+u16 SEQ_PATTERN_PhrasePresentMask(void)
+{
+  return phrase_present_mask;
+}
+
 // last phrase recalled this session (-1 = none) — for the Stage B "current" LED.
 s32 SEQ_PATTERN_PhraseLastRecalled(void)
 {

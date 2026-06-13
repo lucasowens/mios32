@@ -71,6 +71,7 @@ extern s32 SEQ_PATTERN_Revert(void);
 extern s32 SEQ_PATTERN_PhraseCapture(u8 n);
 extern s32 SEQ_PATTERN_PhraseRecall(u8 n);
 extern s32 SEQ_PATTERN_PhrasePresent(u8 n);
+extern u16 SEQ_PATTERN_PhrasePresentMask(void);
 extern s32 SEQ_PATTERN_PhraseLastRecalled(void);
 extern void SEQ_PATTERN_PhraseResetState(void);
 

@@ -4298,7 +4298,18 @@ s32 SEQ_UI_LED_Handler_Periodic()
 	  select_leds_green ^= 0xffff;
 	break;
       case SEQ_UI_SEL_VIEW_PHRASE:
-	select_leds_green = 1 << ui_selected_phrase;
+	// PHRASES navigation map: every occupied waypoint lights in one colour,
+	// the current (last-recalled) waypoint in the other so it reads as "you
+	// are here" (bicolor on the slot, since you can only recall an occupied
+	// one). Pure display of the session-scoped occupancy state — no new
+	// global. Dirty/drift indication is deferred (seq_pattern_dirty is set by
+	// recall's own inversion, so it isn't a clean "drifted since" signal yet).
+	select_leds_green = SEQ_PATTERN_PhrasePresentMask();
+	{
+	  s32 cur = SEQ_PATTERN_PhraseLastRecalled();
+	  if( cur >= 0 )
+	    select_leds_red = 1 << cur;
+	}
 	break;
       }
 
