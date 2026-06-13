@@ -129,12 +129,20 @@ and GRIP (0x9a) now survive reboot/recall. (Before V3 the range stopped at
 ### Extension-block format ([seq_file_b.c:45](../core/seq_file_b.c#L45))
 
 Per-track block appended after the trigger layers, within each pattern slot:
-- `tag:u8` (0x00 = no ext, 0x01 = v1 anchors only, 0x02 = v2 ext-CC, 0x03 = **v3 ext-CC**)
+- `tag:u8` (0x00 = no ext, 0x01 = v1 anchors only, 0x02 = v2 ext-CC, 0x03 = v3 ext-CC,
+  0x04 = **v4 = v3 payload + generator sub-block**, FEARLESS Stage B)
 - v2 body: 22 ext-CC bytes (0x80..0x95) + 64 `robotize_bar_anchors`; v3 body: **32** ext-CC
   bytes (0x80..0x9F) + the same anchors. Read path dispatches on tag; the **v2 byte-count
   is frozen separately** (`..._CC_COUNT_V2 = 22`) so old patterns still align — bumping
   `..._CC_LAST` alone would have mis-read every v2 pattern's anchors.
-- `Create` allocates room from the current (v3) size; `Write` skips ext on slots too small
+- **v4 body** = the v3 payload + a **fixed-stride generator sub-block**: 1 count byte +
+  `SEQ_GENERATOR_PERSIST_SLOTS` (4) entry slots × **177 B** (9 header bytes — instrument,
+  par_layer, engaged, range_min/max, rate, depth, contour, anchor_valid — + loop[64] +
+  locks[8] + anchor[64] + mult[32]), unused entries zero-filled → 709 B sub-block, **806
+  B/track** total. The stride is constant **on purpose** so `TrackRead` can index a single
+  track's ext block by `slot_track × per_track_ext_size` (this field is **u16**, not u8 —
+  806 truncates in a u8, caught at build by `-Woverflow`).
+- `Create` allocates room from the current (v4) size; `Write` skips ext on slots too small
   to fit it. In practice existing banks had slack (par/trg layer data dominates
   `pattern_size`), so the wider block fit without re-formatting. `SEQ_FILE_B_Create` is
   **header-only** (the slot-fill loop is `#if 0`) — a created bank isn't loadable until its
@@ -527,6 +535,69 @@ existed; track-load didn't).
   Host: `Board.track_load/track_undo/track_undo_query/session_create`; rigs:
   `recombine` (builds the PULLJAM jam session). Pins: `test_track_load.py` (5),
   `test_pull_gesture.py` (4).
+
+### FEARLESS SWITCHING — auto-writeback + gen-state + CHECKPOINT/REVERT (the save-model inversion, 2026-06-13)
+
+The save model is inverted: the working state always persists; protection is the
+explicit CHECKPOINT/REVERT act (design §9 2026-06-11, §10 forks resolved). Shipped
+in three stages; by-ear hard GO 2026-06-13, HIL 135/135.
+
+- **Dirty model (Stage A).** `u8 seq_pattern_dirty` (bit/group) set by
+  `SEQ_PATTERN_DirtySetTrack` from the source-write chokepoints (`SEQ_PAR_Set`,
+  `SEQ_TRG_Set`/`Set8`, `SEQ_CC_Set` — the render mirror never passes through
+  them, so per-tick rendering can't false-dirty). A per-group `pattern_loaded`
+  gate suppresses boot-init debris (CC defaults run through the chokepoints
+  before the first session load). **Bypass writers** that memcpy source directly
+  (preset import, clears, undo restores) must call `DirtySetTrack` explicitly —
+  the by-ear pass found this class (heard, then discarded on switch).
+- **Writeback hook.** `SEQ_PATTERN_WritebackIfDirty(group)` → `SEQ_PATTERN_Save`
+  into the group's working slot, fired before any load at the two switch points:
+  `SEQ_PATTERN_Handler` (the serviced/synched switch, inside the SDCARD-mutex +
+  critical section) and `SEQ_PATTERN_Change`'s immediate branch; `WritebackAllDirty`
+  on the session-switch path. `seq_core_pattern_switch_margin_ms` widened 50→**100**
+  to cover the added write within the forward-delay window. The long-standing
+  stall-race TODO was **retired with rationale, not built** (per-group requests:
+  an overwrite loses only an intermediate target, never the writeback decision).
+- **Gen-state (Stage B).** Carried by the v4 ext tag (above). `SEQ_GENERATOR_SlotSet`
+  re-seeds a pool slot wholesale (no `Engage` → no undo re-snapshot, no
+  ForceRewrite) so the loop resumes ENGAGED at the next wrap; `TrackClear` first.
+  Track-undo (`track_undo.gen[4]`, CCM) and capture-trample (`slottrk_gen_snap`,
+  main RAM) carry gens too; a capture is a freeze (generator-less by construction).
+- **CHECKPOINT/REVERT anchor (Stage C).** The anchor is an internal fifth "bank"
+  `MBSEQ_AN.V4` (8.3 base ≤8 chars — FatFs `_USE_LFN=0`), reached by the
+  **sentinel** `SEQ_FILE_B_ANCHOR_BANK` (`0xfe`) + a parallel `seq_file_anc_info`
+  slot, resolved by `SEQ_FILE_B_InfoPtr`/`BuildPath` at the five B-file entry
+  points. The sentinel is **outside** `0..NUM_BANKS-1`, so every load/unload/save
+  loop skips it (never auto-loaded, not navigable, untouched by session
+  writeback) — and there's no `seq_pattern[4]` OOB that a `NUM_BANKS` bump would
+  cause. `SEQ_PATTERN_Checkpoint` lazy-creates the file and writes groups 0..3
+  **ascending** (a fresh 34-byte-header file extends contiguously — no
+  seek-past-EOF gap) via `PatternWrite` (gen state rides the v4 tag); it reads
+  live only, leaving dirty untouched. `SEQ_PATTERN_Revert` re-opens the anchor
+  against the **current session** (the file is per-session; re-open avoids a
+  stale cross-session read), then reads the 4 records via `PatternRead` **directly**
+  (not `SEQ_PATTERN_Load` — that sets `seq_pattern[group]` to the source bank,
+  which would repoint the live group at the anchor), runs the
+  `LoadTrackFromSlot` fan ×16 tracks (forced quiet render + `CancelSustainedNotes`
+  + latch reset + PC/bank send + `ManualSynchToMeasure(0xffff)`), and sets every
+  group dirty + loaded **last** (the inversion: the next switch writes the
+  reverted state into the working slot). Refuses cleanly when no anchor exists.
+  *Accepted POC cost:* a mid-op SD failure can leave a partial anchor (parity with
+  the working-slot writeback's power-loss exposure); atomic temp+rename is the fix.
+- **Gesture** ([seq_ui.c](../core/seq_ui.c) `SEQ_UI_Button_Bookmark`):
+  **SELECT+BOOKMARK tap = CHECKPOINT, hold ≥1 s = REVERT** (`MIOS32_TIMESTAMP`
+  ms-accurate; armed only if SELECT is down at BOOKMARK press; measured at
+  release; swallows press+release so the bookmarks view never flips). The
+  destructive verb gets the deliberate hold — mirrors SELECT+CLEAR=undo; midiphy
+  maps SAVE/UNDO to no key.
+- **testctrl**: `CHECKPOINT 0x77`, `REVERT 0x78`, `ANCHOR_PRESENT 0x79` (reply
+  `[ok/present, status]`; REVERT status `0x03` = clean no-anchor refuse, distinct
+  from an I/O fail). Stage A added `DIRTY_QUERY 0x73`/`DIRTY_SET 0x74`/`PATTERN_CHANGE
+  0x75`; Stage B `GENERATOR_LOCK_SET 0x76` + a `with_anchor` flag on `GENERATOR_QUERY`.
+  Host: `Board.checkpoint/revert/anchor_present` (`revert()` returns False only on
+  no-anchor, raises on a real I/O fail). Pins: `test_fearless_switching.py` (8),
+  `test_genstate_v4.py` (6), `test_fearless_checkpoint.py` (3); the gen-faithful
+  pins use the V4-sized `genv4` session, the refuse pin a never-checkpointed `NOANC`.
 
 ---
 

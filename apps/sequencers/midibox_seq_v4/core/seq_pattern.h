@@ -62,6 +62,11 @@ extern void SEQ_PATTERN_DirtyClearGroup(u8 group);
 extern s32 SEQ_PATTERN_WritebackIfDirty(u8 group);
 extern s32 SEQ_PATTERN_WritebackAllDirty(void);
 
+// FEARLESS SWITCHING Stage C — CHECKPOINT / REVERT (the blessed anchor)
+extern s32 SEQ_PATTERN_AnchorPresent(void);
+extern s32 SEQ_PATTERN_Checkpoint(void);
+extern s32 SEQ_PATTERN_Revert(void);
+
 extern s32 SEQ_PATTERN_PeekName(seq_pattern_t pattern, char *pattern_name);
 extern s32 SEQ_PATTERN_PeekPatternsOfGroup(seq_pattern_t pattern);
 

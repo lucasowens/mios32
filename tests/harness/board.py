@@ -68,6 +68,9 @@ from .sysex import (
     CMD_DIRTY_SET,
     CMD_PATTERN_CHANGE,
     CMD_GENERATOR_LOCK_SET,
+    CMD_CHECKPOINT,
+    CMD_REVERT,
+    CMD_ANCHOR_PRESENT,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -1099,6 +1102,55 @@ class Board:
         if payload[3] != CMD_STATUS_OK:
             raise RuntimeError(f"DIRTY_SET dispatch status {payload[3]:#04x}")
         return payload[2]
+
+    def checkpoint(self, timeout: float = 12.0) -> bool:
+        """FEARLESS SWITCHING Stage C: bless all four groups' live state (incl.
+        generator state) into the session's anchor (MBSEQ_AN.V4), lazy-creating
+        it. Returns True on success. Synchronous: a lazy bank-file create plus 4
+        group-record SD writes on first use — the worst-case SD work among the
+        Stage C verbs, hence the generous timeout."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CHECKPOINT, b""))
+        payload = self.wait_for_sysex(CMD_CHECKPOINT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short CHECKPOINT reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"CHECKPOINT dispatch status {payload[1]:#04x}")
+        return payload[0] == CMD_STATUS_OK
+
+    def revert(self, timeout: float = 12.0) -> bool:
+        """FEARLESS SWITCHING Stage C: restore all four groups from the blessed
+        anchor and set every group dirty. Returns True on success; returns False
+        ONLY for the clean no-anchor refuse (REVERT before the first CHECKPOINT,
+        or after a session hop — dispatch status 0x03). A genuine I/O failure
+        (anchor present but the restore returned an error, which may have left
+        live state torn) RAISES, so it surfaces loudly instead of masquerading
+        as a no-op refuse."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_REVERT, b""))
+        payload = self.wait_for_sysex(CMD_REVERT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short REVERT reply: {payload!r}")
+        ok, status = payload[0], payload[1]
+        if status == 0x03:
+            return False  # clean refuse: no anchor for this session
+        if status != CMD_STATUS_OK:
+            raise RuntimeError(f"REVERT dispatch status {status:#04x}")
+        if ok != CMD_STATUS_OK:
+            raise RuntimeError("REVERT failed: anchor present but restore returned an error")
+        return True
+
+    def anchor_present(self, timeout: float = 4.0) -> bool:
+        """FEARLESS SWITCHING Stage C: True if the current session has a blessed
+        anchor (a CHECKPOINT has run and the MBSEQ_AN.V4 file is openable)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_ANCHOR_PRESENT, b""))
+        payload = self.wait_for_sysex(CMD_ANCHOR_PRESENT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short ANCHOR_PRESENT reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"ANCHOR_PRESENT dispatch status {payload[1]:#04x}")
+        return payload[0] == 1
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

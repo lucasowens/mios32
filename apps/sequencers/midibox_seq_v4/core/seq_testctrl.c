@@ -84,6 +84,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_DIRTY_SET            0x74
 #define CMD_PATTERN_CHANGE       0x75
 #define CMD_GENERATOR_LOCK_SET   0x76
+#define CMD_CHECKPOINT           0x77
+#define CMD_REVERT               0x78
+#define CMD_ANCHOR_PRESENT       0x79
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1454,6 +1457,48 @@ static void cmd_pattern_change(mios32_midi_port_t port, const u8 *payload, u8 pl
 }
 
 
+// CMD_CHECKPOINT — FEARLESS SWITCHING Stage C. No payload. Blesses all four
+// groups' live state (incl. generator state) into the session's anchor file
+// (MBSEQ_AN.V4), lazy-creating it on first use. Reply payload: [ok, status].
+// Synchronous: 4 group-record SD writes (~a session-save's worth) — generous
+// timeout on the host wrapper.
+static void cmd_checkpoint(mios32_midi_port_t port)
+{
+  s32 r = SEQ_PATTERN_Checkpoint();
+  u8 reply[2] = { (r >= 0) ? 0x01 : 0x00, 0x01 };
+  send_reply(port, CMD_CHECKPOINT, reply, sizeof(reply));
+}
+
+
+// CMD_REVERT — FEARLESS SWITCHING Stage C. No payload. Restores all four
+// groups from the blessed anchor (the organism comes back to the checkpoint),
+// then sets every group dirty. Refuses cleanly when the session has no anchor
+// yet (REVERT before the first CHECKPOINT, or after a session hop): ok=0,
+// status=0x03 — distinct from an I/O failure (ok=0, status=0x01) so the pin
+// can tell a no-anchor refusal from a real error. Reply payload: [ok, status].
+static void cmd_revert(mios32_midi_port_t port)
+{
+  u8 reply[2];
+  if( SEQ_PATTERN_AnchorPresent() <= 0 ) {
+    reply[0] = 0x00; reply[1] = 0x03; // clean refuse: no anchor for this session
+  } else {
+    s32 r = SEQ_PATTERN_Revert();
+    reply[0] = (r >= 0) ? 0x01 : 0x00;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_REVERT, reply, sizeof(reply));
+}
+
+
+// CMD_ANCHOR_PRESENT — FEARLESS SWITCHING Stage C. No payload. 1 if the
+// current session has a blessed anchor. Reply payload: [present, status].
+static void cmd_anchor_present(mios32_midi_port_t port)
+{
+  u8 reply[2] = { (SEQ_PATTERN_AnchorPresent() > 0) ? 0x01 : 0x00, 0x01 };
+  send_reply(port, CMD_ANCHOR_PRESENT, reply, sizeof(reply));
+}
+
+
 // CMD_PATTERN_LOAD payload: [group, bank, pattern]
 // Reply payload: [group, bank, pattern, load_ok, dispatch_status]
 //   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
@@ -1958,6 +2003,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_GENERATOR_LOCK_SET:
             cmd_generator_lock_set(port, payload_buf, payload_len);
+            break;
+          case CMD_CHECKPOINT:
+            cmd_checkpoint(port);
+            break;
+          case CMD_REVERT:
+            cmd_revert(port);
+            break;
+          case CMD_ANCHOR_PRESENT:
+            cmd_anchor_present(port);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

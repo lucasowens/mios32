@@ -1672,6 +1672,21 @@ mechanisms provisional — see `doc/plans/2026-06-11-save-model-groups-performin
   it's auto saved." **Recall = relaunch/regenerate survives unchanged.** Mechanism
   (writeback hook, checkpoint storage, stall-race precondition, gen-state tag) is
   design-ahead, not committed.
+  *(SHIPPED as the FEARLESS SWITCHING bundle — by-ear hard GO 2026-06-13, HIL
+  135/135. **Stage A — auto-writeback:** a per-group dirty bitmask set at the
+  `SEQ_PAR_/TRG_/CC_Set` source-write chokepoints (the render mirror never
+  passes through them, so per-tick rendering can't false-dirty), written back to
+  the group's working slot before any switch (`SEQ_PATTERN_WritebackIfDirty` in
+  the Handler + the Change immediate branch); switch margin 50→100 ms to cover
+  the added write. The stall-race precondition was **retired, not built** — with
+  the writeback firing at service time against `seq_pattern[group]`, a per-group
+  request overwrite loses only an intermediate switch target, never the
+  writeback decision. The by-ear pass found the bypass-writer class (preset
+  import / clears / undo memcpys write source directly, skipping the chokepoints
+  → played but not flagged dirty → discarded on switch); swept and fixed.
+  **Stage B — gen-state tag V4:** the engaged organism round-trips byte-identical
+  and resumes ENGAGED. **Stage C — CHECKPOINT/REVERT:** see the dedicated bullet
+  below. As-built in REFERENCE; user manual "Fearless Switching".)*
 - **Groups demote to shelving** (revises "Concurrency is group-granular" / §6 "a
   state = a group"). The performer-facing recall grain becomes the **track**
   (track-grain load fills the missing grain cell: track-save/group-save/group-load
@@ -1724,6 +1739,24 @@ mechanisms provisional — see `doc/plans/2026-06-11-save-model-groups-performin
   bank vs record-pair — existing banks lack 2× slack for pairing) and checkpoint
   *grain* under organism-primary (group vs track vs whole-organism). Phrases pin
   CHECKPOINTed states (see refinement bullet).
+  *(SHIPPED Stage C, by-ear GO 2026-06-13. **Grain = whole-organism** — one
+  gesture blesses all 4 groups (incl. their living generators); **one-deep** —
+  CHECKPOINT overwrites the blessed copy, REVERT returns to it. **Storage = an
+  internal fifth "bank" `MBSEQ_AN.V4`**, lazy-created at first CHECKPOINT, reached
+  by a sentinel bank index rather than bumping `SEQ_FILE_B_NUM_BANKS` (a bump
+  would index `seq_pattern[4]` out of bounds in `SaveAllBanks` and leak the
+  anchor into the bank UI). It reuses `SEQ_FILE_B_PatternWrite/Read` wholesale —
+  so gen state rides the V4 tag for free — while staying out of every
+  `for(bank<NUM_BANKS)` loop, so it is never auto-loaded/saved, not navigable,
+  and survives a session writeback untouched. REVERT reads the 4 records straight
+  into live RAM (**not** via `SEQ_PATTERN_Load`, which would repoint the working
+  slot at the anchor) + forced render + sustain-cancel/PC fan + sets every group
+  dirty (the inversion: the next switch writes the reverted state back). Gesture,
+  decided with hardware in hand: **SELECT+BOOKMARK tap = CHECKPOINT, hold ≥1 s =
+  REVERT** — the destructive verb gets the deliberate hold, mirroring
+  SELECT+CLEAR=undo; on midiphy SAVE/UNDO map to no key. Accepted POC cost: a
+  mid-op SD failure can leave a partial anchor (parity with the working-slot
+  writeback's power-loss exposure); atomic temp+rename is the fix if it bites.)*
 - **The tape supersedes §5.5 quick-capture (same day).** Discovery capture becomes
   an **append-only, session-scoped take list**: never aims, never overwrites,
   never blocks — which dissolves the quick-capture vs no-smart-defaults conflict
@@ -1951,10 +1984,19 @@ very tense" vs "all notes slightly tense" as separate moves).*
 working detail in `doc/plans/2026-06-11-save-model-groups-performing-curating.md`**
 - Tape storage: session file vs RAM+SD journal vs dedicated bank (the bank option
   breaks the hard-wired bank↔group identity — leaning against).
-- Checkpoint storage: parallel checkpoint bank vs record-pair-in-new-banks (existing
-  banks lack 2× slack for pairing).
-- Gen-state extension-tag scope (loop array / locks / MULT / anchor) — forced by
-  auto-writeback, else the sculpted-loop orphan stays the last loss mode.
+- ~~Checkpoint storage~~ — **RESOLVED 2026-06-13 (built + GO, Stage C)**: an
+  internal fifth "bank" `MBSEQ_AN.V4`, lazy-created at first CHECKPOINT, reached
+  by a **sentinel bank index** — not a `NUM_BANKS` bump (that would index
+  `seq_pattern[4]` out of bounds in `SaveAllBanks` and surface the anchor in the
+  bank UI). Reuses the record serializer wholesale (gen state rides the V4 tag)
+  and stays out of every `for(bank<NUM_BANKS)` loop → non-navigable, untouched by
+  session writeback. Grain = whole-organism (4 groups, one gesture), one-deep.
+- ~~Gen-state extension-tag scope~~ — **RESOLVED 2026-06-12 (built + GO, Stage
+  B)**: V4 ext tag = V3 payload + a fixed-stride gen sub-block (count + 4 entries
+  × 177 B: instrument, par_layer, engaged, dials, loop/locks/anchor/mult). Every
+  content-replacing load clears + re-seeds the track's generators from the record
+  (resume ENGAGED); a gen-less slot kills them. Cap = `SEQ_GENERATOR_PERSIST_SLOTS`
+  (4)/track; write degrades V4→V3→none per record.
 - ~~Track-grain pull gesture~~ — **RESOLVED 2026-06-12 (built + GO)**: the
   track-hold mirror — hold select-row = destination, held+select = source column,
   GP letter + number commits, SELECT+CLEAR = one gesture back. Remaining opens
@@ -1963,13 +2005,18 @@ working detail in `doc/plans/2026-06-11-save-model-groups-performing-curating.md
   NAME in the pull overlay (backlog).
 - Phrase format: MBSEQ_S.V4 record-version bump vs new file (carrier verified
   friendly — `song_size` already parameterized).
-- Performance fence for auto-writeback (Digitone II PERFORM KIT lesson): is a live
-  processor sweep mid-transition *editing the state* or *playing the moment*?
+- Performance fence for auto-writeback (Digitone II PERFORM KIT lesson) —
+  **deliberately UNBUILT in v1 (FEARLESS, 2026-06-13)**: CHECKPOINT/REVERT bound
+  the blast radius, so committed performance never traps you. The by-ear trigger
+  to design one: if a live processor sweep mid-transition ever *edits* a state
+  you meant to keep *playing*. On the watch list, not built.
 - ~~Still-unblessed proposals riding the rethink~~ — **all blessed 2026-06-11**
   (the tape with its §5.5 supersession placed, row tension meter, chord hand,
-  two-surface model, CHECKPOINT/REVERT verbs). The rethink's remaining opens are
-  the mechanism forks above, plus checkpoint *grain* under organism-primary
-  (group vs track vs whole-organism).
+  two-surface model, CHECKPOINT/REVERT verbs). After FEARLESS shipped (Stages
+  A–C, GO 2026-06-13), the rethink's only still-open mechanism forks are **tape
+  storage** and **phrase format**; checkpoint storage/grain and gen-state scope
+  are resolved above, the performance fence is deliberately unbuilt, and the pull
+  gesture shipped with RECOMBINE.
 
 **Bounce north-star — capture ALL processing as-heard, reset on the copy (2026-06-12).**
 The user's stated end-state for bounce/freeze: *apply every processor and generator,

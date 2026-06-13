@@ -1544,9 +1544,50 @@ static s32 SEQ_UI_Button_Menu(s32 depressed)
 }
 
 
+// FEARLESS SWITCHING Stage C — SELECT+BOOKMARK hold threshold: below = a tap
+// (CHECKPOINT), at/above = a hold (REVERT). REVERT discards the live jam, so it
+// gets the deliberate long press. MIOS32_TIMESTAMP is mS-accurate.
+#define ANCHOR_REVERT_HOLD_MS 1000
+
 static s32 SEQ_UI_Button_Bookmark(s32 depressed)
 {
   static seq_ui_sel_view_t prev_sel_view = SEQ_UI_SEL_VIEW_NONE;
+
+  // FEARLESS SWITCHING Stage C — SELECT+BOOKMARK anchor gesture. Quick tap =
+  // CHECKPOINT (bless all 4 groups to the anchor); hold >= ANCHOR_REVERT_HOLD_MS
+  // = REVERT (restore the blessed organism). Armed only when SELECT is down at
+  // BOOKMARK press; fires at release by measured duration; swallows press +
+  // release so the combo never flips to the bookmarks view. Mirrors the
+  // SELECT+CLEAR=undo idiom (RECOMBINE) — a deliberate combo, never a bare tap.
+  static u8  anchor_armed = 0;
+  static u32 anchor_t0 = 0;
+  if( !depressed ) {                          // BOOKMARK pressed
+    if( seq_ui_button_state.SELECT_PRESSED ) {
+      anchor_armed = 1;
+      anchor_t0 = (u32)MIOS32_TIMESTAMP_Get();
+      return 0;                               // swallow — no bookmarks-view flip
+    }
+  } else if( anchor_armed ) {                 // BOOKMARK released, gesture armed
+    anchor_armed = 0;
+    if( (u32)MIOS32_TIMESTAMP_GetDelay(anchor_t0) >= ANCHOR_REVERT_HOLD_MS ) {
+      if( SEQ_PATTERN_AnchorPresent() <= 0 ) {
+        SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1500, "REVERT", "no checkpoint yet");
+      } else {
+        s32 r = SEQ_PATTERN_Revert();
+        if( r >= 0 )
+          SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "REVERT", "organism restored");
+        else
+          SEQ_UI_SDCardErrMsg(2000, r);
+      }
+    } else {
+      s32 r = SEQ_PATTERN_Checkpoint();
+      if( r >= 0 )
+        SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "CHECKPOINT", "organism blessed");
+      else
+        SEQ_UI_SDCardErrMsg(2000, r);
+    }
+    return 0;                                 // swallow the release
+  }
 
   if( !depressed ) {
     prev_sel_view = seq_ui_sel_view;

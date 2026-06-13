@@ -194,6 +194,175 @@ s32 SEQ_PATTERN_WritebackAllDirty(void)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// FEARLESS SWITCHING Stage C — CHECKPOINT / REVERT (the blessed anchor;
+// design §9 2026-06-11, plan doc 2026-06-12 §1/§2). One-deep, organism-grain:
+// CHECKPOINT blesses all four groups' live state (incl. generator state) into
+// the internal anchor carrier MBSEQ_AN.V4; REVERT restores all four. The
+// anchor is a fifth, non-navigable "bank" (SEQ_FILE_B_ANCHOR_BANK) created
+// lazily on first CHECKPOINT. Every verb re-opens it against the CURRENT
+// session first — the file is per-session, and a cached valid bit from a prior
+// session would otherwise read the wrong session's anchor. It reuses the bank
+// record serializer wholesale, so gen state rides along (V4 ext tag), and it
+// never touches the four user banks' load/save loops (CHECKPOINT writes into
+// MBSEQ_AN.V4, not a working slot — so a session writeback leaves it intact).
+/////////////////////////////////////////////////////////////////////////////
+
+// 1 if the current session has a blessed anchor, 0 otherwise. Re-opens (and so
+// re-resolves the path for) the current session's anchor file.
+s32 SEQ_PATTERN_AnchorPresent(void)
+{
+  s32 status;
+  MUTEX_SDCARD_TAKE;
+  status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+  MUTEX_SDCARD_GIVE;
+  return (status >= 0) ? 1 : 0;
+}
+
+// CHECKPOINT: write all four groups' live state into the anchor, lazy-creating
+// the file on first use. Groups are written ascending so a freshly-created
+// file (header only) extends contiguously (no seek-past-EOF gaps). Reads live
+// state only — leaves seq_pattern_dirty untouched (an anchor write is not a
+// working-slot save).
+//
+// Partial-write exposure (accepted POC cost, plan §4): a mid-loop SD failure
+// leaves a partial/mixed anchor — same power-loss class as a working-slot
+// save, at lower frequency. The failure is surfaced as a negative return
+// (cmd_checkpoint -> ok=0); the caller must heed it before trusting a later
+// REVERT. Atomic temp+rename is the fix if this ever bites in practice.
+s32 SEQ_PATTERN_Checkpoint(void)
+{
+  s32 status;
+
+  MUTEX_SDCARD_TAKE;
+
+  // lazy create: open the session's anchor, and if absent create-then-open
+  status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+  if( status < 0 ) {
+    if( (status=SEQ_FILE_B_Create(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK)) >= 0 )
+      status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+  }
+
+  if( status >= 0 ) {
+    u8 group;
+    for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
+      s32 err = SEQ_FILE_B_PatternWrite(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK, group, group, 1);
+      if( err < 0 )
+        status = err;
+    }
+  }
+
+  MUTEX_SDCARD_GIVE;
+
+  if( seq_pattern_log_load_time )
+    DEBUG_MSG("[SEQ_PATTERN:%d] CHECKPOINT status %d", SEQ_BPM_TickGet(), status);
+
+  return status;
+}
+
+// REVERT: restore all four groups' live state (incl. generator state) from the
+// blessed anchor — the organism comes back to the checkpoint. Refuses cleanly
+// (returns the open error, no live change) when the session has no anchor yet.
+//
+// Restores live RAM via SEQ_FILE_B_PatternRead directly — NOT SEQ_PATTERN_Load
+// — so seq_pattern[group] keeps pointing at the group's real working slot (the
+// anchor is a fifth bank; repointing the live group at it would corrupt the
+// working-slot identity and the next writeback would clobber the anchor). Then
+// the SEQ_CORE_LoadTrackFromSlot fan generalized to all 16 tracks: forced full
+// render (the RenderDirtySet armed inside PatternRead can be consumed
+// window-only by a sweep-regime tick) + sustain-cancel + PC/bank send +
+// bar-aligned restart. Sets every group dirty afterward (live now diverges
+// from the working slot — the next switch writes the reverted state into the
+// slot, the inversion working normally).
+s32 SEQ_PATTERN_Revert(void)
+{
+  s32 status;
+
+  // refuse cleanly if the current session has no anchor (no live change). This
+  // also (re-)resolves the anchor file/handle for the current session before
+  // the reads below.
+  MUTEX_SDCARD_TAKE;
+  status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+  MUTEX_SDCARD_GIVE;
+  if( status < 0 )
+    return status; // SEQ_FILE_B_ERR_NO_FILE / FILE open error -> caller refuses
+
+  // pre-generate output across the SD stall, then exclude ticks for the whole
+  // live-write window (the proven group-change recipe — SDCARD must be taken
+  // BEFORE entering the critical section or the take hangs).
+  if( SEQ_BPM_IsRunning() ) {
+    MUTEX_MIDIOUT_TAKE;
+    SEQ_CORE_AddForwardDelay(seq_core_pattern_switch_margin_ms);
+    MUTEX_MIDIOUT_GIVE;
+  }
+
+  MUTEX_SDCARD_TAKE;
+  portENTER_CRITICAL();
+  {
+    u8 group;
+    for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
+      s32 err = SEQ_FILE_B_PatternRead(SEQ_FILE_B_ANCHOR_BANK, group, group, 0);
+      if( err < 0 )
+        status = err;
+    }
+  }
+  portEXIT_CRITICAL();
+  MUTEX_SDCARD_GIVE;
+
+  // force a full quiet render + sustain-cancel for every track (mirrors the
+  // SEQ_PATTERN_Load / SEQ_CORE_LoadTrackFromSlot fan, all groups at once)
+  {
+    u8 track;
+    for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+      seq_render_touched_ms[track] = 0;
+      seq_render_dirty[track] = 1;
+      SEQ_CORE_RenderTrack(track);
+      SEQ_CORE_CancelSustainedNotes(track);
+    }
+  }
+
+  // optionally unmute (mutes are not in the anchor; this only mirrors a normal
+  // load when the option is set — typically off for deliberate mute control)
+  if( seq_core_options.UNMUTE_ON_PATTERN_CHANGE ) {
+    portENTER_CRITICAL();
+    seq_core_trk_muted = 0;
+    seq_core_trk_synched_mute = 0;
+    seq_core_trk_synched_unmute = 0;
+    portEXIT_CRITICAL();
+  }
+
+  if( !seq_core_options.PATTERN_CHANGE_DONT_RESET_LATCHED_PC )
+    SEQ_LAYER_ResetLatchedValues();
+
+  {
+    MUTEX_MIDIOUT_TAKE;
+    u8 track;
+    for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track)
+      SEQ_LAYER_SendPCBankValues(track, 0, 1);
+    MUTEX_MIDIOUT_GIVE;
+  }
+
+  // REVERT sets every group dirty (live != working slot now) + marks the
+  // groups loaded (writeback-eligible). PatternRead's CC replay (via
+  // SEQ_CC_Set) only SETS dirty bits mid-restore, so this final OR over all
+  // four groups is order-insensitive — kept here for symmetry with
+  // SEQ_PATTERN_Load's tail.
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty |= ((1 << SEQ_CORE_NUM_GROUPS) - 1);
+  pattern_loaded |= ((1 << SEQ_CORE_NUM_GROUPS) - 1);
+  MIOS32_IRQ_Enable();
+
+  // bar-aligned restart of all tracks (pull precedent; also delivers RATOPC's
+  // musical intent — a mid-jam REVERT lands on the next bar, not off-phase)
+  SEQ_CORE_ManualSynchToMeasure(0xffff);
+
+  if( seq_pattern_log_load_time )
+    DEBUG_MSG("[SEQ_PATTERN:%d] REVERT status %d", SEQ_BPM_TickGet(), status);
+
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Requests a pattern change
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_PATTERN_Change(u8 group, seq_pattern_t pattern, u8 force_immediate_change)

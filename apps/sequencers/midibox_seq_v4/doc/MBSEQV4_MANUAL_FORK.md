@@ -2,12 +2,13 @@
 
 This manual documents the features added to MIDIbox SEQ V4 in this fork, on top of upstream V4.098. Each section follows the style of the official ucapps.de manuals (intro, usecases, action-named subsections with 2×80 LCD mockups, Tips & Tricks footer).
 
-Four features are documented here:
+Five features are documented here:
 
 1. **Robotize Loop** — bar-anchor PRNG control over the Robotizer Fx (sculpt randomness one measure at a time)
 2. **GENERATE Page** — the former EUCLID page expanded into five generator types (Euclidean, Cellular, Polyrhythm, Subdivide, L-System)
 3. **Capture / Bounce** — freeze a track's computed output (lossless) into a pattern via the PATTERN-hold gesture; build variation libraries and multitimbral canvases
 4. **The Pull** — load one stored track into any live track, on the bar, while everything keeps playing (the mirror of Capture); SELECT+CLEAR is the one-gesture undo
+5. **Fearless Switching** — your work always saves itself; CHECKPOINT blesses a safe point and REVERT snaps the whole living rig back to it in one gesture
 
 For developer-facing topics (the testctrl SysEx interface, the Python hardware-in-the-loop pytest harness, the top-level orchestration Makefile, and the source-level design catalog) see `MBSEQV4_REFERENCE.md` and `tests/README.md`.
 
@@ -451,6 +452,76 @@ most recent pull wins. With nothing to undo, SELECT+CLEAR just says so — it
 * Heads-up: while a track button is held, the other select-row buttons aim
   the source column, so multi-track chord-select is unavailable during a
   pull. Release the hold and it's back.
+
+---
+
+## Fearless Switching
+
+The old rule was: switch patterns and your unsaved tweaks are gone unless you
+remembered to SAVE first — and you never remember mid-jam. This fork inverts
+it. **Your working state always saves itself.** Edit a track, sculpt a
+generator, then switch a group away and back — it comes back exactly as you
+left it, including a living generator that keeps mutating right where it was.
+Nothing is lost on a switch, ever.
+
+Because saving is automatic, protection becomes the deliberate act:
+**CHECKPOINT** blesses a safe point, and **REVERT** snaps the whole rig back to
+it in one gesture.
+
+### What persists, automatically
+
+Whenever you switch a group, its current live state — notes, gates, all
+config, and any engaged generator — is written back to its working slot first.
+So switching is free: roam around, come back, keep going. The same happens
+when you change sessions. The only stretch not yet written is the one playing
+right now if you power off without switching — so end on a switch, or
+CHECKPOINT, before you pull the plug.
+
+### CHECKPOINT and REVERT — SELECT + BOOKMARK
+
+One key does both, by how long you hold it:
+
+* **`SELECT` + `BOOKMARK`, quick tap → CHECKPOINT.** Blesses all four groups
+  (and their generators) as your safe point. The LCD confirms:
+
+```
+                CHECKPOINT
+                organism blessed
+```
+
+* **`SELECT` + `BOOKMARK`, hold ~1 second → REVERT.** Restores the whole rig
+  to the last blessed point — every group, every track, generators alive and
+  resuming. The LCD confirms:
+
+```
+                REVERT
+                organism restored
+```
+
+REVERT is the destructive one (it throws away whatever you've jammed since the
+checkpoint), so it deliberately takes the *hold* — a quick fumble can only ever
+CHECKPOINT, never wipe your jam. If you REVERT before ever blessing a point,
+nothing happens and the LCD says `no checkpoint yet`.
+
+One checkpoint is kept at a time (per session): a new CHECKPOINT overwrites the
+last one, REVERT always returns to the most recent. After a REVERT the rig is
+"dirty" against its slots, so the next switch writes the reverted state into
+them — exactly as if you'd jammed it there yourself.
+
+### Tips & Tricks
+
+* Bless a checkpoint the moment a jam feels good, then explore without fear —
+  mangle it, pile on generators, switch all over. One held `SELECT+BOOKMARK`
+  and you're home. The safe point is the deliberate gesture; everything between
+  is free.
+* CHECKPOINT captures the *whole organism* (all 16 tracks across the 4 groups)
+  in one press — it's a snapshot of the moment, not of one track.
+* It pairs with the Pull and Capture: pull history in and jam it, and if the
+  experiment goes nowhere, REVERT wipes the whole detour at once (vs.
+  SELECT+CLEAR, which undoes the last single pull).
+* A freeze you Capture into a group's *own* working slot gets overwritten by
+  the ongoing jam at the next switch (the jam is the slot's memory now). Park
+  freezes in *other* slots — that's what the variation library is for.
 
 ---
 

@@ -21,6 +21,13 @@
 
 #define SEQ_FILE_B_NUM_BANKS 4
 
+// FEARLESS SWITCHING Stage C: the CHECKPOINT/REVERT anchor rides the bank
+// record format as an internal fifth "bank" addressed by this sentinel. It is
+// OUTSIDE the 0..NUM_BANKS-1 range on purpose, so every for(bank<NUM_BANKS)
+// loop (load-all / unload-all / save-all) skips it — the anchor is never
+// auto-loaded, never written by a session save, and not user-navigable.
+#define SEQ_FILE_B_ANCHOR_BANK 0xfe
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types

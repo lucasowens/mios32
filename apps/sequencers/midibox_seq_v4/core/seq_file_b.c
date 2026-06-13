@@ -176,9 +176,48 @@ typedef struct {
 
 static seq_file_b_info_t seq_file_b_info[SEQ_FILE_B_NUM_BANKS];
 
+// FEARLESS SWITCHING Stage C — the CHECKPOINT/REVERT anchor's parallel info
+// slot (see SEQ_FILE_B_ANCHOR_BANK). Kept OUT of seq_file_b_info[] so it never
+// participates in the user-bank load/unload/save loops; opened/created lazily
+// by SEQ_PATTERN_Checkpoint / _Revert / _AnchorPresent against the current
+// session, so it always tracks the live session (the file is per-session).
+static seq_file_b_info_t seq_file_anc_info;
+
 static u8 cached_pattern_name[21];
 static u8 cached_bank;
 static u8 cached_pattern;
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Resolve a bank index (0..NUM_BANKS-1) or the anchor sentinel to its info
+// slot. Returns NULL for an out-of-range bank. Lets the record serializer
+// (PatternWrite/PatternRead/TrackRead/Create/Open) be reused wholesale for the
+// anchor without the anchor leaking into the four-bank arrays/loops.
+/////////////////////////////////////////////////////////////////////////////
+static seq_file_b_info_t *SEQ_FILE_B_InfoPtr(u8 bank)
+{
+  if( bank == SEQ_FILE_B_ANCHOR_BANK )
+    return &seq_file_anc_info;
+  if( bank < SEQ_FILE_B_NUM_BANKS )
+    return &seq_file_b_info[bank];
+  return NULL;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Build the on-SD path for a bank: user banks are MBSEQ_B1..4.V4; the anchor
+// is the fixed, non-navigable MBSEQ_AN.V4 (the ".V4" is the file-format
+// suffix, same as the user banks — not the V4 generator ext tag). The base
+// name MUST stay <= 8 chars: FatFs runs with _USE_LFN=0 (8.3 short names
+// only), so a 9-char base like "MBSEQ_ANC" is FR_INVALID_NAME and the create
+// silently fails — "MBSEQ_AN" (8) is the longest that fits.
+/////////////////////////////////////////////////////////////////////////////
+static void SEQ_FILE_B_BuildPath(char *filepath, char *session, u8 bank)
+{
+  if( bank == SEQ_FILE_B_ANCHOR_BANK )
+    sprintf(filepath, "%s/%s/MBSEQ_AN.V4", SEQ_FILE_SESSION_PATH, session);
+  else
+    sprintf(filepath, "%s/%s/MBSEQ_B%d.V4", SEQ_FILE_SESSION_PATH, session, bank+1);
+}
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -282,14 +321,14 @@ s32 SEQ_FILE_B_NumPatterns(u8 bank)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_FILE_B_Create(char *session, u8 bank)
 {
-  if( bank >= SEQ_FILE_B_NUM_BANKS )
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
     return SEQ_FILE_B_ERR_INVALID_BANK;
 
-  seq_file_b_info_t *info = &seq_file_b_info[bank];
   info->valid = 0; // set to invalid as long as we are not sure if file can be accessed
 
   char filepath[MAX_PATH];
-  sprintf(filepath, "%s/%s/MBSEQ_B%d.V4", SEQ_FILE_SESSION_PATH, session, bank+1);
+  SEQ_FILE_B_BuildPath(filepath, session, bank);
 
 #if DEBUG_VERBOSE_LEVEL >= 1
   DEBUG_MSG("[SEQ_FILE_B] Creating new bank file '%s'\n", filepath);
@@ -366,15 +405,14 @@ s32 SEQ_FILE_B_Create(char *session, u8 bank)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_FILE_B_Open(char *session, u8 bank)
 {
-  if( bank >= SEQ_FILE_B_NUM_BANKS )
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
     return SEQ_FILE_B_ERR_INVALID_BANK;
-
-  seq_file_b_info_t *info = &seq_file_b_info[bank];
 
   info->valid = 0; // will be set to valid if bank header has been read successfully
 
   char filepath[MAX_PATH];
-  sprintf(filepath, "%s/%s/MBSEQ_B%d.V4", SEQ_FILE_SESSION_PATH, session, bank+1);
+  SEQ_FILE_B_BuildPath(filepath, session, bank);
 
 #if DEBUG_VERBOSE_LEVEL >= 1
   DEBUG_MSG("[SEQ_FILE_B] Open bank file '%s'\n", filepath);
@@ -562,13 +600,12 @@ static s32 PatternGenBlockWrite(u8 src_track)
 
 s32 SEQ_FILE_B_PatternRead(u8 bank, u8 pattern, u8 target_group, u16 remix_map)
 {
-  if( bank >= SEQ_FILE_B_NUM_BANKS )
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
     return SEQ_FILE_B_ERR_INVALID_BANK;
 
   if( target_group >= SEQ_CORE_NUM_GROUPS )
     return SEQ_FILE_B_ERR_INVALID_GROUP;
-
-  seq_file_b_info_t *info = &seq_file_b_info[bank];
 
   if( !info->valid )
     return SEQ_FILE_B_ERR_NO_FILE;
@@ -866,7 +903,8 @@ DEBUG_MSG("Skipping Track %d\n", track);
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 {
-  if( bank >= SEQ_FILE_B_NUM_BANKS )
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
     return SEQ_FILE_B_ERR_INVALID_BANK;
 
   if( slot_track >= SEQ_CORE_NUM_TRACKS_PER_GROUP )
@@ -874,8 +912,6 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 
   if( dst_track >= SEQ_CORE_NUM_TRACKS )
     return SEQ_FILE_B_ERR_INVALID_TRACK;
-
-  seq_file_b_info_t *info = &seq_file_b_info[bank];
 
   if( !info->valid )
     return SEQ_FILE_B_ERR_NO_FILE;
@@ -1139,13 +1175,12 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group, u8 rename_if_empty_name)
 {
-  if( bank >= SEQ_FILE_B_NUM_BANKS )
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
     return SEQ_FILE_B_ERR_INVALID_BANK;
 
   if( source_group >= SEQ_CORE_NUM_GROUPS )
     return SEQ_FILE_B_ERR_INVALID_GROUP;
-
-  seq_file_b_info_t *info = &seq_file_b_info[bank];
 
   if( !info->valid )
     return SEQ_FILE_B_ERR_FORMAT;
@@ -1205,7 +1240,7 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
   }
 
   char filepath[MAX_PATH];
-  sprintf(filepath, "%s/%s/MBSEQ_B%d.V4", SEQ_FILE_SESSION_PATH, session, bank+1);
+  SEQ_FILE_B_BuildPath(filepath, session, bank);
 
 #if DEBUG_VERBOSE_LEVEL >= 1
   DEBUG_MSG("[SEQ_FILE_B] Open bank file '%s' for writing\n", filepath);
