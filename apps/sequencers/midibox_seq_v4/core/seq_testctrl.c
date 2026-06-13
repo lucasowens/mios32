@@ -405,6 +405,16 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
   seq_pattern_dirty = 0;
   MIOS32_IRQ_Enable();
 
+  // A harness reset is a baseline — clear the transient UI gesture statics
+  // (pull/capture held-modifier state + active select-view) and FREEZE. These
+  // are RAM-only performance state with no reset path of their own, so a manual
+  // hands-on session can leave them perturbed (a stuck pull_held_track breaks
+  // select-row track-select; a left-on FREEZE silences generator mutation) and
+  // poison the next suite run. Cleared unconditionally so reset() fully
+  // normalizes UI state.
+  SEQ_UI_GestureStateReset();
+  seq_core_state.FREEZE = 0;
+
   // PHRASES: a harness reset is a baseline — clear session-scoped phrase
   // occupancy so a phrase captured by a prior test can't masquerade as present
   // (the "recall refuses an uncaptured phrase" pin needs a clean slate). The

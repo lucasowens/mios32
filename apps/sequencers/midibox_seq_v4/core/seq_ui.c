@@ -204,6 +204,26 @@ static u8 pull_letter = 0xff;       // chosen source letter, 0xff = column group
 static char pull_status[24] = "";   // last commit result, shown in the held overlay
 
 
+// Reset the transient UI gesture state — the pull/capture held-modifier statics
+// and the active select-view. These are RAM-only performance state with no
+// reset path of their own, so a manual session (button-pressing on hardware)
+// can leave e.g. pull_held_track ARMED, which then intercepts select-row taps so
+// track-select silently stops working until a PATTERN press. A harness
+// RESET_STATE (a clean baseline) calls this so reset() fully normalizes UI
+// state and the suite stops being perturbable by a prior hands-on session.
+void SEQ_UI_GestureStateReset(void)
+{
+  pull_held_track = 0xff;
+  pull_src_column = 0xff;
+  pull_letter = 0xff;
+  pull_status[0] = 0;
+  pattern_held_gp_consumed = 0;
+  pattern_capture_group = 0xff;
+  pattern_capture_dst_track = 0xff;
+  seq_ui_sel_view = SEQ_UI_SEL_VIEW_NONE;
+}
+
+
 /////////////////////////////////////////////////////////////////////////////
 // Prototypes
 /////////////////////////////////////////////////////////////////////////////

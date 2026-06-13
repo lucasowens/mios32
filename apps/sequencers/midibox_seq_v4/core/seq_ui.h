@@ -282,6 +282,8 @@ typedef struct {
 
 extern s32 SEQ_UI_Init(u32 mode);
 
+extern void SEQ_UI_GestureStateReset(void);
+
 extern s32 SEQ_UI_InitEncSpeed(u32 auto_config);
 
 extern s32 SEQ_UI_Button_Handler(u32 pin, u32 pin_value);
