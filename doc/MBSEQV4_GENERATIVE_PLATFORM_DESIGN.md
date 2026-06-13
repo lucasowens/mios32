@@ -359,6 +359,12 @@ return recipes compose.
   "Morph two states" = bounce A then B end-to-end, window across the seam. Crosses
   *tape*, not springs — reliable and repeatable, exactly what identifiable-return
   wants. (Uses existing bounce mechanics; no new "concatenate" verb in v1, per §2.1.)
+- **Phrase-posture morph (added 2026-06-13 — a third model the PHRASES snapshot
+  library unlocks; candidate, not built).** Interpolate the live engine's *posture*
+  (dials/CCs) between two stored phrase snapshots on a knob — a form of the "two live
+  engines" morph the first bullet ruled out, now possible because the phrase holds the
+  full committed state as values. Details + the posture-vs-note-content split + RAM
+  gate in §10 ("Phrase morphing").
 
 ### Set structure (skeleton and muscle)
 Two intensity time-scales, two different tools:
@@ -2043,6 +2049,41 @@ processors rule names them).
   mirror" tractable. Scope before coding: probability gating, per-bar anchor/palette/loop
   state, and the SUSTAIN / ECHO / NOFX flag interactions all have to render deterministically
   per bar. Reopened next to FORCE_SCALE in §9's freeze-faithfulness lineage.
+
+**Phrase morphing — a third morph model unlocked by the snapshot library (2026-06-13,
+candidate; its own future bundle, NOT built).** Surfaced by the user right after the
+PHRASES Stage A by-ear GO ("does this open up morphing between phrases?"). Because a
+phrase stores the full committed organism as *values* (not refs — see the §9
+2026-06-13 snapshot-library entry), **both endpoints A and B are available as data**,
+and the engine already re-renders the organism from source into the output mirror on
+demand — so feeding it an *interpolated* state and re-rendering is the path recall
+already uses. Endpoints are exact for free (`morph=0` IS A, `morph=1` IS B — the
+§2/"every dial sweeps 0→max incl. true pass-through" ethos). Two kinds, and the split
+is load-bearing:
+- **Posture morph (the cheap, musical win).** The continuous state — processor dials
+  (GRAVITY position, mask strength, TENSION, mutation rate/depth, robotize),
+  transpose, groove, length, generator dials — interpolates as `live = A + morph·(B−A)`
+  on a knob: glide the *sculpt/feel* from waypoint A toward B, immediate (not
+  bar-quantized — like the GRAVITY isolator-throw). Tiny in RAM (read B's CC block,
+  ~couple KB, into a target buffer; lean the live CCs toward it). This is the thing
+  §5's Morphing model #1 said was unavailable ("interpolating two live engines on
+  shared voices is not available") — the phrase model makes a *form* of it available:
+  not two live engines, but the live engine's **posture interpolated between two
+  stored postures**.
+- **Note-content morph (harder, partial).** Trigger grid can't be half-on — only a
+  *scheduled* crossfade (progressively flip steps A→B as the knob turns); per-step
+  velocity/length interpolate fine; per-step **pitch** wants scale-quantizing to not
+  sound wrong; generator loops/locks/anchor don't meaningfully interpolate (hold A's
+  until a crossover, or freeze during the morph). **RAM is the gate:** full per-step
+  morph needs two whole organisms resident (~35 KB each; only ~40 KB free) — too
+  tight. So the engineering steer: **morph the posture continuously, swap the grid +
+  generators discretely** (at a threshold, or hold-until-commit).
+- **Where it fits:** makes *"a set is a path"* continuous, and is exactly §4's
+  **"transitioning (performed, not dead bars)"** made real — sweep the posture *toward*
+  the next waypoint, then commit the structural jump on the bar. The morph is the
+  transition; the (shipped) bar-aligned recall is the arrival — two complementary
+  gestures. Open: generators-during-morph; grid-crossfade ordering; the morph control
+  surface (knob/fader assignment).
 
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
