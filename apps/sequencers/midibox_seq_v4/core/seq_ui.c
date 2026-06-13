@@ -1036,33 +1036,32 @@ static s32 SEQ_UI_Button_ExtRestart(s32 depressed)
   return 0; // no error
 }
 
-static s32 SEQ_UI_Button_Metronome(s32 depressed)
+// FREEZE — the generator-mutation master switch, on the repurposed METRONOME
+// button (this fork doesn't click to a metronome live). Toggles
+// seq_core_state.FREEZE: engaged generator loops hold (the per-measure auto-
+// mutate pauses), reversible. Two-face phrase recall falls out of this — recall
+// while frozen lands the organism as static tape. Honors the button's existing
+// toggle-vs-hold behaviour config (seq_hwcfg_button_beh.metronome).
+static s32 SEQ_UI_Button_Freeze(s32 depressed)
 {
-  // double function: -> ExtRestart if menu button pressed
+  // double function preserved from the old METRONOME button: -> ExtRestart if
+  // MENU is held (ExtRestart also keeps its own button / MIDI-note remote).
   if( seq_ui_button_state.MENU_PRESSED )
     return SEQ_UI_Button_ExtRestart(depressed);
 
   if( seq_hwcfg_button_beh.metronome ) {
     // toggle mode
     if( depressed ) return -1; // ignore when button depressed
-    // should be atomic
     portENTER_CRITICAL();
-    seq_core_state.METRONOME ^= 1;
+    seq_core_state.FREEZE ^= 1;
   } else {
-    // should be atomic
+    // hold mode: frozen while held
     portENTER_CRITICAL();
-    // set mode
-    seq_core_state.METRONOME = depressed ? 0 : 1;
+    seq_core_state.FREEZE = depressed ? 0 : 1;
   }
   portEXIT_CRITICAL();
 
-  SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Metronome", seq_core_state.METRONOME ? "    on" : "   off");
-
-#if 0
-  // metronome button can be used to trigger pattern file fixes
-  if( !depressed )
-    SEQ_PATTERN_FixAll();
-#endif
+  SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "FREEZE", seq_core_state.FREEZE ? "  FROZEN" : "    live");
 
   return 0; // no error
 }
@@ -2914,7 +2913,7 @@ s32 SEQ_UI_Button_Handler(u32 pin, u32 pin_value)
   if( pin == seq_hwcfg_button.scrub )
     return SEQ_UI_Button_Scrub(pin_value);
   if( pin == seq_hwcfg_button.metronome )
-    return SEQ_UI_Button_Metronome(pin_value);
+    return SEQ_UI_Button_Freeze(pin_value);
 
   if( pin == seq_hwcfg_button.record )
     return SEQ_UI_Button_Record(pin_value);
@@ -3331,7 +3330,7 @@ s32 SEQ_UI_REMOTE_MIDI_Keyboard(u8 key, u8 depressed)
     case 0x4e: // F#5
       return SEQ_UI_Button_Fast(depressed);
     case 0x4f: // G-5
-      return SEQ_UI_Button_Metronome(depressed);
+      return SEQ_UI_Button_Freeze(depressed);
     case 0x50: // G#5
       return SEQ_UI_Button_ExtRestart(depressed);
     case 0x51: // A-5
@@ -3844,7 +3843,7 @@ s32 SEQ_UI_LED_Handler(void)
   } else {
     SEQ_LED_PinSet(seq_hwcfg_led.scrub, seq_ui_button_state.SCRUB);
     SEQ_LED_PinSet(seq_hwcfg_led.exit, ui_page == SEQ_UI_PAGE_MENU);
-    SEQ_LED_PinSet(seq_hwcfg_led.metronome, seq_core_state.METRONOME);
+    SEQ_LED_PinSet(seq_hwcfg_led.metronome, seq_core_state.FREEZE); // repurposed: lit = FROZEN
   }
 
   SEQ_LED_PinSet(seq_hwcfg_led.record, seq_record_state.ENABLED);

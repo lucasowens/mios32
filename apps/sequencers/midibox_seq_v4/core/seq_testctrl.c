@@ -91,6 +91,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_PHRASE_RECALL        0x7b
 #define CMD_PHRASE_PRESENT       0x7c
 #define CMD_TRG_BYTE_SET         0x7d
+#define CMD_FREEZE_SET           0x7e
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1845,6 +1846,27 @@ static void cmd_trg_byte_set(mios32_midi_port_t port, const u8 *payload, u8 plen
 }
 
 
+// CMD_FREEZE_SET payload: [value]  (0 = live, nonzero = frozen).
+//   Sets the global generator-mutation master switch (seq_core_state.FREEZE) —
+//   the design's FREEZE. While frozen, SEQ_GENERATOR_Tick skips the per-measure
+//   auto-mutate so engaged loops hold. Lets HIL pin "frozen loops don't drift".
+// Reply payload: [state, status]   state echoes the new FREEZE bit; status 0x01.
+static void cmd_freeze_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_FREEZE_SET, reply, sizeof(reply));
+    return;
+  }
+  portENTER_CRITICAL();
+  seq_core_state.FREEZE = payload[0] & 0x01;
+  portEXIT_CRITICAL();
+  reply[0] = seq_core_state.FREEZE;
+  reply[1] = 0x01;
+  send_reply(port, CMD_FREEZE_SET, reply, sizeof(reply));
+}
+
+
 // CMD_MSP_QUERY: no payload. Reply payload is pack7-encoded:
 //   raw[0..3]   = high_water_bytes   (peak MSP usage since paint, LE u32)
 //   raw[4..7]   = paint_extent_bytes (painted region size, LE u32)
@@ -2132,6 +2154,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRG_BYTE_SET:
             cmd_trg_byte_set(port, payload_buf, payload_len);
+            break;
+          case CMD_FREEZE_SET:
+            cmd_freeze_set(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

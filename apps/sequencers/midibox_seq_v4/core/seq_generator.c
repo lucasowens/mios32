@@ -613,7 +613,13 @@ void SEQ_GENERATOR_Tick(void)
     if( cur != 0 ) continue;
     if( prev == 0 ) continue; // same step as last tick — no wrap event
 
-    // Track just wrapped. Mutate + rewrite every engaged generator on it.
+    // Track just wrapped. Mutate + rewrite every engaged generator on it —
+    // UNLESS FREEZE (the master mutation switch) is engaged, in which case the
+    // engaged loops hold static (the design's frozen organism; reversible).
+    // last_seen_step above still updates so wrap-tracking stays correct, and
+    // deliberate ROLL / ForceMutate gestures are NOT gated by FREEZE.
+    if( seq_core_state.FREEZE )
+      continue;
     u8 i;
     for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
       seq_generator_t *g = &pool[i];

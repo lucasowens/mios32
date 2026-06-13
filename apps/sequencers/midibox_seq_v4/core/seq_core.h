@@ -65,6 +65,11 @@ typedef union {
     u16 EXT_RESTART_REQ:1;
     u16 LOOP:1;
     u16 FOLLOW:1;
+    u16 FREEZE:1; // generator-mutation master switch (the design's FREEZE):
+                  // when set, SEQ_GENERATOR_Tick skips the per-measure auto-
+                  // mutate so engaged loops hold (reversible). Deliberate ROLL /
+                  // ForceMutate still fire. Toggled by the repurposed METRONOME
+                  // button; two-face phrase recall = recall while frozen.
   };
 } seq_core_state_t;
 

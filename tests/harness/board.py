@@ -33,6 +33,7 @@ from .sysex import (
     CMD_MSP_QUERY,
     CMD_TRG_BYTE_GET,
     CMD_TRG_BYTE_SET,
+    CMD_FREEZE_SET,
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
     CMD_GENERATOR_QUERY,
@@ -1408,6 +1409,24 @@ class Board:
                 f"layer={trg_layer} instr={instrument} step8={step8}"
             )
         return True
+
+    def freeze_set(self, on: bool, timeout: float = 1.0) -> bool:
+        """Set the global generator-mutation FREEZE switch (seq_core_state.FREEZE,
+        the repurposed METRONOME button). While frozen, SEQ_GENERATOR_Tick skips
+        the per-measure auto-mutate so engaged loops hold; releasing it lets them
+        evolve again. Returns the new frozen state.
+
+        NB: this gates the real playback wrap path only — generator_tick_force
+        calls mutate_loop directly and is NOT affected, so test FREEZE through
+        actual playback (PLAY → wait a bar → STOP)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_FREEZE_SET, bytes([1 if on else 0])))
+        payload = self.wait_for_sysex(CMD_FREEZE_SET, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short FREEZE_SET reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"FREEZE_SET status {payload[1]:#04x}")
+        return bool(payload[0])
 
     def msp_query(self, timeout: float = 1.0) -> dict:
         """Read MSP/handler-stack high-water (phase D.0 measurement).
