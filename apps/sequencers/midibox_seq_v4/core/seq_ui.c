@@ -2122,6 +2122,13 @@ static s32 SEQ_UI_Button_Track(s32 depressed, u32 track_button)
   return 0; // no error
 }
 
+// PHRASES — PHRASE-view GP hold threshold: a quick tap RECALLS the phrase (the
+// frequent performance move); a hold >= this CAPTURES the live organism into it
+// (occasional, and protected against accidentally overwriting a phrase you were
+// only navigating to — the destructive write gets the deliberate hold, the same
+// principle as CHECKPOINT-tap / REVERT-hold).
+#define PHRASE_CAPTURE_HOLD_MS 1000
+
 static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 {
   static u16 button_state = 0xffff; // all 16 buttons depressed
@@ -2250,26 +2257,43 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	portEXIT_CRITICAL();
       } break;
       case SEQ_UI_SEL_VIEW_PHRASE: {
-	if( depressed )
-	  return 0; // no error
+	// PHRASES — the snapshot library. The PHRASE-view row is N waypoints:
+	// tap GP n = RECALL phrase n (restore the whole organism, bar-aligned,
+	// generators resume engaged); hold GP n >= PHRASE_CAPTURE_HOLD_MS =
+	// CAPTURE the live organism into phrase n. Armed on press, fired by
+	// measured duration at release (mirrors the SELECT+BOOKMARK anchor
+	// gesture). Recall of an un-captured phrase refuses with a flash.
+	// (Stage A: this overloads the old song-pos fetch on this view — classic
+	// song-step editing stays on the SONG page. Gesture is provisional, tuned
+	// by ear with hardware in hand per the FEARLESS precedent.)
+	static u32 phrase_t0 = 0;
+	static u8  phrase_armed_btn = 0xff;
+	if( !depressed ) {                         // PRESS: arm the hold timer
+	  phrase_t0 = (u32)MIOS32_TIMESTAMP_Get();
+	  phrase_armed_btn = (u8)sel_button;
+	  return 0;
+	}
+	if( phrase_armed_btn != (u8)sel_button )   // RELEASE of a non-armed button
+	  return 0;
+	phrase_armed_btn = 0xff;
 
-	//if( seq_ui_button_state.PHRASE_PRESSED || (ui_page == SEQ_UI_PAGE_SONG && ui_selected_item >= 1) ) { // TODO: has to be aligned with #define in seq_ui_song.c
-	//  SEQ_UI_SONG_Button_Handler((seq_ui_button_t)sel_button, depressed);
-	//} else {
-	  ui_selected_phrase = sel_button;
-	  ui_song_edit_pos = ui_selected_phrase << 3;
-
-	  // set song position and fetch patterns
-	  SEQ_SONG_PosSet(ui_song_edit_pos);
-
-	  // requested here: http://midibox.org/forums/topic/33197-song-mode-different-length-sections-of-the-song
-	  if( seq_core_options.SYNCHED_PATTERN_CHANGE ) {
-	    SEQ_CORE_ManualSynchToMeasure(0xffff); // ensure that the new selection is in sync
-	  }
-
-          SEQ_SONG_FetchPos(0, 0);
-	  ui_song_edit_pos = SEQ_SONG_PosGet();
-	//}
+	u8 n = (u8)sel_button;
+	ui_selected_phrase = n; // row highlight follows the touched waypoint
+	if( (u32)MIOS32_TIMESTAMP_GetDelay(phrase_t0) >= PHRASE_CAPTURE_HOLD_MS ) {
+	  s32 r = SEQ_PATTERN_PhraseCapture(n);
+	  if( r >= 0 )
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PHRASE", "captured");
+	  else
+	    SEQ_UI_SDCardErrMsg(2000, r);
+	} else if( SEQ_PATTERN_PhrasePresent(n) <= 0 ) {
+	  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1500, "PHRASE", "empty slot");
+	} else {
+	  s32 r = SEQ_PATTERN_PhraseRecall(n);
+	  if( r >= 0 )
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PHRASE", "recalled");
+	  else
+	    SEQ_UI_SDCardErrMsg(2000, r);
+	}
       } break;
       }    
   } else {

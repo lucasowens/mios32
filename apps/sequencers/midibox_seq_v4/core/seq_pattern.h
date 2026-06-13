@@ -67,6 +67,13 @@ extern s32 SEQ_PATTERN_AnchorPresent(void);
 extern s32 SEQ_PATTERN_Checkpoint(void);
 extern s32 SEQ_PATTERN_Revert(void);
 
+// PHRASES — the snapshot library (capture/recall generalize CHECKPOINT/REVERT)
+extern s32 SEQ_PATTERN_PhraseCapture(u8 n);
+extern s32 SEQ_PATTERN_PhraseRecall(u8 n);
+extern s32 SEQ_PATTERN_PhrasePresent(u8 n);
+extern s32 SEQ_PATTERN_PhraseLastRecalled(void);
+extern void SEQ_PATTERN_PhraseResetState(void);
+
 extern s32 SEQ_PATTERN_PeekName(seq_pattern_t pattern, char *pattern_name);
 extern s32 SEQ_PATTERN_PeekPatternsOfGroup(seq_pattern_t pattern);
 

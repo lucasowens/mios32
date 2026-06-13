@@ -67,6 +67,13 @@ u32 seq_pattern_writeback_count;
 // that boot debris over slots that never sounded.
 static u8 pattern_loaded;
 
+// PHRASES — session-scoped occupancy of the MBSEQ_PH.V4 snapshot library: bit n
+// set once phrase n has been captured this session (Stage A; cross-session probe
+// is Stage B). `last_recalled_phrase` (-1 = none) tracks the "current" phrase for
+// the Stage B LEDs. Cleared by SEQ_PATTERN_PhraseResetState on session load/reset.
+static u16 phrase_present_mask;
+static s8 last_recalled_phrase;
+
 /////////////////////////////////////////////////////////////////////////////
 // Initialisation
 /////////////////////////////////////////////////////////////////////////////
@@ -79,7 +86,9 @@ s32 SEQ_PATTERN_Init(u32 mode)
   seq_pattern_dirty = 0;
   seq_pattern_writeback_count = 0;
   pattern_loaded = 0;
-	
+  phrase_present_mask = 0;
+  last_recalled_phrase = -1;
+
   // pre-init pattern numbers
   u8 group;
   for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
@@ -229,29 +238,46 @@ s32 SEQ_PATTERN_AnchorPresent(void)
 // save, at lower frequency. The failure is surfaced as a negative return
 // (cmd_checkpoint -> ok=0); the caller must heed it before trusting a later
 // REVERT. Atomic temp+rename is the fix if this ever bites in practice.
-s32 SEQ_PATTERN_Checkpoint(void)
+// Shared write half of CHECKPOINT and phrase-capture: snapshot all four live
+// groups into a sentinel bank, lazy-creating the file on first use. `base_pattern`
+// selects the destination block (anchor = 0; phrase N = 4N). Groups are written
+// ASCENDING from base_pattern so a freshly-created file extends contiguously for
+// the anchor (base 0); for phrases captured out of order f_lseek expands the file
+// to the target offset (the written records are well-defined — only never-written
+// gaps hold undefined content, which the occupancy mask keeps us from reading).
+// Reads live state only — leaves seq_pattern_dirty untouched (not a working-slot
+// save). Partial-write exposure (accepted POC cost): a mid-loop SD failure leaves
+// a partial/mixed snapshot; surfaced as a negative return for the caller to heed.
+static s32 SEQ_PATTERN_SnapshotWrite(u8 bank, u8 base_pattern)
 {
   s32 status;
 
   MUTEX_SDCARD_TAKE;
 
-  // lazy create: open the session's anchor, and if absent create-then-open
-  status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+  // lazy create: open the session's sentinel bank, create-then-open if absent
+  status = SEQ_FILE_B_Open(seq_file_session_name, bank);
   if( status < 0 ) {
-    if( (status=SEQ_FILE_B_Create(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK)) >= 0 )
-      status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+    if( (status=SEQ_FILE_B_Create(seq_file_session_name, bank)) >= 0 )
+      status = SEQ_FILE_B_Open(seq_file_session_name, bank);
   }
 
   if( status >= 0 ) {
     u8 group;
     for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
-      s32 err = SEQ_FILE_B_PatternWrite(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK, group, group, 1);
+      s32 err = SEQ_FILE_B_PatternWrite(seq_file_session_name, bank, base_pattern + group, group, 1);
       if( err < 0 )
         status = err;
     }
   }
 
   MUTEX_SDCARD_GIVE;
+
+  return status;
+}
+
+s32 SEQ_PATTERN_Checkpoint(void)
+{
+  s32 status = SEQ_PATTERN_SnapshotWrite(SEQ_FILE_B_ANCHOR_BANK, 0);
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] CHECKPOINT status %d", SEQ_BPM_TickGet(), status);
@@ -273,15 +299,24 @@ s32 SEQ_PATTERN_Checkpoint(void)
 // bar-aligned restart. Sets every group dirty afterward (live now diverges
 // from the working slot — the next switch writes the reverted state into the
 // slot, the inversion working normally).
-s32 SEQ_PATTERN_Revert(void)
+// Shared read half of REVERT and phrase-recall: restore all four groups' live
+// state (incl. generator state via the V4 ext tag) from a sentinel-bank snapshot.
+// `base_pattern` selects the source block (anchor = 0; phrase N = 4N). Refuses
+// cleanly (no live change) when the file is absent. Restores live RAM via
+// SEQ_FILE_B_PatternRead directly — NOT SEQ_PATTERN_Load — so seq_pattern[group]
+// keeps pointing at the group's real working slot (the sentinel is a fifth bank;
+// repointing the live group at it would corrupt the working-slot identity and the
+// next writeback would clobber the snapshot). Then the SEQ_CORE_LoadTrackFromSlot
+// fan generalized to all 16 tracks, and every group set dirty+loaded LAST (the
+// inversion: the next switch writes the restored state into the working slots).
+static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern)
 {
   s32 status;
 
-  // refuse cleanly if the current session has no anchor (no live change). This
-  // also (re-)resolves the anchor file/handle for the current session before
-  // the reads below.
+  // refuse cleanly if the current session has no such file (no live change). This
+  // also (re-)resolves the file/handle for the current session before the reads.
   MUTEX_SDCARD_TAKE;
-  status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_ANCHOR_BANK);
+  status = SEQ_FILE_B_Open(seq_file_session_name, bank);
   MUTEX_SDCARD_GIVE;
   if( status < 0 )
     return status; // SEQ_FILE_B_ERR_NO_FILE / FILE open error -> caller refuses
@@ -300,7 +335,7 @@ s32 SEQ_PATTERN_Revert(void)
   {
     u8 group;
     for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
-      s32 err = SEQ_FILE_B_PatternRead(SEQ_FILE_B_ANCHOR_BANK, group, group, 0);
+      s32 err = SEQ_FILE_B_PatternRead(bank, base_pattern + group, group, 0);
       if( err < 0 )
         status = err;
     }
@@ -352,11 +387,91 @@ s32 SEQ_PATTERN_Revert(void)
   MIOS32_IRQ_Enable();
 
   // bar-aligned restart of all tracks (pull precedent; also delivers RATOPC's
-  // musical intent — a mid-jam REVERT lands on the next bar, not off-phase)
+  // musical intent — a mid-jam restore lands on the next bar, not off-phase)
   SEQ_CORE_ManualSynchToMeasure(0xffff);
+
+  return status;
+}
+
+s32 SEQ_PATTERN_Revert(void)
+{
+  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0);
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] REVERT status %d", SEQ_BPM_TickGet(), status);
+
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// PHRASES — the snapshot library ("a set is a path"). A phrase is a whole-
+// organism snapshot, capture/recall generalizing CHECKPOINT/REVERT from the one
+// anchor to SEQ_FILE_B_NUM_PHRASES named slots in the MBSEQ_PH.V4 sentinel bank
+// (phrase N -> patterns 4N..4N+3). Faithful (par+trg+CC+generators ride the V4
+// ext tag), drift-free, and outside every for(bank<NUM_BANKS) loop.
+//
+// Occupancy is a session-scoped RAM mask set on capture (Stage A). Recall refuses
+// an un-captured phrase before touching SD. Cross-session occupancy (probe the
+// file on session load) + state LEDs are Stage B; the phrase DATA itself persists
+// faithfully in the file regardless of the mask.
+/////////////////////////////////////////////////////////////////////////////
+
+// 1 if phrase n has been captured this session, 0 otherwise.
+s32 SEQ_PATTERN_PhrasePresent(u8 n)
+{
+  if( n >= SEQ_FILE_B_NUM_PHRASES )
+    return 0;
+  return (phrase_present_mask & (1 << n)) ? 1 : 0;
+}
+
+// last phrase recalled this session (-1 = none) — for the Stage B "current" LED.
+s32 SEQ_PATTERN_PhraseLastRecalled(void)
+{
+  return last_recalled_phrase;
+}
+
+// clear session-scoped phrase occupancy (called on session load + harness reset).
+void SEQ_PATTERN_PhraseResetState(void)
+{
+  phrase_present_mask = 0;
+  last_recalled_phrase = -1;
+}
+
+// CAPTURE: snapshot the live organism into phrase n's four group-records.
+s32 SEQ_PATTERN_PhraseCapture(u8 n)
+{
+  if( n >= SEQ_FILE_B_NUM_PHRASES )
+    return -1;
+
+  s32 status = SEQ_PATTERN_SnapshotWrite(SEQ_FILE_B_PHRASE_BANK, 4 * n);
+
+  if( status >= 0 )
+    phrase_present_mask |= (1 << n);
+
+  if( seq_pattern_log_load_time )
+    DEBUG_MSG("[SEQ_PATTERN:%d] PHRASE CAPTURE %d status %d", SEQ_BPM_TickGet(), n, status);
+
+  return status;
+}
+
+// RECALL: restore the live organism from phrase n (refuses an un-captured phrase).
+s32 SEQ_PATTERN_PhraseRecall(u8 n)
+{
+  if( n >= SEQ_FILE_B_NUM_PHRASES )
+    return -1;
+
+  // refuse before any SD op if this phrase was never captured this session
+  if( !(phrase_present_mask & (1 << n)) )
+    return SEQ_FILE_B_ERR_NO_FILE;
+
+  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n);
+
+  if( status >= 0 )
+    last_recalled_phrase = n;
+
+  if( seq_pattern_log_load_time )
+    DEBUG_MSG("[SEQ_PATTERN:%d] PHRASE RECALL %d status %d", SEQ_BPM_TickGet(), n, status);
 
   return status;
 }

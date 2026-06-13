@@ -71,6 +71,9 @@ from .sysex import (
     CMD_CHECKPOINT,
     CMD_REVERT,
     CMD_ANCHOR_PRESENT,
+    CMD_PHRASE_CAPTURE,
+    CMD_PHRASE_RECALL,
+    CMD_PHRASE_PRESENT,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -1150,6 +1153,52 @@ class Board:
             raise RuntimeError(f"short ANCHOR_PRESENT reply: {payload!r}")
         if payload[1] != CMD_STATUS_OK:
             raise RuntimeError(f"ANCHOR_PRESENT dispatch status {payload[1]:#04x}")
+        return payload[0] == 1
+
+    def phrase_capture(self, n: int, timeout: float = 12.0) -> bool:
+        """PHRASES: snapshot the live organism (incl. generator state) into phrase
+        n's four group-records in MBSEQ_PH.V4, lazy-creating the file. CHECKPOINT
+        generalized to N slots. Returns True on success; the in-RAM occupancy bit
+        for phrase n is set on success. Generous timeout for the lazy create."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_CAPTURE, bytes([n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_CAPTURE, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short PHRASE_CAPTURE reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_CAPTURE dispatch status {payload[1]:#04x}")
+        return payload[0] == CMD_STATUS_OK
+
+    def phrase_recall(self, n: int, timeout: float = 12.0) -> bool:
+        """PHRASES: restore the live organism from phrase n (REVERT generalized)
+        and set every group dirty. Returns True on success; returns False ONLY for
+        the clean refuse of an un-captured phrase (dispatch status 0x03). A genuine
+        I/O failure (phrase present but the restore returned an error) RAISES, so
+        it surfaces loudly instead of masquerading as a no-op refuse."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_RECALL, bytes([n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_RECALL, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short PHRASE_RECALL reply: {payload!r}")
+        ok, status = payload[0], payload[1]
+        if status == 0x03:
+            return False  # clean refuse: phrase not captured this session
+        if status != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_RECALL dispatch status {status:#04x}")
+        if ok != CMD_STATUS_OK:
+            raise RuntimeError("PHRASE_RECALL failed: phrase present but restore returned an error")
+        return True
+
+    def phrase_present(self, n: int, timeout: float = 4.0) -> bool:
+        """PHRASES: True if phrase n has been captured this session (the in-RAM
+        occupancy mask; cross-session probe is Stage B)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_PRESENT, bytes([n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_PRESENT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short PHRASE_PRESENT reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_PRESENT dispatch status {payload[1]:#04x}")
         return payload[0] == 1
 
     def pattern_change(

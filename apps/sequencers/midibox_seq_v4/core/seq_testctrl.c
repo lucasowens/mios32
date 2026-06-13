@@ -87,6 +87,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_CHECKPOINT           0x77
 #define CMD_REVERT               0x78
 #define CMD_ANCHOR_PRESENT       0x79
+#define CMD_PHRASE_CAPTURE       0x7a
+#define CMD_PHRASE_RECALL        0x7b
+#define CMD_PHRASE_PRESENT       0x7c
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -399,6 +402,13 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
   MIOS32_IRQ_Disable();
   seq_pattern_dirty = 0;
   MIOS32_IRQ_Enable();
+
+  // PHRASES: a harness reset is a baseline — clear session-scoped phrase
+  // occupancy so a phrase captured by a prior test can't masquerade as present
+  // (the "recall refuses an uncaptured phrase" pin needs a clean slate). The
+  // phrase DATA on SD is untouched; only the in-RAM occupancy mask resets. Tests
+  // must therefore not reset between a capture and its recall.
+  SEQ_PATTERN_PhraseResetState();
 
   u8 reply[2] = { flags, 0x01 };
   send_reply(port, CMD_RESET_STATE, reply, sizeof(reply));
@@ -1499,6 +1509,58 @@ static void cmd_anchor_present(mios32_midi_port_t port)
 }
 
 
+// CMD_PHRASE_CAPTURE — PHRASES bundle. Payload: [n]. Snapshots the live organism
+// into phrase n (4 group-record SD writes into MBSEQ_PH.V4, lazy-created).
+// CHECKPOINT generalized to N slots. Reply payload: [ok, status].
+static void cmd_phrase_capture(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 reply[2];
+  if( len < 1 ) {
+    reply[0] = 0x00; reply[1] = 0x02; // malformed
+  } else {
+    s32 r = SEQ_PATTERN_PhraseCapture(payload[0]);
+    reply[0] = (r >= 0) ? 0x01 : 0x00;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_PHRASE_CAPTURE, reply, sizeof(reply));
+}
+
+
+// CMD_PHRASE_RECALL — PHRASES bundle. Payload: [n]. Restores the live organism
+// from phrase n (REVERT generalized), then sets every group dirty. Refuses an
+// un-captured phrase cleanly: ok=0, status=0x03 — distinct from an I/O failure
+// (ok=0, status=0x01), mirroring CMD_REVERT. Reply payload: [ok, status].
+static void cmd_phrase_recall(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 reply[2];
+  if( len < 1 ) {
+    reply[0] = 0x00; reply[1] = 0x02; // malformed
+  } else if( SEQ_PATTERN_PhrasePresent(payload[0]) <= 0 ) {
+    reply[0] = 0x00; reply[1] = 0x03; // clean refuse: phrase not captured
+  } else {
+    s32 r = SEQ_PATTERN_PhraseRecall(payload[0]);
+    reply[0] = (r >= 0) ? 0x01 : 0x00;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_PHRASE_RECALL, reply, sizeof(reply));
+}
+
+
+// CMD_PHRASE_PRESENT — PHRASES bundle. Payload: [n]. 1 if phrase n has been
+// captured this session. Reply payload: [present, status].
+static void cmd_phrase_present(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 reply[2];
+  if( len < 1 ) {
+    reply[0] = 0x00; reply[1] = 0x02; // malformed
+  } else {
+    reply[0] = (SEQ_PATTERN_PhrasePresent(payload[0]) > 0) ? 0x01 : 0x00;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_PHRASE_PRESENT, reply, sizeof(reply));
+}
+
+
 // CMD_PATTERN_LOAD payload: [group, bank, pattern]
 // Reply payload: [group, bank, pattern, load_ok, dispatch_status]
 //   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
@@ -2012,6 +2074,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_ANCHOR_PRESENT:
             cmd_anchor_present(port);
+            break;
+          case CMD_PHRASE_CAPTURE:
+            cmd_phrase_capture(port, payload_buf, payload_len);
+            break;
+          case CMD_PHRASE_RECALL:
+            cmd_phrase_recall(port, payload_buf, payload_len);
+            break;
+          case CMD_PHRASE_PRESENT:
+            cmd_phrase_present(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

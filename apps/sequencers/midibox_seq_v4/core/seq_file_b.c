@@ -183,6 +183,13 @@ static seq_file_b_info_t seq_file_b_info[SEQ_FILE_B_NUM_BANKS];
 // session, so it always tracks the live session (the file is per-session).
 static seq_file_b_info_t seq_file_anc_info;
 
+// PHRASES bundle — the snapshot library's parallel info slot (see
+// SEQ_FILE_B_PHRASE_BANK), kept OUT of seq_file_b_info[] for the same reason as
+// the anchor: it must never join the user-bank load/unload/save loops. Opened/
+// created lazily by SEQ_PATTERN_PhraseCapture / _PhraseRecall against the
+// current session.
+static seq_file_b_info_t seq_file_phr_info;
+
 static u8 cached_pattern_name[21];
 static u8 cached_bank;
 static u8 cached_pattern;
@@ -198,6 +205,8 @@ static seq_file_b_info_t *SEQ_FILE_B_InfoPtr(u8 bank)
 {
   if( bank == SEQ_FILE_B_ANCHOR_BANK )
     return &seq_file_anc_info;
+  if( bank == SEQ_FILE_B_PHRASE_BANK )
+    return &seq_file_phr_info;
   if( bank < SEQ_FILE_B_NUM_BANKS )
     return &seq_file_b_info[bank];
   return NULL;
@@ -215,6 +224,10 @@ static void SEQ_FILE_B_BuildPath(char *filepath, char *session, u8 bank)
 {
   if( bank == SEQ_FILE_B_ANCHOR_BANK )
     sprintf(filepath, "%s/%s/MBSEQ_AN.V4", SEQ_FILE_SESSION_PATH, session);
+  else if( bank == SEQ_FILE_B_PHRASE_BANK )
+    // base "MBSEQ_PH" is 8 chars — within the FatFs _USE_LFN=0 8.3 limit (the
+    // same constraint that forced MBSEQ_ANC -> MBSEQ_AN in FEARLESS).
+    sprintf(filepath, "%s/%s/MBSEQ_PH.V4", SEQ_FILE_SESSION_PATH, session);
   else
     sprintf(filepath, "%s/%s/MBSEQ_B%d.V4", SEQ_FILE_SESSION_PATH, session, bank+1);
 }

@@ -28,6 +28,18 @@
 // auto-loaded, never written by a session save, and not user-navigable.
 #define SEQ_FILE_B_ANCHOR_BANK 0xfe
 
+// PHRASES bundle: the snapshot library rides the same bank record format as a
+// second internal sentinel "bank" (file MBSEQ_PH.V4), holding 16 whole-organism
+// phrases laid out as 16 * 4 group-records (phrase N -> patterns 4N..4N+3).
+// Like the anchor it is OUTSIDE 0..NUM_BANKS-1 so every for(bank<NUM_BANKS) loop
+// skips it: never auto-loaded/saved, not user-navigable, survives session
+// writeback untouched. Capture = CHECKPOINT generalized; recall = REVERT
+// generalized (see SEQ_PATTERN_PhraseCapture / _PhraseRecall).
+#define SEQ_FILE_B_PHRASE_BANK 0xfd
+
+// 16 phrases, each a 4-group snapshot -> exactly fills a 64-pattern bank.
+#define SEQ_FILE_B_NUM_PHRASES 16
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
