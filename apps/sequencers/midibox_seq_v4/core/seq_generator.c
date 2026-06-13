@@ -431,6 +431,84 @@ s32 SEQ_GENERATOR_Undo(void)
 }
 
 
+/////////////////////////////////////////////////////////////////////////////
+// FEARLESS SWITCHING Stage B — persistence primitives (gen state is slot
+// content; see seq_generator.h for the contracts).
+/////////////////////////////////////////////////////////////////////////////
+
+s32 SEQ_GENERATOR_TrackClear(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  u8 i;
+  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
+    if( pool[i].in_use && pool[i].track == track )
+      memset(&pool[i], 0, sizeof(pool[i]));
+  }
+  memset(pool_index[track], 0xFF, SEQ_GENERATOR_INSTRUMENTS);
+  return 0;
+}
+
+
+s32 SEQ_GENERATOR_SlotSet(u8 track, u8 instrument, const seq_generator_t *src)
+{
+  if( src == NULL ) return -2;
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -2;
+  if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
+
+  // Same defensive collapse as Engage: a par_layer the just-loaded geometry
+  // doesn't have falls back to the track's linked Note layer.
+  u8 par_layer = src->par_layer;
+  if( par_layer >= SEQ_PAR_NumLayersGet(track) ) {
+    seq_cc_trk_t *tcc = &seq_cc_trk[track];
+    if( tcc->link_par_layer_note < 0 ) return -3;
+    par_layer = (u8)tcc->link_par_layer_note;
+  }
+
+  seq_generator_t *g;
+  u8 ix = pool_index[track][instrument];
+  if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
+    g = &pool[ix];
+  } else {
+    g = alloc_slot();
+    if( g == NULL ) return -1;
+    pool_index[track][instrument] = (u8)(g - pool);
+  }
+
+  *g = *src;
+  g->in_use     = 1;
+  g->track      = track;
+  g->instrument = instrument;
+  g->par_layer  = par_layer;
+  return 0;
+}
+
+
+u8 SEQ_GENERATOR_TrackSnapshot(u8 track, seq_generator_t *buf, u8 max)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS || buf == NULL ) return 0;
+  u8 count = 0;
+  u8 instr;
+  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS && count<max; ++instr) {
+    seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+    if( g != NULL )
+      buf[count++] = *g;
+  }
+  return count;
+}
+
+
+s32 SEQ_GENERATOR_TrackRestore(u8 track, const seq_generator_t *buf, u8 count)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  SEQ_GENERATOR_TrackClear(track);
+  s32 status = 0;
+  u8 i;
+  for(i=0; i<count; ++i)
+    status |= SEQ_GENERATOR_SlotSet(track, buf[i].instrument, &buf[i]);
+  return status;
+}
+
+
 void SEQ_GENERATOR_ForceRewrite(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS ) return;

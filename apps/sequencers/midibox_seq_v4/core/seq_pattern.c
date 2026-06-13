@@ -32,6 +32,7 @@
 #include "seq_statistics.h"
 #include "seq_song.h"
 #include "seq_mixer.h"
+#include "seq_generator.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -534,6 +535,18 @@ s32 SEQ_PATTERN_Fix(u8 group, seq_pattern_t pattern)
   MIOS32_IRQ_Disable();
   seq_pattern_dirty &= ~(1 << group);
   MIOS32_IRQ_Enable();
+
+  // Stage B: the read seeded the fixed record's generators into the pool
+  // (correct for the faithful write-back above) — but left engaged, they'd
+  // mutate the trampled RAM through SEQ_PAR_Set, re-dirty the group, and a
+  // later switch would auto-commit the debris. Same trample rule as the
+  // dirty bit.
+  {
+    u8 t;
+    u8 base = group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
+    for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t)
+      SEQ_GENERATOR_TrackClear(base + t);
+  }
 
   return status;
 }

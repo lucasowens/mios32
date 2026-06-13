@@ -33,6 +33,7 @@
 #include "seq_par.h"
 #include "seq_trg.h"
 #include "seq_pattern.h"
+#include "seq_generator.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -59,6 +60,7 @@
 #define SEQ_FILE_B_TRK_EXT_TAG_V1       0x01  // anchors only (legacy)
 #define SEQ_FILE_B_TRK_EXT_TAG_V2       0x02  // ext CCs 0x80..0x95 + anchors
 #define SEQ_FILE_B_TRK_EXT_TAG_V3       0x03  // ext CCs 0x80..0x9f (adds chord-mask 0x96..0x99 + tension GRIP 0x9a) + anchors
+#define SEQ_FILE_B_TRK_EXT_TAG_V4       0x04  // V3 payload + generator sub-block (FEARLESS SWITCHING Stage B)
 
 #define SEQ_FILE_B_TRK_EXT_CC_FIRST     0x80
 #define SEQ_FILE_B_TRK_EXT_CC_LAST      0x9f   // widened past GRIP (0x9a); a clean boundary with headroom
@@ -71,10 +73,25 @@
 #define SEQ_FILE_B_TRK_EXT_V1_SIZE      (1 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
 #define SEQ_FILE_B_TRK_EXT_V2_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT_V2 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
 #define SEQ_FILE_B_TRK_EXT_V3_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
-// Slots reserve room for the CURRENT (V3) ext block at create time. Banks created
-// by older firmware reserved only V2_SIZE, so write_ext skips them (GRIP won't
-// persist there) — recreate the bank (CMD_BANK_CREATE) to get V3-sized slots.
-#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V3_SIZE
+
+// V4 generator sub-block (FEARLESS SWITCHING Stage B — "the organism comes
+// back alive"): appended after the V3 payload. Fixed-size region — count byte
+// + SEQ_GENERATOR_PERSIST_SLOTS entry slots, unused entries zero-filled — so
+// the per-track ext stride stays constant (SEQ_FILE_B_TrackRead indexes ext
+// blocks by stride). Entry = 9 header bytes (instrument, par_layer, engaged,
+// range_min/max, rate, depth, contour, anchor_valid) + loop + locks + anchor
+// + mult = 177 bytes.
+#define SEQ_FILE_B_TRK_EXT_GEN_ENTRY_SIZE (9 + SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_LOCKS_BYTES \
+                                           + SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_MULT_BYTES)  // 177
+#define SEQ_FILE_B_TRK_EXT_GEN_BLOCK_SIZE (1 + SEQ_GENERATOR_PERSIST_SLOTS*SEQ_FILE_B_TRK_EXT_GEN_ENTRY_SIZE)  // 709
+#define SEQ_FILE_B_TRK_EXT_V4_SIZE      (SEQ_FILE_B_TRK_EXT_V3_SIZE + SEQ_FILE_B_TRK_EXT_GEN_BLOCK_SIZE)  // 806
+
+// Slots reserve room for the CURRENT (V4) ext block at create time. Banks
+// created by older firmware reserved only the older sizes — the write path
+// degrades per record: V4 if the slot has room, else V3 (gen state won't
+// persist there), else no ext at all. Recreate the session/bank
+// (CMD_SESSION_CREATE / CMD_BANK_CREATE) to get V4-sized slots.
+#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V4_SIZE
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -422,6 +439,127 @@ s32 SEQ_FILE_B_Open(char *session, u8 bank)
 // reads a pattern from bank into given group
 // returns < 0 on errors (error codes are documented in seq_file.h)
 /////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////
+// V4 generator sub-block (Stage B) — shared by PatternRead and TrackRead.
+// Reads the count byte + entries at the current file position and re-seeds
+// dst_track's generator pool slots (the caller has already cleared them).
+// Always leaves the file position at the end of the fixed-size sub-block
+// regardless of count, so the per-track stride stays aligned. Pool-full /
+// invalid entries are skipped with a debug note — the loop keeps streaming
+// so position stays consistent.
+/////////////////////////////////////////////////////////////////////////////
+static s32 PatternGenBlockRead(u8 dst_track)
+{
+  u8 count = 0;
+  s32 status = FILE_ReadByte(&count);
+  if( status < 0 )
+    return status;
+
+  u32 entries_base = FILE_ReadGetCurrentPosition();
+
+  if( count > SEQ_GENERATOR_PERSIST_SLOTS ) {
+#if DEBUG_VERBOSE_LEVEL >= 1
+    DEBUG_MSG("[SEQ_FILE_B] gen sub-block count %d invalid (max %d) - skipped\n", count, SEQ_GENERATOR_PERSIST_SLOTS);
+#endif
+    count = 0; // corrupt count: seed nothing, realign below
+  }
+
+  u8 e;
+  for(e=0; e<count && status >= 0; ++e) {
+    seq_generator_t g;
+    memset(&g, 0, sizeof(g));
+
+    u8 flag;
+    status |= FILE_ReadByte(&g.instrument);
+    status |= FILE_ReadByte(&g.par_layer);
+    status |= FILE_ReadByte(&flag); g.engaged = flag ? 1 : 0;
+    status |= FILE_ReadByte(&g.range_min);
+    status |= FILE_ReadByte(&g.range_max);
+    status |= FILE_ReadByte(&g.mutation_rate);
+    status |= FILE_ReadByte(&g.mutation_depth);
+    status |= FILE_ReadByte(&g.contour_shape);
+    status |= FILE_ReadByte(&flag); g.anchor_valid = flag ? 1 : 0;
+    status |= FILE_ReadBuffer(g.loop, SEQ_GENERATOR_LOOP_LEN);
+    status |= FILE_ReadBuffer(g.locks, SEQ_GENERATOR_LOCKS_BYTES);
+    status |= FILE_ReadBuffer(g.anchor, SEQ_GENERATOR_LOOP_LEN);
+    status |= FILE_ReadBuffer(g.mult, SEQ_GENERATOR_MULT_BYTES);
+
+    if( status >= 0 ) {
+      s32 r = SEQ_GENERATOR_SlotSet(dst_track, g.instrument, &g);
+      if( r < 0 ) {
+#if DEBUG_VERBOSE_LEVEL >= 1
+	DEBUG_MSG("[SEQ_FILE_B] gen re-seed refused on track %d instr %d (status %d)\n", dst_track+1, g.instrument, r);
+#endif
+      }
+    }
+  }
+
+  // realign to the end of the fixed-size region (skips zero-filled entries)
+  if( status >= 0 )
+    status |= FILE_ReadSeek(entries_base + SEQ_GENERATOR_PERSIST_SLOTS*SEQ_FILE_B_TRK_EXT_GEN_ENTRY_SIZE);
+
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// V4 generator sub-block write — serializes src_track's pool slots (up to the
+// persist cap, instrument-ascending) at the current write position and
+// zero-fills the unused entry slots so the region size is constant. Slots
+// beyond the cap are dropped with a debug note (typical live use is one
+// generator per track; the cap exists for drum tracks).
+/////////////////////////////////////////////////////////////////////////////
+static s32 PatternGenBlockWrite(u8 src_track)
+{
+  seq_generator_t *gens[SEQ_GENERATOR_PERSIST_SLOTS];
+  u8 entries = 0;
+  u8 dropped = 0;
+
+  u8 instr;
+  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS; ++instr) {
+    seq_generator_t *g = SEQ_GENERATOR_Get(src_track, instr);
+    if( g == NULL )
+      continue;
+    if( entries < SEQ_GENERATOR_PERSIST_SLOTS )
+      gens[entries++] = g;
+    else
+      ++dropped;
+  }
+
+  if( dropped ) {
+#if DEBUG_VERBOSE_LEVEL >= 1
+    DEBUG_MSG("[SEQ_FILE_B] track %d has %d generators beyond the persist cap (%d) - not saved\n", src_track+1, dropped, SEQ_GENERATOR_PERSIST_SLOTS);
+#endif
+  }
+
+  s32 status = FILE_WriteByte(entries);
+
+  u8 e;
+  for(e=0; e<entries; ++e) {
+    seq_generator_t *g = gens[e];
+    status |= FILE_WriteByte(g->instrument);
+    status |= FILE_WriteByte(g->par_layer);
+    status |= FILE_WriteByte(g->engaged ? 1 : 0);
+    status |= FILE_WriteByte(g->range_min);
+    status |= FILE_WriteByte(g->range_max);
+    status |= FILE_WriteByte(g->mutation_rate);
+    status |= FILE_WriteByte(g->mutation_depth);
+    status |= FILE_WriteByte(g->contour_shape);
+    status |= FILE_WriteByte(g->anchor_valid ? 1 : 0);
+    status |= FILE_WriteBuffer((u8 *)g->loop, SEQ_GENERATOR_LOOP_LEN);
+    status |= FILE_WriteBuffer((u8 *)g->locks, SEQ_GENERATOR_LOCKS_BYTES);
+    status |= FILE_WriteBuffer((u8 *)g->anchor, SEQ_GENERATOR_LOOP_LEN);
+    status |= FILE_WriteBuffer((u8 *)g->mult, SEQ_GENERATOR_MULT_BYTES);
+  }
+
+  int pad = (SEQ_GENERATOR_PERSIST_SLOTS - entries) * SEQ_FILE_B_TRK_EXT_GEN_ENTRY_SIZE;
+  while( pad-- > 0 )
+    status |= FILE_WriteByte(0x00);
+
+  return status;
+}
+
+
 s32 SEQ_FILE_B_PatternRead(u8 bank, u8 pattern, u8 target_group, u16 remix_map)
 {
   if( bank >= SEQ_FILE_B_NUM_BANKS )
@@ -611,6 +749,13 @@ DEBUG_MSG("Skipping Track %d\n", track);
       // finally update CC links again, because some of them depend on SEQ_PAR_NumLayersGet()!!!
       SEQ_CC_LinkUpdate(track);
 
+      // Stage B — gen state is slot content: the track's content was just
+      // replaced wholesale, so its generators go with it. A V4 ext block
+      // below re-seeds them from the record; a V1-V3/absent block means the
+      // slot has no organism and the track comes back generator-less.
+      // (Remix-skipped tracks keep their generators, same as their content.)
+      SEQ_GENERATOR_TrackClear(track);
+
     }
   }
 
@@ -629,8 +774,10 @@ DEBUG_MSG("Skipping Track %d\n", track);
     if( FILE_ReadByte(&first_tag) >= 0 ) {
       FILE_ReadSeek(peek_pos); // rewind regardless of what we saw
 
-      u8 per_track_ext_size = 0;
-      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
+      u16 per_track_ext_size = 0;
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V4_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
       else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V2_SIZE;
@@ -648,7 +795,7 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	    u8 tag = 0;
 	    status |= FILE_ReadByte(&tag);
 
-	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
 	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // 32 (0x80..0x9f)
 	      status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
 	      u8 i;
@@ -656,6 +803,8 @@ DEBUG_MSG("Skipping Track %d\n", track);
 		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
 	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	      if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+		status |= PatternGenBlockRead(track);
 	    } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
 	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT_V2];  // 22 frozen (0x80..0x95)
 	      status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2);
@@ -885,6 +1034,14 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
     return SEQ_FILE_B_ERR_READ;
   }
 
+  // Stage B — the pull replaces dst_track's content wholesale, so its
+  // generators go with it; the V4 ext arm below re-seeds from the section's
+  // record (the pull carries the organism). Cleared here, after the mandatory
+  // section committed: every pre-write refusal above leaves the live track —
+  // generators included — untouched, and an ext-phase degrade ("loaded
+  // without ext") correctly yields a generator-less track.
+  SEQ_GENERATOR_TrackClear(dst_track);
+
   // ext block for slot_track: walk the remaining sections to the ext base,
   // peek the shared tag (all tracks within a pattern carry the same tag),
   // then index slot_track's block directly. Absent/unknown tag -> old file,
@@ -918,8 +1075,10 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
     u32 ext_base = FILE_ReadGetCurrentPosition();
     u8 first_tag = 0;
     if( FILE_ReadByte(&first_tag) >= 0 ) {
-      u8 per_track_ext_size = 0;
-      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
+      u16 per_track_ext_size = 0;
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V4_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
       else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V2_SIZE;
@@ -936,7 +1095,7 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 	// corrupt/foreign file (mixed tags are never written): leave the
 	// in-RAM ext values alone
 	if( ext_status >= 0 && tag == first_tag ) {
-	  if( tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	  if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
 	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // 32 (0x80..0x9f)
 	    ext_status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
 	    if( ext_status >= 0 ) {
@@ -945,6 +1104,8 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 		SEQ_CC_Set(dst_track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
 	      ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
 					    SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+	      if( ext_status >= 0 && tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+		ext_status |= PatternGenBlockRead(dst_track);
 	    }
 	  } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
 	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT_V2];  // 22 frozen (0x80..0x95)
@@ -1019,9 +1180,21 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
       num_t_instruments*num_t_layers*t_layer_size;
   }
 
-  u16 ext_pattern_size = num_tracks * SEQ_FILE_B_TRK_EXT_SIZE;
-  u8 write_ext = (base_pattern_size + ext_pattern_size <= info->header.pattern_size);
-  u16 expected_pattern_size = base_pattern_size + (write_ext ? ext_pattern_size : 0);
+  // Ext-block fit arbitration, per record: V4 (gen state) if the slot has
+  // room, else degrade to V3 (today's payload — gen state won't persist),
+  // else no ext at all (pre-V2 slots). All-or-nothing per level so a record
+  // never carries mixed tags.
+  u8 ext_tag = 0;
+  u16 ext_pattern_size = 0;
+  if( base_pattern_size + (u32)num_tracks * SEQ_FILE_B_TRK_EXT_V4_SIZE <= info->header.pattern_size ) {
+    ext_tag = SEQ_FILE_B_TRK_EXT_TAG_V4;
+    ext_pattern_size = num_tracks * SEQ_FILE_B_TRK_EXT_V4_SIZE;
+  } else if( base_pattern_size + (u32)num_tracks * SEQ_FILE_B_TRK_EXT_V3_SIZE <= info->header.pattern_size ) {
+    ext_tag = SEQ_FILE_B_TRK_EXT_TAG_V3;
+    ext_pattern_size = num_tracks * SEQ_FILE_B_TRK_EXT_V3_SIZE;
+  }
+  u8 write_ext = (ext_tag != 0);
+  u16 expected_pattern_size = base_pattern_size + ext_pattern_size;
 
   if( expected_pattern_size > info->header.pattern_size ) {
 #if DEBUG_VERBOSE_LEVEL >= 1
@@ -1147,7 +1320,7 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
   if( write_ext ) {
     track = source_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
     for(track_i=0; track_i<num_tracks; ++track_i, ++track) {
-      status |= FILE_WriteByte(SEQ_FILE_B_TRK_EXT_TAG_V3);
+      status |= FILE_WriteByte(ext_tag);
 
       // ext CC bytes (0x80..0x9f) - robotize + chord-mask + tension GRIP CCs that
       // fall outside the original cc[128] block. SEQ_CC_Get returns -1 for
@@ -1163,6 +1336,10 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
       // per-bar PRNG anchor seeds
       status |= FILE_WriteBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 				 SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
+
+      // V4: generator sub-block — the organism persists with its slot
+      if( ext_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+	status |= PatternGenBlockWrite(track);
     }
   }
 

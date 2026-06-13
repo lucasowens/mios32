@@ -67,6 +67,11 @@
 #define SEQ_GENERATOR_LOCKS_BYTES    (SEQ_GENERATOR_LOOP_LEN / 8)  // 8 — bitmap
 #define SEQ_GENERATOR_MULT_BYTES     (SEQ_GENERATOR_LOOP_LEN / 2)  // 32 — 4 bits/step
 
+// FEARLESS SWITCHING Stage B — how many generator slots per track persist
+// (bank ext-tag V4, track undo, capture trample-restore). Slots beyond the
+// cap stay live in the pool but don't survive a save/restore boundary.
+#define SEQ_GENERATOR_PERSIST_SLOTS  4
+
 // Defaults tuned 2026-05-26 for the techno bass-line use case: narrow
 // one-octave bass range, aggressive mutation, near-full reroll, triangle
 // contour (clusters notes around mid-range). The original phase-E
@@ -245,6 +250,33 @@ extern s32 SEQ_GENERATOR_Snap(u8 track, u8 instrument);
 // press. MULT participates in the rate-gated mutate path only; ROLL ignores
 // it (ROLL is the on-demand override that bypasses rate, depth, and MULT).
 extern s32 SEQ_GENERATOR_MultCycle(u8 track, u8 instrument, u8 step);
+
+// FEARLESS SWITCHING Stage B — gen state is slot content. These are the
+// persistence primitives: a content-replacing load clears the track's
+// generators and re-seeds them from the incoming record; trample/undo flows
+// snapshot and restore them around the live-RAM trample.
+
+// Free every pool slot allocated for `track` (engaged or not). No source
+// write, no undo touch — the par buffer keeps whatever the generator last
+// wrote (or whatever load replaced it with).
+extern s32 SEQ_GENERATOR_TrackClear(u8 track);
+
+// Re-seed one pool slot from persisted state: alloc (or reuse the existing
+// (track, instrument) slot) and copy *src wholesale — loop/locks/anchor/mult,
+// dials, engaged flag. Deliberately NOT Engage: no undo re-snapshot, no
+// ForceRewrite (the par layer loaded alongside already holds the last-written
+// loop — faithful resume). An out-of-range par_layer collapses to the track's
+// linked Note layer (same defensive rule as Engage). Returns 0 on success,
+// -1 pool full, -2 bad args, -3 no Note layer on the track.
+extern s32 SEQ_GENERATOR_SlotSet(u8 track, u8 instrument, const seq_generator_t *src);
+
+// Copy up to `max` allocated slots on `track` into buf (instrument-ascending).
+// Returns the number copied; slots beyond `max` are silently not captured
+// (callers pass SEQ_GENERATOR_PERSIST_SLOTS — same cap as the file format).
+extern u8 SEQ_GENERATOR_TrackSnapshot(u8 track, seq_generator_t *buf, u8 max);
+
+// Clear + re-seed `track` from a TrackSnapshot buffer.
+extern s32 SEQ_GENERATOR_TrackRestore(u8 track, const seq_generator_t *buf, u8 count);
 
 // Test/harness hook — force one mutate cycle on a specific slot,
 // equivalent to what SEQ_GENERATOR_Tick runs when the track wraps to

@@ -67,6 +67,7 @@ from .sysex import (
     CMD_DIRTY_QUERY,
     CMD_DIRTY_SET,
     CMD_PATTERN_CHANGE,
+    CMD_GENERATOR_LOCK_SET,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -142,8 +143,9 @@ class GeneratorState:
     0=mute, 1=0.5×, 2=1×/default, 3=2×).
     `anchor_valid` is True once anchor[] holds a captured snapshot (set at
     auto-anchor on ENGAGE seed and on the ANCHOR gesture). The anchor bytes
-    themselves are not transferred — the wire saves space, and round-tripping
-    SNAP can be verified by comparing loop[] before vs after the gesture.
+    are only transferred when generator_query(..., with_anchor=True) — the
+    Stage B persistence pins need the full slot byte-identical; everything
+    else saves the wire bytes and gets `anchor=None`.
     """
 
     track: int
@@ -158,6 +160,7 @@ class GeneratorState:
     loop: bytes              # 64 bytes
     locks: tuple[bool, ...]  # 64 entries
     mult: tuple[int, ...]    # 64 entries, each 0..15
+    anchor: bytes | None = None  # 64 bytes when requested, else None
 
 
 @dataclass
@@ -1297,19 +1300,23 @@ class Board:
         track: int,
         instrument: int,
         timeout: float = 1.0,
+        with_anchor: bool = False,
     ) -> GeneratorState | None:
         """Read the live state of the generator slot for (track, instrument).
 
         Returns a GeneratorState if a slot is allocated, or None if there is
         no slot. Used by behavioral tests to verify LOCK / ROLL / depth math
-        without needing to capture MIDI.
+        without needing to capture MIDI. with_anchor=True additionally ships
+        anchor[64] (Stage B byte-identical persistence pins).
         """
         if not 0 <= track <= 15:
             raise ValueError(f"track out of range: {track}")
         if not 0 <= instrument <= 15:
             raise ValueError(f"instrument out of range: {instrument}")
         since = time.monotonic() - self._t0
-        self.send_raw(frame(CMD_GENERATOR_QUERY, bytes([track, instrument])))
+        req = bytes([track, instrument, 0x01]) if with_anchor \
+            else bytes([track, instrument])
+        self.send_raw(frame(CMD_GENERATOR_QUERY, req))
         payload = self.wait_for_sysex(
             CMD_GENERATOR_QUERY, timeout=timeout, since=since
         )
@@ -1323,13 +1330,15 @@ class Board:
         if len(payload) < 10:
             raise RuntimeError(f"short GENERATOR_QUERY ok-reply: {payload!r}")
         raw = unpack7(payload[10:])
-        if len(raw) < 104:
+        need = 168 if with_anchor else 104
+        if len(raw) < need:
             raise RuntimeError(
-                f"GENERATOR_QUERY raw underflow: {len(raw)} bytes, need 104"
+                f"GENERATOR_QUERY raw underflow: {len(raw)} bytes, need {need}"
             )
         loop = bytes(raw[:64])
         locks_bitmap = bytes(raw[64:72])
         mult_packed = bytes(raw[72:104])
+        anchor = bytes(raw[104:168]) if with_anchor else None
         locks = tuple(
             bool((locks_bitmap[s >> 3] >> (s & 7)) & 1) for s in range(64)
         )
@@ -1353,7 +1362,45 @@ class Board:
             loop=loop,
             locks=locks,
             mult=mult,
+            anchor=anchor,
         )
+
+    def generator_lock_set(
+        self,
+        track: int,
+        instrument: int,
+        step: int,
+        on: bool,
+        timeout: float = 1.0,
+    ) -> None:
+        """Set/clear the per-step LOCK bit on the (track, instrument) slot.
+
+        Stage B companion to generator_mult_set: lets persistence pins sculpt
+        the lock bitmap deterministically without driving the PITCHGEN page
+        cursor. Raises ValueError if no slot exists or step is out of range.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        if not 0 <= instrument <= 15:
+            raise ValueError(f"instrument out of range: {instrument}")
+        if not 0 <= step <= 63:
+            raise ValueError(f"step out of range: {step}")
+        since = time.monotonic() - self._t0
+        self.send_raw(
+            frame(
+                CMD_GENERATOR_LOCK_SET,
+                bytes([track, instrument, step, 1 if on else 0]),
+            )
+        )
+        payload = self.wait_for_sysex(
+            CMD_GENERATOR_LOCK_SET, timeout=timeout, since=since
+        )
+        if len(payload) < 3:
+            raise RuntimeError(f"short GENERATOR_LOCK_SET reply: {payload!r}")
+        if payload[2] != CMD_STATUS_OK:
+            raise ValueError(
+                f"GENERATOR_LOCK_SET status {payload[2]:#04x} — no slot?"
+            )
 
     def generator_tick_force(
         self,

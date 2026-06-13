@@ -169,6 +169,52 @@ byte-identical, engaged=1, mutation resumes on measure wrap; V3-session
 degrade (no crash, V3 payload intact); cap refusal. By ear: sculpted Turing
 loop survives the round trip *alive*.
 
+*Stage B BUILT 2026-06-12 — compiles clean, 6 HIL pins written
+(`test_genstate_v4.py`), flash + HIL + by-ear pending. As-built deltas from
+the sketch above:*
+- *Gen state is SLOT CONTENT — the load-side semantic change the sketch
+  didn't spell out*: today nothing touches the generator pool on pattern
+  load, so an engaged gen survives a switch and keeps mutating whatever
+  loads under it. Now every content-replacing load (PatternRead per
+  non-remix-skipped track, TrackRead for the pull) runs
+  `SEQ_GENERATOR_TrackClear` then re-seeds from the V4 entries
+  (`SEQ_GENERATOR_SlotSet` — wholesale copy, no Engage: no undo re-snapshot,
+  no ForceRewrite). A gen-less/V1–V3 slot ⇒ the track comes back
+  generator-less. HIL pins for both halves.
+- *V4 layout is FIXED-STRIDE*: V3 payload + count byte +
+  `SEQ_GENERATOR_PERSIST_SLOTS`(4) × 177 B entry slots, unused zero-filled —
+  806 B/track total — because `TrackRead` indexes ext blocks by stride.
+  Entry = 9 header bytes (instrument, par_layer, engaged, range, rate,
+  depth, contour, anchor_valid) + loop[64]+locks[8]+anchor[64]+mult[32].
+- *Write-side fit arbitration is graded V4→V3→none* (not the sketch's single
+  all-or-nothing check): old V3-sized sessions keep persisting their V3
+  payload instead of silently losing ext entirely. Cap overflow + load-side
+  pool-full/invalid entries degrade with DEBUG_MSG, not UI message (POC).
+- *Track-undo and capture-trample carry gen state* (plan said "zero RAM" —
+  wrong): without it, undoing a pull leaves the pulled organism rewriting
+  the restored notes, and `CaptureToSlotTrack`'s staged window would persist
+  the wrong gens. `track_undo` += 4 entries (~724 B CCM);
+  `slottrk_gen_snap` 16 entries (2880 B main RAM). Capture also clears the
+  captured section's gens before the write — a capture is a FREEZE,
+  generator-less by definition (pairs with `SEQ_CC_ResetGenerativeForBounce`).
+- *`SEQ_PATTERN_Fix` clears its group's gens* (same trample rule as its
+  dirty-clear: an engaged debris-gen would re-dirty via `SEQ_PAR_Set` at the
+  next wrap and a later switch would auto-commit the trample).
+- *testctrl*: `GENERATOR_QUERY` grew an optional flags byte (bit0 ⇒ ship
+  anchor[64], 168-raw bundle) and `GENERATOR_LOCK_SET 0x76` lands so pins
+  can sculpt the lock bitmap without the page cursor.
+- *HIL fixture*: V4 round-trips need fresh-format bank records — the `genv4`
+  fixture load-or-creates session GENV4 and restores AUTOTEST per test;
+  AUTOTEST's V3-sized banks ARE the degrade fixture.
+- *Latent (pre-existing, observed not fixed)*: `CaptureToSlotTrack`'s step-6
+  restore memcpys par/trg content but never re-runs `SEQ_PAR_TrackInit` — a
+  dst slot whose geometry differs from the live group leaves stale
+  partitioning. `SlotSet`'s par-layer collapse keeps the gen restore
+  survivable; the content side predates Stage B.
+- *Bug caught at build*: `per_track_ext_size` was u8 in both read paths —
+  806 truncated to 38. Widened to u16 (the -Woverflow warning was the only
+  symptom; V3 ≤ 97 never tripped it).
+
 **Stage C — CHECKPOINT / REVERT (the full loop; bundle GO here).**
 Anchor bank (lazy create); organism-gesture verbs; testctrl
 `CHECKPOINT`/`REVERT`/`ANCHOR_PRESENT`; provisional panel gesture last, by

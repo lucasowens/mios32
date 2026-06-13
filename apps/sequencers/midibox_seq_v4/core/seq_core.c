@@ -1552,6 +1552,12 @@ static u8           slottrk_trg_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_TRG_MAX_
 static char         slottrk_name_snap[20];
 static u8           slottrk_play_section_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
 static u8           slottrk_src_cc[128];
+// Stage B: live generators of the dst group, snapped around the staged
+// load-modify-save — the slot read seeds the SLOT's generators into the pool
+// (so the write-back round-trips them faithfully), and this restore puts the
+// LIVE organisms back afterwards. Persist-cap per track, like the file format.
+static seq_generator_t slottrk_gen_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_GENERATOR_PERSIST_SLOTS];
+static u8              slottrk_gen_count[SEQ_CORE_NUM_TRACKS_PER_GROUP];
 
 /////////////////////////////////////////////////////////////////////////////
 // Fork: capture src_track's computed output into dst_track of slot (bank,
@@ -1602,6 +1608,10 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     memcpy(slottrk_par_snap[t], seq_par_layer_value[dst_base+t], SEQ_PAR_MAX_BYTES);
     memcpy(slottrk_trg_snap[t], seq_trg_layer_value[dst_base+t], SEQ_TRG_MAX_BYTES);
     slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
+    // Stage B: gen state is track content — step 3's read replaces the pool
+    // slots with the SLOT's generators (correct for the step-5 write-back);
+    // snap the live ones so step 6 can put them back.
+    slottrk_gen_count[t] = SEQ_GENERATOR_TrackSnapshot(dst_base+t, slottrk_gen_snap[t], SEQ_GENERATOR_PERSIST_SLOTS);
   }
   memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
   // ...including the pattern-dirty bit: steps 3/4 replay CCs through the
@@ -1635,6 +1645,10 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
     // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
     SEQ_CC_ResetGenerativeForBounce(dst_track);
+    // The captured copy is a FREEZE: generator-less by definition (same intent
+    // as the generative-CC reset above). Clears the slot-read-seeded gens for
+    // this section so the step-5 write persists none for it.
+    SEQ_GENERATOR_TrackClear(dst_track);
 
     // 5. Write the dst group (now carrying the captured track) back to the slot.
     MUTEX_SDCARD_TAKE;
@@ -1649,6 +1663,9 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
     seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
     SEQ_CC_LinkUpdate(dst_base+t);
+    // Stage B: put the LIVE organisms back (clears the slot's gens that rode
+    // the pool through the staged window).
+    SEQ_GENERATOR_TrackRestore(dst_base+t, slottrk_gen_snap[t], slottrk_gen_count[t]);
     // Track 2: steps 3/4 above moved the processor slots (PatternRead replays
     // CCs through SEQ_CC_Set; the CC inherit too) but this restore is a raw
     // memcpy — re-sync the slot bridges so a live Transpose/FTS/LIMIT/GRIP
@@ -1700,7 +1717,11 @@ typedef struct {
   u8 anchors[sizeof(((seq_cc_trk_t *)0)->robotize_bar_anchors)]; // 64
   u8 par[SEQ_PAR_MAX_BYTES];
   u8 trg[SEQ_TRG_MAX_BYTES];
-} seq_core_track_undo_t;   // ~1.65 KB
+  // Stage B: the victim's generators — without these, undoing a pull leaves
+  // the PULLED organism alive rewriting the restored notes at the next wrap.
+  u8 gen_count;
+  seq_generator_t gen[SEQ_GENERATOR_PERSIST_SLOTS];
+} seq_core_track_undo_t;   // ~2.4 KB
 
 static seq_core_track_undo_t CCM_SECTION track_undo;
 
@@ -1733,6 +1754,7 @@ s32 SEQ_CORE_TrackUndoSnapLive(u8 track)
   memcpy(track_undo.anchors, seq_cc_trk[track].robotize_bar_anchors, sizeof(track_undo.anchors));
   memcpy(track_undo.par, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
   memcpy(track_undo.trg, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+  track_undo.gen_count = SEQ_GENERATOR_TrackSnapshot(track, track_undo.gen, SEQ_GENERATOR_PERSIST_SLOTS);
 
   track_undo.valid = 1;
   return 0;
@@ -1775,6 +1797,12 @@ s32 SEQ_CORE_TrackUndoRestore(void)
 
   SEQ_CORE_RenderDirtySet(track);
   SEQ_CC_LinkUpdate(track);
+
+  // Stage B: put the victim's organisms back (and kill whatever the
+  // destructive verb seeded — e.g. the pulled track's generator). After
+  // TrackInit/LinkUpdate so the par-layer validation sees the restored
+  // geometry.
+  SEQ_GENERATOR_TrackRestore(track, track_undo.gen, track_undo.gen_count);
 
   portEXIT_CRITICAL();
 

@@ -1971,6 +1971,32 @@ working detail in `doc/plans/2026-06-11-save-model-groups-performing-curating.md
   the mechanism forks above, plus checkpoint *grain* under organism-primary
   (group vs track vs whole-organism).
 
+**Bounce north-star — capture ALL processing as-heard, reset on the copy (2026-06-12).**
+The user's stated end-state for bounce/freeze: *apply every processor and generator,
+capture the heard output into real notes at the bounce, then turn those processors
+off on the bounced track* (the material is already "processed" — frozen as it
+sounded the moment bounce fired). **This is already the realized model for everything
+in the render stack** (PITCH / CHORD_MASK / TENSION / LIMIT render into the mirror,
+bounce captures the mirror, `ResetGenerativeForBounce` disables them on the copy) **and
+for generators** (the engaged loop is written to source → mirror → captured; FEARLESS
+Stage B's `SEQ_GENERATOR_TrackClear` on the captured section turns the generator off on
+the copy). The north-star is *total* only once the remaining deliberately-emission-time
+effects join the stack: **robotize (the big one), humanize, groove, echo, LFO** — each
+invisible to `OutputActive` today, so each captures un-processed (the §3 born-as-
+processors rule names them).
+- **Robotize → render-stack processor (deferred to its own session, 2026-06-12).**
+  Surfaced by ear during FEARLESS Stage B: bouncing a robotized track freezes the
+  *pre*-robotize line — designed behavior per §3:191-193 / the §8-step-5 deferred list
+  ("random/generative effects stay reset; re-applying would diverge"), but that rested
+  on "you'd never want the heard variation frozen." The user does — same call FORCE_SCALE
+  got (bake-as-heard, then migrated to the stack). The hinge that made the design treat
+  them differently was determinism; this fork's robotize is *anchorable* (per-bar anchor
+  seeds + palette + loop control), so a given bar's variation is reproducible — which is
+  exactly what makes "render the current bar's robotized output deterministically into the
+  mirror" tractable. Scope before coding: probability gating, per-bar anchor/palette/loop
+  state, and the SUSTAIN / ECHO / NOFX flag interactions all have to render deterministically
+  per bar. Reopened next to FORCE_SCALE in §9's freeze-faithfulness lineage.
+
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
 - Window edge-wrap behavior (loop / freeze / hold-last / continue) — decide live.
