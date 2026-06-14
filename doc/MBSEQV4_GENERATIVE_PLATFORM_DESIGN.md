@@ -1784,6 +1784,34 @@ mechanisms provisional — see `doc/plans/2026-06-11-save-model-groups-performin
   brightness driver; velocity-less accent modifier) decided at the workbench by
   ear — the TERRAIN-HANDS bundle.
 
+**2026-06-13 — PHRASES cross-session occupancy + recall "never lose work" (SHIPPED,
+by-ear GO 2026-06-13; HIL 143/143)** — two follow-ons to the Stage-A snapshot library,
+both landed with NO phrase-file format change.
+- **Cross-session probe.** Occupancy is RE-SEEDED from disk on session load
+  (`SEQ_PATTERN_ProbePhrasesOnLoad` replaces the unconditional reset at the
+  `SEQ_FILE_LoadAllFiles` hook), so a reloaded set lights its captured phrases and they
+  recall again — before, the RAM-only mask zeroed on load and the library went dark until
+  re-captured blind. **Probe-by-content**, made safe against the out-of-order-capture
+  `f_lseek` gap (the `SEQ_FILE_B_Create` zero-fill is `#if 0`'d for FatFs, so skipped
+  slots hold UNDEFINED bytes): capture stamps a recognizable EMPTY marker (`num_tracks=0`,
+  `SEQ_FILE_B_PatternWriteEmpty`) into each gap slot below it (walking down, stopping at
+  the nearest present phrase → ascending capture writes zero extra), and the probe
+  (`SEQ_FILE_B_PhraseOccupancyProbe`, fsize-bounded) reads each phrase's base header —
+  occupied iff `num_tracks ∈ [1, NUM_TRACKS_PER_GROUP]`. Single source of truth (the data
+  IS the marker; no second store to desync); also closes the latent out-of-order garbage-gap
+  bug. Chosen over a header occupancy word (offset-shift blast radius across all banks +
+  the anchor) and a sidecar file (desync hazard).
+- **Recall never-lose-work.** A live nudge on a recalled phrase is no longer silently
+  discarded when you recall the next: phrase recall now `WritebackAllDirty` before the
+  snapshot overwrites live (mirrors the pattern-switch `WritebackIfDirty`-before-`Load`;
+  `SnapshotRead` gained a `writeback_dirty_first` flag — **REVERT passes 0**, keeping its
+  deliberate discard-to-checkpoint). **Phrases stay IMMUTABLE** — recall restores the
+  pristine committed snapshot; the nudge lands in the group's working slot (recoverable by
+  pattern-switch), NOT on the phrase. The margin (`seq_core_pattern_switch_margin_ms`) now
+  also covers the recall's all-groups writeback+read; bump if a running recall wobbles at
+  the bar. Two independent adversarial reviews clean; pinned by
+  `test_phrase_occupancy_survives_session_reload` + `test_phrase_recall_preserves_live_edit_to_working_slot`.
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -2049,6 +2077,24 @@ processors rule names them).
   mirror" tractable. Scope before coding: probability gating, per-bar anchor/palette/loop
   state, and the SUSTAIN / ECHO / NOFX flag interactions all have to render deterministically
   per bar. Reopened next to FORCE_SCALE in §9's freeze-faithfulness lineage.
+
+**PHRASES recall semantics — deferred threads (2026-06-13).** The cross-session probe +
+"never lose work" recall shipped (§9 2026-06-13). Two threads left open:
+- **Editable-waypoints recall (NOT chosen — possible pivot).** The shipped model keeps
+  phrases immutable (recall = pristine restore; a live nudge goes to the working slot,
+  not back onto the phrase). The user's *first instinct* was the opposite — switching away
+  from a nudged phrase re-commits the nudge INTO it, so returning to A brings it back
+  (living waypoints). Rejected for v1: it forfeits the pristine-return guarantee and needs
+  a clean "drifted-since-recall" signal — the *same* deferred signal the Stage-B dirty LED
+  wants (today recall itself sets the dirty bit, so it isn't a clean "edited since" signal).
+  Revisit together if the immutable model feels wrong by ear over a longer set.
+- **Transient-SD probe-failure hardening (L1, deferred).** `SEQ_FILE_B_PhraseOccupancyProbe`
+  returns mask=0 on ANY open/read failure; a *transient* read error on an existing phrase
+  file would zero the RAM mask, and a subsequent out-of-order capture's gap-fill could then
+  stamp EMPTY markers over real phrases (data loss). Requires a transient error AND an
+  out-of-order capture before the next reload. Matches the codebase's accepted partial-write
+  posture (disposable SD); fix is to distinguish "no file" (0) from "file unreadable" (<0)
+  and refuse gap-fill on the latter. Build only if it bites.
 
 **Phrase morphing — a third morph model unlocked by the snapshot library (2026-06-13,
 candidate; its own future bundle, NOT built).** Surfaced by the user right after the

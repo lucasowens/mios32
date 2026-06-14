@@ -87,6 +87,17 @@ capture a few phrases, navigate them live) before any UI polish.
    the instrument? If NO-GO, the bundle reshapes here before any UI investment.
 
 ### Stage B — Perform it (two-face + state LEDs)
+
+> **STATUS 2026-06-13 (this increment, SHIPPED + by-ear GO, HIL 143/143; durable record
+> in design §9 2026-06-13):** cross-session occupancy probe DONE — occupancy re-seeds
+> from disk on session load (`SEQ_PATTERN_ProbePhrasesOnLoad`; probe-by-content with
+> capture-time EMPTY markers, no format change). Also added: recall "never lose work" —
+> phrase recall writes back dirty groups to their working slots first (phrases stay
+> immutable; nudge recoverable via pattern-switch). **Still pending in Stage B:** the
+> **dirty/drift LED** (needs a clean "edited-since-recall" signal — recall currently sets
+> the dirty bit, so it isn't that signal yet; same blocker as the editable-waypoints
+> recall pivot in design §10) and phrase **naming** + capture-confirmation message.
+
 - **Two-face recall:** FREEZE-held = frozen tape (clear the recalled tracks'
   generators on recall — reuse FEARLESS Stage-B `SEQ_GENERATOR_TrackClear` path);
   tap = posture (default — generators resume engaged, already what Revert does).

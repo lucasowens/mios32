@@ -234,6 +234,50 @@ def test_phrase_navigation_distinct_slots(genv4):
 
 
 @pytest.mark.hardware
+def test_phrase_recall_preserves_live_edit_to_working_slot(genv4):
+    """FEARLESS 'never lose work' for phrase recall (the chosen semantics for the
+    toggle-and-edit case). Recall A, nudge it live, then recall B: the nudge is
+    written back to group 0's WORKING SLOT before B overwrites live — so it's
+    recoverable, not silently discarded — while phrase A stays a pristine committed
+    snapshot (recall A restores the captured value, NOT the nudge). Mirrors the
+    pattern-switch WritebackIfDirty-before-Load; REVERT deliberately does not."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)  # group 0 parked at SCRATCH_A, clean
+
+    board.cc_set(0, CC.LENGTH, LEN_PHRASE_A)
+    assert board.phrase_capture(PHRASE_A), "capture A should commit"
+    board.cc_set(0, CC.LENGTH, LEN_PHRASE_B)
+    assert board.phrase_capture(PHRASE_B), "capture B should commit"
+
+    # recall A, then nudge live (a value distinct from both phrase markers)
+    assert board.phrase_recall(PHRASE_A), "recall A should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_PHRASE_A
+    board.cc_set(0, CC.LENGTH, LEN_JAM)  # the live nudge that must not be lost
+
+    # recall B -> writeback persists the nudge into group 0's working slot first
+    assert board.phrase_recall(PHRASE_B), "recall B should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_PHRASE_B, "B's snapshot is live now"
+
+    # NEVER LOST: the nudge is recoverable from the working slot. pattern_load is a
+    # RAW load (bypasses the auto-writeback), so it reads SCRATCH_A as it was left.
+    assert board.pattern_load(0, SCRATCH_BANK, SCRATCH_A), "raw-load the working slot"
+    assert board.cc_get(0, CC.LENGTH) == LEN_JAM, (
+        "the nudge made on recalled phrase A must have been written back to group "
+        "0's working slot (FEARLESS never-lose-work)"
+    )
+
+    # A STAYS PRISTINE: recall A restores the CAPTURED value, not the nudge.
+    assert board.phrase_recall(PHRASE_A), "recall A again should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_PHRASE_A, (
+        "phrase A is immutable — recall restores the committed snapshot, not the nudge"
+    )
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
 def test_recall_uncaptured_phrase_refuses(board: Board):
     """Recall of a phrase that was never captured this session refuses cleanly:
     not present, phrase_recall returns False (no exception, no crash, no live
@@ -292,3 +336,64 @@ def test_phrase_present_tracks_capture(genv4):
     assert board.phrase_capture(7), "capture should commit"
     assert board.phrase_present(7), "phrase 7 present after capture"
     assert not board.phrase_present(8), "a different, uncaptured phrase stays absent"
+
+
+@pytest.mark.hardware
+def test_phrase_occupancy_survives_session_reload(genv4):
+    """Cross-session occupancy probe (the gap this increment closes). Before it,
+    the occupancy mask was RAM-only and zeroed on every session load, so a
+    reloaded set went dark and refused EVERY recall until re-captured blind.
+    SEQ_PATTERN_ProbePhrasesOnLoad now re-seeds the mask from MBSEQ_PH.V4 on disk
+    at load (seq_file.c SEQ_FILE_LoadAllFiles), reading each phrase's base-pattern
+    header (num_tracks>0 = occupied).
+
+    Captures 0/3/7 with gaps between them: the gap-fill in SEQ_PATTERN_SnapshotWrite
+    stamps EMPTY markers (num_tracks=0) into slots 1/2/4/5/6, so after reload those
+    must read back ABSENT — not as undefined f_lseek-gap garbage that false-lights.
+    The phrase DATA always persisted; this proves the *knowledge of which slots are
+    real* now survives a reload, and that empty slots still refuse recall."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    # capture three phrases with distinct content markers, leaving gaps between
+    markers = {0: 5, 3: 11, 7: 19}
+    for n, length in markers.items():
+        board.cc_set(0, CC.LENGTH, length)
+        assert board.phrase_capture(n), f"capture {n} should commit"
+    for n in markers:
+        assert board.phrase_present(n), f"phrase {n} present after capture"
+    for empty in (1, 2, 4, 5, 6):
+        assert not board.phrase_present(empty), f"gap slot {empty} absent before reload"
+
+    # THE cross-session event: reload the session. cmd_session_load always re-runs
+    # SEQ_FILE_LoadAllFiles -> SEQ_PATTERN_ProbePhrasesOnLoad (re-seed from disk).
+    board.session_load(GENV4_SESSION, timeout=20.0)
+
+    # occupancy survived the reload (exactly the slots the old code left dark)
+    for n in markers:
+        assert board.phrase_present(n), (
+            f"phrase {n} must survive reload — the cross-session probe should "
+            f"re-seed occupancy from disk"
+        )
+    # gap slots must NOT false-light (the empty-marker, not undefined gap garbage)
+    for empty in (1, 2, 4, 5, 6):
+        assert not board.phrase_present(empty), (
+            f"gap slot {empty} must stay absent after reload (empty-marker, "
+            f"not a false-positive on undefined gap content)"
+        )
+
+    # and each phrase still recalls its OWN snapshot after the reload
+    for n, length in markers.items():
+        assert board.phrase_recall(n), f"recall {n} should commit after reload"
+        assert board.cc_get(0, CC.LENGTH) == length, (
+            f"phrase {n} should restore its captured marker ({length}) after reload"
+        )
+
+    # an empty slot still refuses cleanly after the reload (no garbage recall)
+    len_before = board.cc_get(0, CC.LENGTH)
+    assert not board.phrase_recall(2), "an empty slot must still refuse after reload"
+    assert board.cc_get(0, CC.LENGTH) == len_before, "a refused recall must not change live state"
+
+    for g in range(4):
+        board.dirty_set(g, False)

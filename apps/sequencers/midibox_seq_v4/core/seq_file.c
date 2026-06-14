@@ -145,10 +145,10 @@ s32 SEQ_FILE_LoadAllFiles(u8 including_hw)
   status |= SEQ_FILE_M_LoadAllBanks(seq_file_session_name);
   status |= SEQ_FILE_S_LoadAllBanks(seq_file_session_name);
 
-  // PHRASES: new session -> session-scoped phrase occupancy is unknown again
-  // (the snapshot library's data persists in MBSEQ_PH.V4; cross-session probe is
-  // Stage B). Clear so recall refuses uncaptured phrases until captured/probed.
-  SEQ_PATTERN_PhraseResetState();
+  // PHRASES: re-seed phrase occupancy from this session's MBSEQ_PH.V4 on disk so
+  // a reloaded set lights up its captured phrases and they recall again (the
+  // cross-session probe). Empty/un-captured slots still refuse recall.
+  SEQ_PATTERN_ProbePhrasesOnLoad();
   status |= SEQ_FILE_G_Load(seq_file_session_name);
 
   // ignore status if bookmark file doesn't exist

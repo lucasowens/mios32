@@ -190,7 +190,7 @@ s32 SEQ_CORE_Init(u32 mode)
   }
   seq_core_steps_per_measure = 16-1;
   seq_core_steps_per_pattern = 16-1;
-  seq_core_pattern_switch_margin_ms = 100; // covers FEARLESS writeback (SD write+read in the switch window; was 50 read-only — measure with seq_pattern_log_load_time and trim)
+  seq_core_pattern_switch_margin_ms = 100; // covers FEARLESS writeback (SD write+read in the switch window; was 50 read-only — measure with seq_pattern_log_load_time and trim). Heaviest user is now PHRASE RECALL: it writes back ALL dirty groups + reads 4 patterns inside this one window (vs the per-group switch's 1+1). If a running recall wobbles/late-renders at the bar, bump this.
   seq_core_pattern_switch_measured_ms = 0; // no measurement yet
   seq_core_global_scale = 0;
   seq_core_global_scale_root_selection = 0; // from keyboard

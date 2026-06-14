@@ -1409,6 +1409,118 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
 
 
 /////////////////////////////////////////////////////////////////////////////
+// PHRASES cross-session probe support — stamp a slot's header as a recognizable
+// EMPTY marker (20-space name + num_tracks=0). Out-of-order phrase capture
+// f_lseek-expands the file past never-written slots, leaving them as UNDEFINED
+// gaps (the SEQ_FILE_B_Create zero-fill is #if 0'd for FatFs). Undefined content
+// could read back with any num_tracks byte, so a content-probe can't tell a real
+// phrase from a gap. Writing this marker into the gap below a capture makes
+// "empty" self-describing on disk, so SEQ_FILE_B_PhraseOccupancyProbe can seed
+// the occupancy mask faithfully after a session reload. Only the 24-byte header
+// is written; the slot body stays undefined (never read for an empty slot).
+// returns < 0 on errors (error codes are documented in seq_file.h)
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_PatternWriteEmpty(char *session, u8 bank, u8 pattern)
+{
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
+    return SEQ_FILE_B_ERR_INVALID_BANK;
+
+  if( !info->valid )
+    return SEQ_FILE_B_ERR_FORMAT;
+
+  if( pattern >= info->header.num_patterns )
+    return SEQ_FILE_B_ERR_INVALID_PATTERN;
+
+  char filepath[MAX_PATH];
+  SEQ_FILE_B_BuildPath(filepath, session, bank);
+
+  s32 status = 0;
+  if( (status=FILE_WriteOpen(filepath, 0)) < 0 ) {
+    FILE_WriteClose(); // important to free memory given by malloc
+    return status;
+  }
+
+  // seek to the slot (f_lseek extends the file if this slot is past EOF — the
+  // gap below it belongs to slots this caller also marks, so nothing undefined
+  // remains readable at a phrase base)
+  u32 offset = 10 + sizeof(seq_file_b_header_t) + pattern * info->header.pattern_size;
+  if( (status=FILE_WriteSeek(offset)) < 0 ) {
+    FILE_WriteClose();
+    return status;
+  }
+
+  // 20-space name + num_tracks=0 (mixer/sysex/reserved=0) — the probe keys on
+  // num_tracks (0 = never captured; a real capture writes SEQ_CORE_NUM_TRACKS_PER_GROUP)
+  int i;
+  for(i=0; i<20; ++i)
+    status |= FILE_WriteByte(' ');
+  status |= FILE_WriteByte(0x00); // num_tracks = 0  -> EMPTY
+  status |= FILE_WriteByte(0x00); // mixer_map
+  status |= FILE_WriteByte(0x00); // sysex_setup
+  status |= FILE_WriteByte(0x00); // reserved1
+
+  status |= FILE_WriteClose();
+
+  return (status < 0) ? SEQ_FILE_B_ERR_WRITE : 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// PHRASES cross-session probe — scan the MBSEQ_PH.V4 phrase bank for the
+// current session and return a 16-bit occupancy mask (bit n = phrase n has
+// committed records on disk). Reads only each phrase's base-pattern header
+// (name + num_tracks); a slot counts as occupied when num_tracks is in
+// [1, SEQ_CORE_NUM_TRACKS_PER_GROUP]. Bounded by the file size (never reads past
+// EOF), and empty slots below a capture carry the SEQ_FILE_B_PatternWriteEmpty
+// marker (num_tracks=0), so gaps can't false-positive. Returns 0 (nothing
+// occupied) when the session has no phrase file yet — not an error.
+// returns the mask (>= 0), or < 0 on a hard file error.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session)
+{
+  // (re-)resolve + validate the phrase bank for this session
+  if( SEQ_FILE_B_Open(session, SEQ_FILE_B_PHRASE_BANK) < 0 )
+    return 0; // no phrase library in this session yet -> nothing occupied
+
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(SEQ_FILE_B_PHRASE_BANK);
+  if( info == NULL || !info->valid )
+    return 0;
+
+  if( FILE_ReadReOpen((file_t*)&info->file) < 0 )
+    return 0;
+
+  u32 fsize = FILE_ReadGetCurrentSize();
+
+  u16 mask = 0;
+  u8 n;
+  for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n) {
+    u32 offset = 10 + sizeof(seq_file_b_header_t) + (u32)(SEQ_CORE_NUM_GROUPS * n) * info->header.pattern_size;
+
+    // need the full 24-byte header (20 name + 4) present; if this base isn't
+    // fully in the file, neither is any higher phrase -> done
+    if( (offset + sizeof(seq_file_b_pattern_t)) > fsize )
+      break;
+
+    if( FILE_ReadSeek(offset) < 0 )
+      break;
+
+    u8 hdr[21]; // 20-char name + num_tracks
+    if( FILE_ReadBuffer(hdr, 21) < 0 )
+      break;
+
+    u8 num_tracks = hdr[20];
+    if( num_tracks >= 1 && num_tracks <= SEQ_CORE_NUM_TRACKS_PER_GROUP )
+      mask |= (1 << n);
+  }
+
+  FILE_ReadClose((file_t*)&info->file);
+
+  return (s32)mask;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // returns a pattern name from disk w/o overwriting patterns in RAM
 //
 // used in SAVE menu to display the pattern name which will be overwritten

@@ -67,10 +67,11 @@ u32 seq_pattern_writeback_count;
 // that boot debris over slots that never sounded.
 static u8 pattern_loaded;
 
-// PHRASES — session-scoped occupancy of the MBSEQ_PH.V4 snapshot library: bit n
-// set once phrase n has been captured this session (Stage A; cross-session probe
-// is Stage B). `last_recalled_phrase` (-1 = none) tracks the "current" phrase for
-// the Stage B LEDs. Cleared by SEQ_PATTERN_PhraseResetState on session load/reset.
+// PHRASES — occupancy of the MBSEQ_PH.V4 snapshot library: bit n set when phrase
+// n has committed records. Set on capture this session, and RE-SEEDED from disk
+// on session load by SEQ_PATTERN_ProbePhrasesOnLoad (cross-session probe), so a
+// reloaded set lights up + recalls. `last_recalled_phrase` (-1 = none) tracks the
+// session-scoped "current" phrase for the navigation-map LEDs.
 static u16 phrase_present_mask;
 static s8 last_recalled_phrase;
 
@@ -262,6 +263,24 @@ static s32 SEQ_PATTERN_SnapshotWrite(u8 bank, u8 base_pattern)
   }
 
   if( status >= 0 ) {
+    // PHRASES cross-session probe support: capturing phrase N out of order
+    // f_lseek-expands the file past lower never-captured slots, leaving them as
+    // undefined gaps. Stamp an EMPTY marker into each gap slot below this capture
+    // (walking down until the nearest already-present phrase — below it the file
+    // is already real-or-marked) so SEQ_FILE_B_PhraseOccupancyProbe can't mistake
+    // an undefined gap for a real phrase on the next session load. Ascending
+    // capture hits a present phrase immediately => zero extra writes. The anchor
+    // bank captures contiguously from base 0, so it never needs this.
+    if( bank == SEQ_FILE_B_PHRASE_BANK && base_pattern > 0 ) {
+      s8 phrase_n = base_pattern / SEQ_CORE_NUM_GROUPS;
+      s8 m;
+      for(m=phrase_n-1; m>=0; --m) {
+        if( phrase_present_mask & (1 << m) )
+          break;
+        SEQ_FILE_B_PatternWriteEmpty(seq_file_session_name, bank, SEQ_CORE_NUM_GROUPS * m);
+      }
+    }
+
     u8 group;
     for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
       s32 err = SEQ_FILE_B_PatternWrite(seq_file_session_name, bank, base_pattern + group, group, 1);
@@ -309,7 +328,15 @@ s32 SEQ_PATTERN_Checkpoint(void)
 // next writeback would clobber the snapshot). Then the SEQ_CORE_LoadTrackFromSlot
 // fan generalized to all 16 tracks, and every group set dirty+loaded LAST (the
 // inversion: the next switch writes the restored state into the working slots).
-static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern)
+//
+// `writeback_dirty_first`: FEARLESS "never lose work". When set (phrase recall),
+// any dirty group is written back to its working slot BEFORE the snapshot
+// overwrites live — so a live nudge made on a recalled phrase lands in the
+// working slot (recoverable), not silently discarded when you recall the next
+// phrase. The phrase file is untouched, so the phrase stays a pristine committed
+// snapshot. REVERT passes 0: it deliberately discards live state back to the
+// checkpoint, so preserving the pre-revert divergence would defeat the gesture.
+static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty_first)
 {
   s32 status;
 
@@ -329,6 +356,14 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern)
     SEQ_CORE_AddForwardDelay(seq_core_pattern_switch_margin_ms);
     MUTEX_MIDIOUT_GIVE;
   }
+
+  // FEARLESS "never lose work" (phrase recall only): persist any live nudge into
+  // its working slot before the snapshot overwrites it — mirrors the pattern-
+  // switch path's WritebackIfDirty-before-Load. Inside the forward-delay window,
+  // outside the SDCARD critical section (Save takes the SD mutex itself). The
+  // recalled phrase still loads pristine from the file below.
+  if( writeback_dirty_first )
+    SEQ_PATTERN_WritebackAllDirty();
 
   MUTEX_SDCARD_TAKE;
   portENTER_CRITICAL();
@@ -395,7 +430,7 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern)
 
 s32 SEQ_PATTERN_Revert(void)
 {
-  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0);
+  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0, 0);
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] REVERT status %d", SEQ_BPM_TickGet(), status);
@@ -411,10 +446,11 @@ s32 SEQ_PATTERN_Revert(void)
 // (phrase N -> patterns 4N..4N+3). Faithful (par+trg+CC+generators ride the V4
 // ext tag), drift-free, and outside every for(bank<NUM_BANKS) loop.
 //
-// Occupancy is a session-scoped RAM mask set on capture (Stage A). Recall refuses
-// an un-captured phrase before touching SD. Cross-session occupancy (probe the
-// file on session load) + state LEDs are Stage B; the phrase DATA itself persists
-// faithfully in the file regardless of the mask.
+// Occupancy is a 16-bit RAM mask: set on capture, and re-seeded from disk on
+// session load (SEQ_PATTERN_ProbePhrasesOnLoad probes the MBSEQ_PH.V4 base
+// headers — captured slots carry num_tracks>0, gaps carry an EMPTY marker laid
+// down at capture time). Recall refuses an un-captured phrase before touching SD.
+// The phrase DATA itself persists faithfully in the file regardless of the mask.
 /////////////////////////////////////////////////////////////////////////////
 
 // 1 if phrase n has been captured this session, 0 otherwise.
@@ -439,11 +475,33 @@ s32 SEQ_PATTERN_PhraseLastRecalled(void)
   return last_recalled_phrase;
 }
 
-// clear session-scoped phrase occupancy (called on session load + harness reset).
+// clear session-scoped phrase occupancy (called on harness reset; session load
+// uses SEQ_PATTERN_ProbePhrasesOnLoad below to re-seed from disk instead).
 void SEQ_PATTERN_PhraseResetState(void)
 {
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
+}
+
+// CROSS-SESSION PROBE (called on session load): re-seed the occupancy mask from
+// the session's MBSEQ_PH.V4 on disk, so a reloaded set lights up its captured
+// phrases and they recall again. The phrase DATA always persisted faithfully;
+// this restores the knowledge of WHICH slots are real (lost when the mask was
+// RAM-only). `last_recalled_phrase` stays -1 — the "current" phrase is genuinely
+// session-scoped, so we don't light a red current-row LED for a phrase nobody
+// recalled this session. Falls back to all-empty on any probe error.
+void SEQ_PATTERN_ProbePhrasesOnLoad(void)
+{
+  last_recalled_phrase = -1;
+
+  MUTEX_SDCARD_TAKE;
+  s32 mask = SEQ_FILE_B_PhraseOccupancyProbe(seq_file_session_name);
+  MUTEX_SDCARD_GIVE;
+
+  phrase_present_mask = (mask >= 0) ? (u16)mask : 0;
+
+  if( seq_pattern_log_load_time )
+    DEBUG_MSG("[SEQ_PATTERN] PHRASE PROBE mask 0x%04x", phrase_present_mask);
 }
 
 // CAPTURE: snapshot the live organism into phrase n's four group-records.
@@ -473,7 +531,7 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
   if( !(phrase_present_mask & (1 << n)) )
     return SEQ_FILE_B_ERR_NO_FILE;
 
-  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n);
+  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n, 1);
 
   if( status >= 0 )
     last_recalled_phrase = n;

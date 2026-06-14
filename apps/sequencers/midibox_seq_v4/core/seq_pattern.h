@@ -74,6 +74,7 @@ extern s32 SEQ_PATTERN_PhrasePresent(u8 n);
 extern u16 SEQ_PATTERN_PhrasePresentMask(void);
 extern s32 SEQ_PATTERN_PhraseLastRecalled(void);
 extern void SEQ_PATTERN_PhraseResetState(void);
+extern void SEQ_PATTERN_ProbePhrasesOnLoad(void);
 
 extern s32 SEQ_PATTERN_PeekName(seq_pattern_t pattern, char *pattern_name);
 extern s32 SEQ_PATTERN_PeekPatternsOfGroup(seq_pattern_t pattern);
