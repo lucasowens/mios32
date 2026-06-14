@@ -436,6 +436,19 @@ s32 SEQ_GENERATOR_Undo(void)
 }
 
 
+// Drop the one-deep auto-undo snapshot. Called by the disk-load paths
+// (SEQ_PATTERN_Load / SEQ_PATTERN_SnapshotRead): after a load replaces a track's
+// par-buffer from disk, the pre-load snapshot is stale — an UNDO would otherwise
+// clobber the freshly-loaded track with bytes from before the load. BOUNCE
+// deliberately preserves the slot (see the §3 live-safety note above), so it
+// does NOT call this.
+s32 SEQ_GENERATOR_UndoInvalidate(void)
+{
+  undo_slot.valid = 0;
+  return 0;
+}
+
+
 /////////////////////////////////////////////////////////////////////////////
 // FEARLESS SWITCHING Stage B — persistence primitives (gen state is slot
 // content; see seq_generator.h for the contracts).

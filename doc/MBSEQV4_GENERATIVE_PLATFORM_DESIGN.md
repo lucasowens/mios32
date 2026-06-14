@@ -20,8 +20,12 @@ the existing codebase. When a decision changes, **update this doc** — especial
   §2.2/§2.6 **none of it is built until the first musical build (§8) has proven the
   core by ear.** Treat Part II as a map of where we *might* go, not a plan of record.
 
-Status: design phase. POC code exists and is **disposable** (see §7). Nothing here
-is committed to firmware yet except the parts already shipped, which are flagged.
+Status: **in active build.** Part I's spine is largely executed — multiple bundles
+shipped to `main` and validated by ear (see §9): the render-stack pitch chain, the
+Tension Workbench, and the save-model lineage (RECOMBINE → FEARLESS → PHRASES). The
+early POC was disposable, but that rule was **retired 2026-06-10** once capture became
+faithful by construction (§9); the shipped code is now load-bearing. Part II remains
+provisional and unbuilt.
 
 Hardware target: midiphy MBSEQ V4+ build, MBHP_CORE_STM32F4 (STM32F407: 128KB main
 SRAM + 64KB CCM; see §A5).
@@ -1112,6 +1116,11 @@ Append-only-ish; revise an entry only with a dated note.
     probability, random-gate, echo Rnd modes, morph — its global `morph_value` isn't captured) stay
     reset; re-applying would diverge. The two-faces posture-persistence model (v3 format) and the
     unified four-move destination gesture remain the larger deferred pieces.
+    - **Groove-phase caveat (deferred, by-ear).** With `groove_style.sync_to_track=0` (global
+      `ref_step`) and a track length not measure-aligned, a frozen copy can re-groove at a different
+      phase than was heard. Cleaner guarantee: force `sync_to_track=1` on the capture destination so
+      the frozen loop grooves against its own preserved step indices. Left as-is — revisit only if a
+      frozen groove sounds off by ear. *(Folded 2026-06-14 from the retired freeze-faithfulness plan.)*
 - **§8 step 5 (the spine) is broken into phases A–F.** User agreed 2026-05-24:
   ship the full design-doc spine as a multi-PR sequence, infrastructure first.
   Each phase is a buildable+harness-testable unit.
@@ -1858,6 +1867,37 @@ format change. Resolves the §10 "drifted-since-recall signal" thread (the signa
   session reload, rename-without-recapture. Build-path note: `make seq` emits `project.hex` in the
   **app dir**, not `project_build/`.
 
+**Live-surface hardening — by-ear-safety pass (2026-06-14).** A defensive round after the
+PHRASES bundle, picked because the state assessment found the live *gesture layer* was the
+POC-fragile part. Five fixes + a build flag; each platform claim verified against source first;
+no new musical surface.
+- **Phantom-pull guard (the headline).** The RECOMBINE pull armed on any select-row press
+  regardless of view; in PHRASE view a phrase capture-hold (the select button is down ≥1s)
+  left the pull armed, so a GP press during that window fired a real bar-aligned
+  `SEQ_CORE_LoadTrackFromSlot` into that track — a silent destructive overwrite reachable from
+  ordinary phrase use. The arm AND the top-row commit are now gated on `sel_view == TRACKS`
+  (the pull is meaningless in any other view), with a stale-hold disarm on leaving the view.
+  Mirrors the pre-existing PATTERN-path disarm.
+- **Partial-capture occupancy.** `SEQ_FILE_B_PhraseOccupancyProbe` trusted only the group-0
+  header, so a capture that died mid-write lit as occupied and recalled truncated bytes. Now
+  requires the LAST group's header too — snapshots write groups 0→3 in order, so a present
+  last-group header proves the whole block committed. No format change (reuses an existing
+  field).
+- **Auto-undo vs load.** The one-deep generator auto-undo wasn't invalidated by a disk load,
+  so ENGAGE→load-pattern→UNDO clobbered the freshly-loaded track. New
+  `SEQ_GENERATOR_UndoInvalidate()` called at the `SEQ_PATTERN_Load` and `SnapshotRead` tails
+  (BOUNCE still preserves the slot, by design — §3 live-safety net).
+- **SHADE persistence.** The GRAVITY page set `ui_store_file_required` but installed no exit
+  callback, so SHADE (the global scale) never reached the config file. Added the callback,
+  matching every other store-file page.
+- **testctrl footgun → compile flag.** The HIL SysEx control surface shipped unconditionally,
+  reachable from every MIDI-in port behind a 6-byte header (could mutate banks/sessions/CCs/
+  FREEZE mid-set). Now gated by `SEQ_TESTCTRL_ENABLE` (default ON, so the harness build is
+  unchanged); the gig/release build is `make TESTCTRL=0`, which compiles it to no-op stubs,
+  reclaiming ~7.7KB flash + 264B RAM. Flash the `TESTCTRL=0` firmware for any real performance.
+- Low-severity cluster filed to TODO_TRIAGE ("Fork hardening backlog"); the L1 transient-SD
+  distinction stays deferred (§10).
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -2044,6 +2084,12 @@ very tense" vs "all notes slightly tense" as separate moves).*
 - Physical page + GP allocation (decide with hardware in hand, §A3 precedent).
 - Global GRAVITY persistence: performance state (like window source, §3) vs session
   config — decide when saving feels wrong.
+- **Momentary "spring" gesture for processor sweeps (parked candidate, from Torso T-1's
+  TEMP button).** Hold-to-deviate, release-snaps-back: a transient deviation that auto-reverts
+  on release — e.g. hold TEMP + sweep GRAVITY, release and the field springs back. Distinct
+  from the persistent FREEZE master-switch and CHECKPOINT/REVERT (those hold/protect state;
+  this is a momentary live-sweep gesture). Parked, not blessed — decide with hardware in hand.
+  *(Orphan-folded 2026-06-14 from the retired save-model plan so it isn't lost.)*
 - ~~Track 2 edges: echo, the live/jam input path, per-step Root/Scale overrides.~~
   **CLOSED 2026-06-10** (Track 2 built): echo keeps its per-repeat re-snap (the
   snap is idempotent on mirror notes; pushed-note echoes resolve into the
@@ -2214,8 +2260,9 @@ is load-bearing:
   independent/costs a voice); the add-vs-replace control.
 - **Undo slot** — single-deep RAM buffer holding content overwritten by ENGAGE; UNDO
   restores. Live-safety net, out-of-band from the spine.
-- **State** — a returnable configuration; on MBSEQ a *group* (= 4 tracks); has a
-  *recording* face and a *posture* face.
+- **State** — a returnable configuration. Originally modelled as a *group* (= 4 tracks);
+  the shipped recall grains are the **track** (the Pull) and the **phrase** (whole-organism
+  snapshot). Has a *recording* face and a *posture* face. See §9.
 - **Seed / Posture / Anchor** — the identity an instance returns to / the live config
   that regenerates on recall / a frozen snapshot of a generator loop (SNAP reverts).
 - **Soft return / hard return** — dial mutation toward 0 (drifted-but-identifiable) /
@@ -2229,7 +2276,8 @@ is load-bearing:
   available on live tracks.
 - **Track slot** — a captured single-track buffer (layers + track CCs); layerable;
   RAM-by-default, optionally SD-promoted.
-- **Quick-capture** — SAVE single-press → next free `CAP_NNN` pattern slot, auto-named.
+- **Quick-capture** — *withdrawn 2026-06-11; superseded by the tape (append-only take list)
+  and the phrase library (§5.5, §9).* (Was: SAVE single-press → next free `CAP_NNN` slot.)
 - **Frozen-tape vs posture recall** — load+FREEZE (frozen face) vs load+run (posture
   face); gestures on the same data.
 - **Skeleton / muscle** — macro set arc via groups stacking (upstream tooling) /

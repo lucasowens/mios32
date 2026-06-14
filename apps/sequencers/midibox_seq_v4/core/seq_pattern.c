@@ -325,6 +325,10 @@ static s32 SEQ_PATTERN_SnapshotWrite(u8 bank, u8 base_pattern)
       }
     }
 
+    // ASCENDING write order is load-bearing: the occupancy probe
+    // (SEQ_FILE_B_PhraseOccupancyProbe) treats the LAST group's header as the
+    // "whole block committed" witness, so group 0 must land first and the last
+    // group last. Do not reorder without updating that probe.
     u8 group;
     for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
       s32 err = SEQ_FILE_B_PatternWrite(seq_file_session_name, bank, base_pattern + group, group, 1);
@@ -464,6 +468,10 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
   seq_pattern_dirty |= ((1 << SEQ_CORE_NUM_GROUPS) - 1);
   pattern_loaded |= ((1 << SEQ_CORE_NUM_GROUPS) - 1);
   MIOS32_IRQ_Enable();
+
+  // every track's par-buffer was just replaced from disk -> the one-deep auto-undo
+  // snapshot is stale (an UNDO would clobber the restored state). Drop it.
+  SEQ_GENERATOR_UndoInvalidate();
 
   // bar-aligned restart of all tracks (pull precedent; also delivers RATOPC's
   // musical intent — a mid-jam restore lands on the next bar, not off-phase)
@@ -879,6 +887,11 @@ s32 SEQ_PATTERN_Load(u8 group, seq_pattern_t pattern)
   seq_pattern_dirty &= ~(1 << group);
   pattern_loaded |= (1 << group);
   MIOS32_IRQ_Enable();
+
+  // this group's tracks were just replaced from disk -> drop the one-deep auto-undo
+  // snapshot (an UNDO would otherwise clobber a freshly-loaded track with pre-load
+  // bytes). Global/one-deep, so an unconditional drop is correct here.
+  SEQ_GENERATOR_UndoInvalidate();
 
   return status;
 }

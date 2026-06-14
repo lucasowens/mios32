@@ -179,3 +179,47 @@ def test_pull_gesture_bare_tap_keeps_select(board):
     assert board.track_undo_query() == undo_before, (
         "a bare tap must not arm or consume the track undo"
     )
+
+
+@pytest.mark.hardware
+def test_pull_arm_blocked_in_phrase_view(board):
+    """Phantom-pull guard (2026-06-14 hardening). The RECOMBINE pull must arm and
+    commit ONLY in TRACKS sel-view. In PHRASE view the select row is phrase
+    waypoints, so a held waypoint (e.g. mid capture-hold) followed by a GP press
+    must NOT fire a pull. Pre-fix, the arm ran regardless of view and a GP press
+    during the hold committed a real SEQ_CORE_LoadTrackFromSlot into the held
+    track — a silent destructive overwrite from ordinary phrase use.
+
+    A real pull ALWAYS arms the track-undo (a phrase recall never does), so the
+    undo slot is the view-independent detector. Slot 6 is left un-captured, so the
+    phrase gesture degrades to a harmless refused recall (never a capture)."""
+    board.reset(RESET_UNMUTE_ALL)
+
+    # Known victim content + length marker on track 6.
+    board.track_drum_init(6)
+    board.track_drum_par_set(6, 0, 0, 96)
+    board.cc_set(6, CC.LENGTH, 11)
+
+    # Enter PHRASE sel-view (the SONG button sets it; it sticks).
+    board.press(Button.SONG)
+    time.sleep(0.1)
+
+    undo_before = board.track_undo_query()
+    len_before = board.cc_get(6, CC.LENGTH)
+
+    # The phantom-commit attempt: hold phrase-6 waypoint, press a GP number, release
+    # promptly (a tap => refused recall of the empty slot, never a 1s capture-hold).
+    board.button(Button.DIRECT_TRACK(7), depressed=False)   # hold waypoint 6
+    try:
+        board.press(Button.GP(14))                          # would-be pull commit
+    finally:
+        board.button(Button.DIRECT_TRACK(7), depressed=True)  # release
+    time.sleep(SETTLE)
+
+    assert board.track_undo_query() == undo_before, (
+        "a GP press while a PHRASE-view waypoint is held must NOT arm a pull "
+        "(pull is TRACKS-view only)"
+    )
+    assert board.cc_get(6, CC.LENGTH) == len_before, "held track must be untouched"
+    assert board.track_drum_par_get(6, 0, 0) == 96, "held track content must be untouched"
+    assert not board.phrase_present(6), "the empty waypoint must not have been captured"

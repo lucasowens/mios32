@@ -777,12 +777,14 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
   // row aims the SOURCE pattern and the number press commits the pull — the
   // mirror image of the PATTERN-hold capture above. (PATTERN-held events never
   // reach here: the capture intercepts cover all GPs while PATTERN is down.)
-  if( !depressed && pull_held_track != 0xff && gp < 8 ) {
+  // TRACKS view only — guards against a stale hold committing a phantom pull
+  // after a view switch (see the arm-side note in SEQ_UI_Button_DirectTrack).
+  if( !depressed && pull_held_track != 0xff && seq_ui_sel_view == SEQ_UI_SEL_VIEW_TRACKS && gp < 8 ) {
     pull_letter = (u8)gp; // source pattern letter (stash; number press commits)
     return 0;
   }
 
-  if( !depressed && pull_held_track != 0xff && gp >= 8 && gp < 16 ) {
+  if( !depressed && pull_held_track != 0xff && seq_ui_sel_view == SEQ_UI_SEL_VIEW_TRACKS && gp >= 8 && gp < 16 ) {
     // source column: the explicit select-row pick, or the held track's own
     u8 src_col = (pull_src_column != 0xff) ? pull_src_column : pull_held_track;
     u8 src_bank = src_col / SEQ_CORE_NUM_TRACKS_PER_GROUP;     // bank = column's group (dedicated-bank identity)
@@ -2258,7 +2260,18 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
   // column (intercepted — this shadows the stock multi-track chord-select).
   // The held button's own press/release flows through unchanged, so the stock
   // release-select still fires and the cursor follows the transfusion target.
-  if( pull_held_track == 0xff ) {
+  //
+  // TRACKS view ONLY: the select row only means "destination track" here. In
+  // PHRASE/MUTE/etc. the row is repurposed (PHRASE = snapshot waypoints), so
+  // arming a pull there would let a later top-row GP press fire a phantom
+  // bar-aligned LoadTrackFromSlot into a track the user never targeted — e.g. a
+  // GP press during a phrase capture-hold (the hold keeps the select button down
+  // the whole window). Disarm a stale hold if we've left TRACKS view while
+  // armed; the commit (top-row handler) is gated on TRACKS too.
+  if( seq_ui_sel_view != SEQ_UI_SEL_VIEW_TRACKS ) {
+    pull_held_track = 0xff;
+    pull_src_column = 0xff;
+  } else if( pull_held_track == 0xff ) {
     if( !depressed && button_state == 0xffff ) {
       // sole press: arm the hold (do not consume — stock handling continues)
       pull_held_track = (u8)sel_button;

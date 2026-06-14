@@ -32,10 +32,13 @@
 
 #include <mios32.h>
 #include <string.h>
+#include "tasks.h"
 #include "seq_lcd.h"
 #include "seq_ui.h"
 #include "seq_cc.h"
 #include "seq_core.h"
+#include "seq_file.h"
+#include "seq_file_c.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -360,6 +363,29 @@ static s32 LCD_Handler(u8 high_prio)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Exit: persist SHADE (the global scale) to the session config file, mirroring
+// every other store-file page (fx_scale, trkgrv, ...). Without this the page
+// set ui_store_file_required but nothing wrote it, so SHADE was silently lost
+// on the next PageSet (PageSet zeroes the flag).
+/////////////////////////////////////////////////////////////////////////////
+static s32 EXIT_Handler(void)
+{
+  s32 status = 0;
+
+  if( ui_store_file_required ) {
+    MUTEX_SDCARD_TAKE;
+    if( (status=SEQ_FILE_C_Write(seq_file_session_name)) < 0 )
+      SEQ_UI_SDCardErrMsg(2000, status);
+    MUTEX_SDCARD_GIVE;
+
+    ui_store_file_required = 0;
+  }
+
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Initialisation
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_UI_GRAVITY_Init(u32 mode)
@@ -368,6 +394,7 @@ s32 SEQ_UI_GRAVITY_Init(u32 mode)
   SEQ_UI_InstallEncoderCallback(Encoder_Handler);
   SEQ_UI_InstallLEDCallback(LED_Handler);
   SEQ_UI_InstallLCDCallback(LCD_Handler);
+  SEQ_UI_InstallExitCallback(EXIT_Handler);
 
   return 0;
 }

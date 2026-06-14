@@ -2,13 +2,15 @@
 
 This manual documents the features added to MIDIbox SEQ V4 in this fork, on top of upstream V4.098. Each section follows the style of the official ucapps.de manuals (intro, usecases, action-named subsections with 2×80 LCD mockups, Tips & Tricks footer).
 
-Five features are documented here:
+Seven features are documented here:
 
 1. **Robotize Loop** — bar-anchor PRNG control over the Robotizer Fx (sculpt randomness one measure at a time)
 2. **GENERATE Page** — the former EUCLID page expanded into five generator types (Euclidean, Cellular, Polyrhythm, Subdivide, L-System)
 3. **Capture / Bounce** — freeze a track's computed output (lossless) into a pattern via the PATTERN-hold gesture; build variation libraries and multitimbral canvases
 4. **The Pull** — load one stored track into any live track, on the bar, while everything keeps playing (the mirror of Capture); SELECT+CLEAR is the one-gesture undo
 5. **Fearless Switching** — your work always saves itself; CHECKPOINT blesses a safe point and REVERT snaps the whole living rig back to it in one gesture
+6. **FREEZE** — a global master switch (the repurposed METRONOME button) that stops the generators mutating, so a recalled phrase plays as static tape instead of drifting
+7. **Phrases** — a snapshot library of the whole living rig; tap to recall a phrase, hold to capture the current one (paired with FREEZE for static-vs-alive recall)
 
 For developer-facing topics (the testctrl SysEx interface, the Python hardware-in-the-loop pytest harness, the top-level orchestration Makefile, and the source-level design catalog) see `MBSEQV4_REFERENCE.md` and `tests/README.md`.
 
@@ -525,6 +527,30 @@ them — exactly as if you'd jammed it there yourself.
 
 ---
 
+## FREEZE — Stop the Generators Mutating
+
+The generators don't sit still: an engaged generator loop re-mutates and rewrites
+its track at every measure wrap, so the rig keeps wandering on its own. **FREEZE**
+is the global master switch that holds that wandering. Engage it and every engaged
+generator loop locks to its current shape — the per-measure auto-mutate pauses
+across all tracks at once. It's fully reversible: unfreeze and the loops resume
+mutating from where they were.
+
+FREEZE lives on the **METRONOME button** (repurposed — this fork doesn't click to
+a live metronome). Tap it to toggle FROZEN ↔ live; the LCD flashes `FREEZE /
+FROZEN` or `FREEZE / live` to confirm, and the METRONOME LED stays lit while
+FROZEN. (If you've configured the button for hold behaviour rather than toggle, it
+freezes only while held.) FREEZE gates the automatic generator-loop mutation only —
+a deliberate ROLL or force-rewrite still fires while frozen, and a RESET clears
+FREEZE back to live.
+
+FREEZE is the other half of **Phrases**. Recall a phrase while frozen and the
+organism lands as static *tape* — exactly the snapshot, no drift. Recall while live
+and it lands *alive* — the generators pick the loop back up and carry it forward.
+Frozen = static tape, unfrozen = alive: the same waypoint, two ways to play it.
+
+---
+
 ## Phrases — A Set Is a Path
 
 A **phrase** is a snapshot of the *whole living rig* (all 16 tracks, all four
@@ -594,4 +620,4 @@ patterns still load (the v2 byte-count is frozen, read path dispatches on tag).
 
 ---
 
-*Last update: 2026-06-12*
+*Last update: 2026-06-14*

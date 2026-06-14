@@ -148,6 +148,15 @@ OPTIMIZE  =	-Os
 
 CFLAGS =	$(DEBUG) $(OPTIMIZE)
 
+# HIL test-control SysEx surface (core/seq_testctrl.c). Default ON — the test
+# harness needs it. Build the gig/release firmware with `make TESTCTRL=0` to
+# compile it out (removes the always-listening control surface that can mutate
+# banks/sessions/CCs/FREEZE from any MIDI-in port). See SEQ_TESTCTRL_ENABLE.
+TESTCTRL ?= 1
+ifeq ($(TESTCTRL),0)
+CFLAGS += -DSEQ_TESTCTRL_ENABLE=0
+endif
+
 
 ################################################################################
 # Include source modules via additional makefiles

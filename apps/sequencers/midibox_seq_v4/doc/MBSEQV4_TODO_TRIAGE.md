@@ -15,6 +15,7 @@ Generated: 2026-05-18.
 1. **Overwrite confirmation when saving** — [seq_file_m.c:410](../core/seq_file_m.c#L410), [seq_file_b.c:690](../core/seq_file_b.c#L690), [seq_file_s.c:404](../core/seq_file_s.c#L404).
    Silent destruction of work when saving over an existing map/pattern/song slot. Three sites, one fix pattern. Highest-impact, lowest-risk item on the list.
 2. **Pattern-change stall race** — [seq_pattern.c:135](../core/seq_pattern.c#L135).
+   **RETIRED 2026-06-12 (not built) — see REFERENCE §3.**
    "stall here if previous pattern change hasn't been finished yet!" — affects live pattern switching, a headline workflow.
    *(Re-read 2026-06-11: the TODO marks a **missing** stall — in the deferred branch a
    new request silently overwrites a pending unserviced `seq_pattern_req[group]`. The
@@ -94,3 +95,35 @@ Quick first sweep with disproportionate user value:
 All three are scoped, user-visible, and unlikely to disturb TK's tight
 timing paths. Escalate to **#2** (pattern-change stall) and **#3** (reverse
 record) once back in core/timing-sensitive territory.
+
+---
+
+## Fork hardening backlog (deferred, 2026-06-14)
+
+Low-severity correctness items surfaced by the 2026-06-14 state assessment; filed
+so they aren't lost. Fix opportunistically.
+
+- **SnapshotRead marks all groups dirty+loaded even if a PatternRead failed** —
+  [seq_pattern.c](../core/seq_pattern.c) (`SnapshotRead` tail). A partial restore
+  can poison a working slot on the next switch.
+- **`phrase_present_mask` updated outside the IRQ-guard** while read by the
+  LED/gap-fill paths — [seq_pattern.c](../core/seq_pattern.c). Asymmetric with the
+  carefully-guarded dirty/drift masks; torn 16-bit read (unlikely on a 32-bit core).
+- **FREEZE hold-mode can stick if MENU is grabbed mid-hold** —
+  [seq_ui.c](../core/seq_ui.c). Routes to `ExtRestart` before clearing FREEZE; can
+  leave the rig FROZEN with no button down.
+- **FREEZE read in `SEQ_GENERATOR_Tick` is unguarded** vs the UI's critical-section
+  RMW of the bitfield — [seq_generator.c](../core/seq_generator.c). 1-tick-stale
+  FREEZE, self-corrects, musically harmless.
+- **Capture name-stamp inherits the A-group working-slot name on failure** — if
+  `PhraseWriteName` fails the on-disk name is the A-group slot name instead of
+  staying blank — [seq_pattern.c](../core/seq_pattern.c). Contradicts the
+  "never-named stays blank" invariant for that one failure path.
+- **GRAVITY bipolar clamp asymmetry** — pull reaches magnitude 64, push only 63 —
+  [seq_core.c](../core/seq_core.c). Musically negligible.
+- **testctrl `generator_query` reply buffer (~234B) bound is hand-computed** with no
+  compile-time `static_assert` — [seq_testctrl.c](../core/seq_testctrl.c). Add a
+  `static_assert` so it can't silently overflow if LOOP/LOCKS/MULT sizes grow.
+- **Small undo ring (2–3 deep)** instead of the current one-deep global auto-undo —
+  [seq_generator.c](../core/seq_generator.c). Idea, now that switching + manual edits
+  interleave more.

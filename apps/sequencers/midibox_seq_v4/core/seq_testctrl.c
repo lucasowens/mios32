@@ -30,6 +30,10 @@
 #include "seq_layer.h"
 #include "seq_generator.h"
 
+// Whole control surface compiled out when SEQ_TESTCTRL_ENABLE == 0 (gig build);
+// only the no-op stubs at the bottom of this file remain. See seq_testctrl.h.
+#if SEQ_TESTCTRL_ENABLE
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Local definitions
@@ -1728,9 +1732,9 @@ static void cmd_bank_create(mios32_midi_port_t port, const u8 *payload, u8 plen)
 // current in-RAM pattern (all 4 of its tracks: par/trg layers + the persisted
 // CCs) to the bank slot on SD, so a host-configured rig survives reboot. Mirrors
 // cmd_pattern_load but calls SEQ_PATTERN_Save. Reply: [group, bank, pattern, ok,
-// status]. NOTE: a track's GRIP (CC 0x9A) is outside the persisted ext-CC range
-// until the Tension-Workbench Stage-D widening, so a reloaded rig keeps its
-// notes/gates/config but GRIP must be re-applied (the rig builder sets it live).
+// status]. NOTE: as of the v3 ext block (CC range widened to 0x80..0x9f, 2026-06-10)
+// a track's GRIP (CC 0x9A) IS persisted alongside notes/gates/config, so a reloaded
+// rig keeps its GRIP — no live re-apply needed.
 static void cmd_pattern_save(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
   u8 reply[5] = { 0, 0, 0, 0, 0x02 };
@@ -2293,3 +2297,13 @@ s32 SEQ_TESTCTRL_TimeOut(mios32_midi_port_t port)
   }
   return 0;
 }
+
+#else // SEQ_TESTCTRL_ENABLE — control surface compiled out (gig/release build)
+
+// No-op stubs so app.c links with the surface removed. Returning -1 keeps the
+// caller's "not handled" contract; the parser never claims any incoming bytes.
+s32 SEQ_TESTCTRL_Init(u32 mode) { return -1; }
+s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in) { return -1; }
+s32 SEQ_TESTCTRL_TimeOut(mios32_midi_port_t port) { return -1; }
+
+#endif // SEQ_TESTCTRL_ENABLE

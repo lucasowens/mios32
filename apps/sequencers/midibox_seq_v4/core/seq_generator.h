@@ -219,6 +219,11 @@ extern s32 SEQ_GENERATOR_Bounce(u8 track, u8 instrument);
 // wins. Returns -1 if no snapshot is held.
 extern s32 SEQ_GENERATOR_Undo(void);
 
+// Drop the held auto-undo snapshot. The disk-load paths call this: once a load
+// replaces a track's par-buffer, the pre-load snapshot is stale and an UNDO
+// would clobber the freshly-loaded track. (BOUNCE deliberately does NOT.)
+extern s32 SEQ_GENERATOR_UndoInvalidate(void);
+
 // Returns 1 if a generator slot is allocated AND engaged for (track, instr).
 extern s32 SEQ_GENERATOR_IsEngaged(u8 track, u8 instrument);
 

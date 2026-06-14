@@ -1,6 +1,6 @@
 # MBSEQ V4 Reference Catalog
 
-Living reference for the MIDIbox SEQ V4 firmware (this app: `mios32/apps/sequencers/midibox_seq_v4/`). Compiled from `CHANGELOG.txt` (98 versions, V4.0beta1 → V4.098) and the source tree as of 2026-05-18.
+Living reference for the MIDIbox SEQ V4 firmware (this app: `mios32/apps/sequencers/midibox_seq_v4/`). Compiled from `CHANGELOG.txt` (98 versions, V4.0beta1 → V4.098) and the source tree kept current; last full sweep 2026-06-14.
 
 When something changes, **update this doc**, not session memory. Memory keeps preferences and in-progress mental state; this doc owns derived facts about the codebase.
 
@@ -10,7 +10,7 @@ Sections:
 3. Bus tracks — deep-dive (corrected model)
 4. Feature catalog by version
 5. Feature index by category
-6. Open TODOs / FIXMEs / XXX (66 items, grouped by file)
+6. Open TODOs / FIXMEs / XXX (65 items, grouped by file)
 7. Deferred / wishlist features from CHANGELOG
 
 ---
@@ -1176,7 +1176,7 @@ Per-version highlights. Bugfix-only releases compressed to one line.
 
 ---
 
-## 6. Open TODOs / FIXMEs / XXX (66 items)
+## 6. Open TODOs / FIXMEs / XXX (65 items)
 
 Located by full-tree grep; grouped by file. Verbatim comment text in quotes.
 
@@ -1185,7 +1185,7 @@ Located by full-tree grep; grouped by file. Verbatim comment text in quotes.
 ### Core sequencer engine
 
 - [seq_core.c:839](../core/seq_core.c#L839) — TODO — "dirty code, we should handle this in SEQ_CV, because only there it's known that clk_divider 0 and 0xfffd/e/f are used for special functions"
-- [seq_pattern.c:135](../core/seq_pattern.c#L135) — TODO — "stall here if previous pattern change hasn't been finished yet!"
+- [seq_pattern.c:135](../core/seq_pattern.c#L135) — TODO — "stall here if previous pattern change hasn't been finished yet!" — **RETIRED 2026-06-12 (not built); see §3.** Auto-writeback makes a per-group overwrite lose only an intermediate target, never the writeback decision.
 - [seq_song.c:244](../core/seq_song.c#L244) — TODO — "take bpm_start into account!"
 - [seq_song.c:413](../core/seq_song.c#L413) — TODO — "implement prefetching until end of step!"
 

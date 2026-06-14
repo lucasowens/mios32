@@ -1469,12 +1469,14 @@ s32 SEQ_FILE_B_PatternWriteEmpty(char *session, u8 bank, u8 pattern)
 /////////////////////////////////////////////////////////////////////////////
 // PHRASES cross-session probe — scan the MBSEQ_PH.V4 phrase bank for the
 // current session and return a 16-bit occupancy mask (bit n = phrase n has
-// committed records on disk). Reads only each phrase's base-pattern header
-// (name + num_tracks); a slot counts as occupied when num_tracks is in
-// [1, SEQ_CORE_NUM_TRACKS_PER_GROUP]. Bounded by the file size (never reads past
-// EOF), and empty slots below a capture carry the SEQ_FILE_B_PatternWriteEmpty
-// marker (num_tracks=0), so gaps can't false-positive. Returns 0 (nothing
-// occupied) when the session has no phrase file yet — not an error.
+// committed records on disk). Reads each phrase's group-0 base header (name +
+// num_tracks) AND its last-group header; a slot counts as occupied only when
+// BOTH have num_tracks in [1, SEQ_CORE_NUM_TRACKS_PER_GROUP] — i.e. the whole
+// 4-group block landed, not just a partial capture that died mid-write. Bounded
+// by the file size (never reads past EOF), and empty slots below a capture carry
+// the SEQ_FILE_B_PatternWriteEmpty marker (num_tracks=0), so gaps can't
+// false-positive. Returns 0 (nothing occupied) when the session has no phrase
+// file yet — not an error.
 // returns the mask (>= 0), or < 0 on a hard file error.
 /////////////////////////////////////////////////////////////////////////////
 // `names` (optional, NULL to skip): for each OCCUPIED phrase, copies the 20-char
@@ -1515,10 +1517,25 @@ s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session, char (*names)[21])
 
     u8 num_tracks = hdr[20];
     if( num_tracks >= 1 && num_tracks <= SEQ_CORE_NUM_TRACKS_PER_GROUP ) {
-      mask |= (1 << n);
-      if( names != NULL ) {
-        memcpy(names[n], hdr, 20); // the 20-char name read with the header
-        names[n][20] = 0;
+      // Completeness witness. A snapshot writes its 4 group records in ascending
+      // order (group 0 first ... group LAST last — SEQ_PATTERN_SnapshotWrite). A
+      // valid group-0 header alone can be a partial capture that died before the
+      // tail, which would recall truncated/undefined bytes into the later groups.
+      // Require the LAST group's header to have landed too: only then is the whole
+      // block on disk. (Gap markers write group 0 with num_tracks=0, excluded by
+      // the test above, so they never reach this extra read.) Inverts the write
+      // order — if the loop in SnapshotWrite is ever reordered, fix this too.
+      u32 last_nt_offset = offset + (u32)(SEQ_CORE_NUM_GROUPS - 1) * info->header.pattern_size + 20;
+      u8 last_num_tracks = 0xff; // an unreadable/truncated tail reads as incomplete
+      if( (last_nt_offset + 1) <= fsize &&
+          FILE_ReadSeek(last_nt_offset) >= 0 &&
+          FILE_ReadBuffer(&last_num_tracks, 1) >= 0 &&
+          last_num_tracks >= 1 && last_num_tracks <= SEQ_CORE_NUM_TRACKS_PER_GROUP ) {
+        mask |= (1 << n);
+        if( names != NULL ) {
+          memcpy(names[n], hdr, 20); // the 20-char name read with the group-0 header
+          names[n][20] = 0;
+        }
       }
     }
   }
