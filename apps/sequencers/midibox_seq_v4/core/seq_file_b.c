@@ -1477,7 +1477,11 @@ s32 SEQ_FILE_B_PatternWriteEmpty(char *session, u8 bank, u8 pattern)
 // occupied) when the session has no phrase file yet — not an error.
 // returns the mask (>= 0), or < 0 on a hard file error.
 /////////////////////////////////////////////////////////////////////////////
-s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session)
+// `names` (optional, NULL to skip): for each OCCUPIED phrase, copies the 20-char
+// base-record name into names[n] (NUL-terminated at [20]) at zero extra I/O.
+// Un-occupied / unreached slots are left untouched (the caller pre-blanks), so
+// phrase names survive a session reload.
+s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session, char (*names)[21])
 {
   // (re-)resolve + validate the phrase bank for this session
   if( SEQ_FILE_B_Open(session, SEQ_FILE_B_PHRASE_BANK) < 0 )
@@ -1510,13 +1514,60 @@ s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session)
       break;
 
     u8 num_tracks = hdr[20];
-    if( num_tracks >= 1 && num_tracks <= SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    if( num_tracks >= 1 && num_tracks <= SEQ_CORE_NUM_TRACKS_PER_GROUP ) {
       mask |= (1 << n);
+      if( names != NULL ) {
+        memcpy(names[n], hdr, 20); // the 20-char name read with the header
+        names[n][20] = 0;
+      }
+    }
   }
 
   FILE_ReadClose((file_t*)&info->file);
 
   return (s32)mask;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// PHRASES — overwrite ONLY the 20-char name field of phrase n's base (group-0)
+// record in this session's MBSEQ_PH.V4, leaving the captured organism bytes
+// untouched. Used by capture (stamp the phrase's name into the record so it is
+// authoritative on disk) and by rename-without-recapture. `name` is read for 20
+// bytes (space-padded, no terminator needed). Refuses if the phrase bank/slot
+// isn't valid (the phrase must already be captured — its records must exist).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_PhraseWriteName(char *session, u8 n, char *name)
+{
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(SEQ_FILE_B_PHRASE_BANK);
+  if( info == NULL )
+    return SEQ_FILE_B_ERR_INVALID_BANK;
+  if( !info->valid )
+    return SEQ_FILE_B_ERR_FORMAT;
+
+  u8 pattern = SEQ_CORE_NUM_GROUPS * n; // base (group-0) record of phrase n
+  if( pattern >= info->header.num_patterns )
+    return SEQ_FILE_B_ERR_INVALID_PATTERN;
+
+  char filepath[MAX_PATH];
+  SEQ_FILE_B_BuildPath(filepath, session, SEQ_FILE_B_PHRASE_BANK);
+
+  s32 status = 0;
+  if( (status=FILE_WriteOpen(filepath, 0)) < 0 ) {
+    FILE_WriteClose(); // important to free memory given by malloc
+    return status;
+  }
+
+  u32 offset = 10 + sizeof(seq_file_b_header_t) + pattern * info->header.pattern_size;
+  if( (status=FILE_WriteSeek(offset)) < 0 ) {
+    FILE_WriteClose();
+    return status;
+  }
+
+  status |= FILE_WriteBuffer((u8 *)name, 20);
+  status |= FILE_WriteClose();
+
+  return (status < 0) ? SEQ_FILE_B_ERR_WRITE : 0;
 }
 
 

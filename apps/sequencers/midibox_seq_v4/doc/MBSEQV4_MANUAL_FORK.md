@@ -525,6 +525,40 @@ them — exactly as if you'd jammed it there yourself.
 
 ---
 
+## Phrases — A Set Is a Path
+
+A **phrase** is a snapshot of the *whole living rig* (all 16 tracks, all four
+groups, every generator) committed to a named slot. CHECKPOINT/REVERT, but with
+16 waypoints instead of one — capture the moments that matter, then navigate
+them live: the rig (and its generators) snaps to each one, on the bar.
+
+Open the **PHRASE select-view** (the 16 select-row buttons are the 16 waypoints):
+
+* **Tap a waypoint → RECALL.** The whole organism comes back to that snapshot,
+  bar-aligned, generators resuming alive. Phrases are **immutable** — a recall is
+  always the pristine snapshot; if you'd nudged the previous one, the nudge is
+  written back to its working slot (never lost), not onto the phrase.
+* **Hold a waypoint ≥1 s → CAPTURE** the live rig into it, then drop into the
+  **name editor**. Type a name (multi-tap on the top/step row, like the SAVE
+  page), `GP16` or `EXIT` to save — or just `EXIT` to leave it numbered.
+
+**Reading the row.** Occupied waypoints light green; the current one (where you
+are) is amber. When you've **deliberately edited** the rig since landing on the
+current waypoint, it **winks** — "you've drifted off; recall to snap back, or
+hold to capture where you've gotten to." The living generators wandering on
+their own does *not* count as drift (that's what they do) — only your own
+edits, pulls, ROLLs. Pair it with **FREEZE**: frozen, the waypoint holds and only
+your hands move it; unfrozen, it's alive and the wink tracks your edits.
+
+Names and occupancy survive a session reload. Recalling shows `PHn <name>` (or
+`Phrase N` if unnamed). Track-grain recombination still happens *live* (the Pull)
+— then capture the result as a phrase.
+
+> Gestures here are provisional and will get refined as the wider instrument
+> comes together; capture-then-name in particular may decouple.
+
+---
+
 ## Cross-Cutting Notes
 
 ### Where files live

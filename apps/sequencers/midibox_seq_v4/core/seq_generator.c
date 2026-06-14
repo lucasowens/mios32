@@ -45,6 +45,11 @@
 
 static seq_generator_t CCM_SECTION pool[SEQ_GENERATOR_POOL_SIZE];
 
+// PHRASES drift gate: 1 only while the Tick is transcribing an auto-mutate into
+// the source (see header). Lets SEQ_PATTERN_DirtySetTrack keep generator
+// wandering out of the phrase-drift signal without touching seq_pattern_dirty.
+u8 seq_generator_in_automutate = 0;
+
 // Sparse map: pool index per (track, instrument), 0xFF = unallocated.
 static u8 CCM_SECTION pool_index[SEQ_CORE_NUM_TRACKS][SEQ_GENERATOR_INSTRUMENTS];
 
@@ -620,6 +625,11 @@ void SEQ_GENERATOR_Tick(void)
     // deliberate ROLL / ForceMutate gestures are NOT gated by FREEZE.
     if( seq_core_state.FREEZE )
       continue;
+    // Flag the auto-mutate window so the per-step SEQ_PAR_Set writes mark the
+    // group dirty (FEARLESS writeback) WITHOUT marking phrase-drift — ambient
+    // wandering is not a deliberate edit (PHRASES drift LED). Cleared right
+    // after so a concurrent UI edit isn't misclassified (window is µs/measure).
+    seq_generator_in_automutate = 1;
     u8 i;
     for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
       seq_generator_t *g = &pool[i];
@@ -628,5 +638,6 @@ void SEQ_GENERATOR_Tick(void)
       mutate_loop(g);
       write_loop_to_source(g);
     }
+    seq_generator_in_automutate = 0;
   }
 }

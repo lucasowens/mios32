@@ -76,6 +76,11 @@ from .sysex import (
     CMD_PHRASE_CAPTURE,
     CMD_PHRASE_RECALL,
     CMD_PHRASE_PRESENT,
+    CMD_PHRASE_META,
+    PHRASE_META_DRIFT,
+    PHRASE_META_NAME_GET,
+    PHRASE_META_NAME_SET,
+    PHRASE_META_NAME_COMMIT,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -1202,6 +1207,51 @@ class Board:
         if payload[1] != CMD_STATUS_OK:
             raise RuntimeError(f"PHRASE_PRESENT dispatch status {payload[1]:#04x}")
         return payload[0] == 1
+
+    def phrase_drift(self, timeout: float = 4.0) -> tuple[bool, int]:
+        """PHRASES Stage B: returns (drifted, last_recalled). `drifted` is True if
+        the live organism has been DELIBERATELY edited since the last phrase
+        recall/capture (excludes the generator's ambient auto-mutate).
+        last_recalled is the current waypoint index, or -1 if none this session."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_META, bytes([PHRASE_META_DRIFT])))
+        payload = self.wait_for_sysex(CMD_PHRASE_META, timeout=timeout, since=since)
+        if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_META drift reply: {payload!r}")
+        last_recalled = -1 if payload[1] == 0x7f else payload[1]
+        return (payload[0] == 1, last_recalled)
+
+    def phrase_name_get(self, n: int, timeout: float = 4.0) -> str:
+        """PHRASES Stage B: the in-RAM name of phrase n (trailing spaces stripped).
+        Empty string => un-named (the UI shows the slot number)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_META, bytes([PHRASE_META_NAME_GET, n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_META, timeout=timeout, since=since)
+        if len(payload) < 22 or payload[21] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_META name_get reply: {payload!r}")
+        return bytes(payload[1:21]).decode("ascii", "replace").rstrip(" ")
+
+    def phrase_name_set(self, n: int, name: str, timeout: float = 4.0) -> bool:
+        """PHRASES Stage B: set phrase n's RAM name (no disk write — capture or
+        phrase_name_commit persists it). Name is space-padded/truncated to 20."""
+        body = name.encode("ascii", "replace")[:20].ljust(20, b" ")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_META, bytes([PHRASE_META_NAME_SET, n & 0x7f]) + body))
+        payload = self.wait_for_sysex(CMD_PHRASE_META, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"PHRASE_META name_set reply: {payload!r}")
+        return payload[1] == CMD_STATUS_OK
+
+    def phrase_name_commit(self, n: int, timeout: float = 6.0) -> bool:
+        """PHRASES Stage B: persist phrase n's RAM name to its base record on disk
+        (rename-without-recapture). Returns False on a clean refuse (un-captured
+        slot or write error)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_META, bytes([PHRASE_META_NAME_COMMIT, n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_META, timeout=timeout, since=since)
+        if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_META name_commit reply: {payload!r}")
+        return payload[1] == CMD_STATUS_OK
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

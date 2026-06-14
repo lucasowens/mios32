@@ -67,8 +67,14 @@ extern s32 SEQ_FILE_B_PatternWriteEmpty(char *session, u8 bank, u8 pattern);
 
 extern s32 SEQ_FILE_B_PatternPeekName(u8 bank, u8 pattern, u8 non_cached, char *pattern_name);
 
-// PHRASES cross-session occupancy probe (returns a 16-bit mask, >= 0; 0 if no file)
-extern s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session);
+// PHRASES cross-session occupancy probe (returns a 16-bit mask, >= 0; 0 if no
+// file). `names` (NULL to skip) is filled with each occupied phrase's 20-char
+// base-record name (NUL-terminated), so names survive a session reload.
+extern s32 SEQ_FILE_B_PhraseOccupancyProbe(char *session, char (*names)[21]);
+
+// PHRASES: overwrite only the name field of phrase n's base record (capture
+// stamp / rename-without-recapture); leaves the captured organism untouched.
+extern s32 SEQ_FILE_B_PhraseWriteName(char *session, u8 n, char *name);
 
 
 /////////////////////////////////////////////////////////////////////////////

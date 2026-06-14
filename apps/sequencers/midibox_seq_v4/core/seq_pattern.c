@@ -75,6 +75,35 @@ static u8 pattern_loaded;
 static u16 phrase_present_mask;
 static s8 last_recalled_phrase;
 
+// PHRASES drift — per-group bitmask "edited since the last phrase recall/capture"
+// (the clean "drifted-since" signal seq_pattern_dirty can't be: recall's own
+// inversion ORs all of seq_pattern_dirty, so it always reads dirty after recall).
+// Set at the SAME source-write chokepoint as seq_pattern_dirty (SEQ_PATTERN_
+// DirtySetTrack) but GATED to exclude the generator's ambient auto-mutate
+// (seq_generator_in_automutate) — user choice: drift = MY edits, not the living
+// organism wandering. Cleared by the recall/capture acts (re-baseline to "on the
+// waypoint") + session-load probe + harness reset. Drives the PHRASE-view drift
+// LED. NB: deliberate ROLL/Snap/ForceMutate/Engage and group switches DO drift.
+static u8 phrase_drift;
+
+// PHRASES naming — in-session source of truth for each phrase's name (20 chars,
+// space-padded + NUL). Persisted in the phrase's base (group-0) record on disk
+// (free: the record already carries a name field) and RE-SEEDED on session load
+// by SEQ_PATTERN_ProbePhrasesOnLoad. Blank (all-spaces) => the UI shows the slot
+// number instead. Edited in place by the keypad (SEQ_PATTERN_PhraseName) and
+// committed to disk by SEQ_PATTERN_PhraseNameCommit; capture also stamps it so
+// disk == RAM (a never-named slot stays blank, not the inherited A-group name).
+static char seq_phrase_name[SEQ_FILE_B_NUM_PHRASES][21];
+
+// fill a 20-char name field with spaces + NUL (blank => UI shows the number)
+static void phrase_name_blank(char *p)
+{
+  int i;
+  for(i=0; i<20; ++i)
+    p[i] = ' ';
+  p[20] = 0;
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Initialisation
 /////////////////////////////////////////////////////////////////////////////
@@ -89,6 +118,12 @@ s32 SEQ_PATTERN_Init(u32 mode)
   pattern_loaded = 0;
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
+  phrase_drift = 0;
+  {
+    u8 n;
+    for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
+      phrase_name_blank(seq_phrase_name[n]);
+  }
 
   // pre-init pattern numbers
   u8 group;
@@ -150,7 +185,16 @@ void SEQ_PATTERN_DirtySetTrack(u8 track)
   if( track >= SEQ_CORE_NUM_TRACKS )
     return;
   MIOS32_IRQ_Disable();
-  seq_pattern_dirty |= (1 << (track / SEQ_CORE_NUM_TRACKS_PER_GROUP));
+  u8 group_bit = (1 << (track / SEQ_CORE_NUM_TRACKS_PER_GROUP));
+  seq_pattern_dirty |= group_bit;
+  // PHRASES drift: same chokepoint, but the generator's ambient auto-mutate
+  // doesn't count as a deliberate edit. seq_pattern_dirty above still sets so
+  // the wandered organism is written back faithfully on the next switch.
+  // (CC-replay during recall/Load also passes here; the recall/capture/probe
+  // tails clear phrase_drift afterward, mirroring seq_pattern_dirty's
+  // over-fire-then-normalize discipline.)
+  if( !seq_generator_in_automutate )
+    phrase_drift |= group_bit;
   MIOS32_IRQ_Enable();
 }
 
@@ -475,12 +519,54 @@ s32 SEQ_PATTERN_PhraseLastRecalled(void)
   return last_recalled_phrase;
 }
 
+// 1 if the live organism has been deliberately edited since the last phrase
+// recall/capture (any group), 0 otherwise — drives the PHRASE-view drift LED.
+// Excludes the generator's ambient auto-mutate (see phrase_drift / the gate in
+// SEQ_PATTERN_DirtySetTrack); deliberate ROLL/Snap/ForceMutate/Engage, hands-on
+// par/trg/CC edits, and group switches all count.
+s32 SEQ_PATTERN_PhraseDrifted(void)
+{
+  return phrase_drift ? 1 : 0;
+}
+
+// Pointer to phrase n's in-RAM name buffer (20 chars space-padded + NUL) — for
+// the keypad editor (edit in place) and the UI to display. A blank (all-spaces)
+// name means "un-named": the UI shows the slot number instead. NULL if n invalid.
+char *SEQ_PATTERN_PhraseName(u8 n)
+{
+  if( n >= SEQ_FILE_B_NUM_PHRASES )
+    return NULL;
+  return seq_phrase_name[n];
+}
+
+// Persist phrase n's current RAM name into its base (group-0) record on disk
+// (rename-without-recapture). Refuses an un-captured slot (no record to write
+// into). Returns >= 0 on success, < 0 on error / refuse.
+s32 SEQ_PATTERN_PhraseNameCommit(u8 n)
+{
+  if( n >= SEQ_FILE_B_NUM_PHRASES )
+    return -1;
+  if( !(phrase_present_mask & (1 << n)) )
+    return SEQ_FILE_B_ERR_NO_FILE; // nothing captured here yet
+
+  MUTEX_SDCARD_TAKE;
+  s32 status = SEQ_FILE_B_PhraseWriteName(seq_file_session_name, n, seq_phrase_name[n]);
+  MUTEX_SDCARD_GIVE;
+  return status;
+}
+
 // clear session-scoped phrase occupancy (called on harness reset; session load
 // uses SEQ_PATTERN_ProbePhrasesOnLoad below to re-seed from disk instead).
 void SEQ_PATTERN_PhraseResetState(void)
 {
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
+  phrase_drift = 0;
+  {
+    u8 n;
+    for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
+      phrase_name_blank(seq_phrase_name[n]);
+  }
 }
 
 // CROSS-SESSION PROBE (called on session load): re-seed the occupancy mask from
@@ -493,9 +579,21 @@ void SEQ_PATTERN_PhraseResetState(void)
 void SEQ_PATTERN_ProbePhrasesOnLoad(void)
 {
   last_recalled_phrase = -1;
+  // freshly loaded session: nothing recalled yet, so nothing has drifted. (Runs
+  // AFTER SEQ_FILE_B_LoadAllBanks in SEQ_FILE_LoadAllFiles, so it also wipes any
+  // drift the per-group load's CC-replay raised.)
+  phrase_drift = 0;
+
+  // pre-blank all names; the probe fills only the occupied slots' names, so a
+  // never-captured (or unreached) slot stays blank => UI shows the number.
+  {
+    u8 n;
+    for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
+      phrase_name_blank(seq_phrase_name[n]);
+  }
 
   MUTEX_SDCARD_TAKE;
-  s32 mask = SEQ_FILE_B_PhraseOccupancyProbe(seq_file_session_name);
+  s32 mask = SEQ_FILE_B_PhraseOccupancyProbe(seq_file_session_name, seq_phrase_name);
   MUTEX_SDCARD_GIVE;
 
   phrase_present_mask = (mask >= 0) ? (u16)mask : 0;
@@ -512,8 +610,20 @@ s32 SEQ_PATTERN_PhraseCapture(u8 n)
 
   s32 status = SEQ_PATTERN_SnapshotWrite(SEQ_FILE_B_PHRASE_BANK, 4 * n);
 
-  if( status >= 0 )
+  if( status >= 0 ) {
+    // Stamp the phrase name into the base record so disk == RAM: SnapshotWrite
+    // (reusing PatternWrite) just wrote group-0's working-slot name there; a
+    // never-named slot's seq_phrase_name is blank, so an un-named phrase shows
+    // its number (not the inherited A-group name), and a re-capture preserves a
+    // name set earlier this session. Best-effort: a name-write failure doesn't
+    // fail the capture (the organism is already safely committed).
+    MUTEX_SDCARD_TAKE;
+    SEQ_FILE_B_PhraseWriteName(seq_file_session_name, n, seq_phrase_name[n]);
+    MUTEX_SDCARD_GIVE;
     phrase_present_mask |= (1 << n);
+    last_recalled_phrase = n; // you just committed here -> this is "where you are"
+    phrase_drift = 0;         // this IS now the committed reference — no drift since
+  }
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] PHRASE CAPTURE %d status %d", SEQ_BPM_TickGet(), n, status);
@@ -533,8 +643,13 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
 
   s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n, 1);
 
-  if( status >= 0 )
+  if( status >= 0 ) {
     last_recalled_phrase = n;
+    // Cleared LAST, after SnapshotRead's CC-replay has finished tripping it: the
+    // organism now IS phrase n, so we're on the waypoint (no drift). A later
+    // edit/group-switch/ROLL re-sets it; ambient generator wandering does not.
+    phrase_drift = 0;
+  }
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] PHRASE RECALL %d status %d", SEQ_BPM_TickGet(), n, status);

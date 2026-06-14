@@ -64,6 +64,13 @@ CMD_PHRASE_RECALL = 0x7b
 CMD_PHRASE_PRESENT = 0x7c
 CMD_TRG_BYTE_SET = 0x7d
 CMD_FREEZE_SET = 0x7e
+CMD_PHRASE_META = 0x7f  # sub-op: 0=drift query, 1=name get, 2=name set, 3=name commit
+
+# CMD_PHRASE_META sub-ops — keep in sync with seq_testctrl.c
+PHRASE_META_DRIFT = 0x00
+PHRASE_META_NAME_GET = 0x01
+PHRASE_META_NAME_SET = 0x02
+PHRASE_META_NAME_COMMIT = 0x03
 
 # Dial IDs for CMD_GENERATOR_DIAL_SET — keep in sync with seq_testctrl.c.
 DIAL_RANGE_MIN = 0

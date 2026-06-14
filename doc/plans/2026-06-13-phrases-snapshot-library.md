@@ -88,15 +88,28 @@ capture a few phrases, navigate them live) before any UI polish.
 
 ### Stage B — Perform it (two-face + state LEDs)
 
-> **STATUS 2026-06-13 (this increment, SHIPPED + by-ear GO, HIL 143/143; durable record
-> in design §9 2026-06-13):** cross-session occupancy probe DONE — occupancy re-seeds
-> from disk on session load (`SEQ_PATTERN_ProbePhrasesOnLoad`; probe-by-content with
-> capture-time EMPTY markers, no format change). Also added: recall "never lose work" —
-> phrase recall writes back dirty groups to their working slots first (phrases stay
-> immutable; nudge recoverable via pattern-switch). **Still pending in Stage B:** the
-> **dirty/drift LED** (needs a clean "edited-since-recall" signal — recall currently sets
-> the dirty bit, so it isn't that signal yet; same blocker as the editable-waypoints
-> recall pivot in design §10) and phrase **naming** + capture-confirmation message.
+> **STATUS 2026-06-13 (SHIPPED + by-ear GO, HIL 143/143; design §9 2026-06-13):** cross-session
+> occupancy probe DONE — occupancy re-seeds from disk on session load
+> (`SEQ_PATTERN_ProbePhrasesOnLoad`; probe-by-content with capture-time EMPTY markers, no format
+> change). Also: recall "never lose work" — phrase recall writes back dirty groups first (phrases
+> stay immutable; nudge recoverable via pattern-switch).
+>
+> **STATUS 2026-06-14 — STAGE B COMPLETE (SHIPPED + by-ear/by-eye GO, HIL 148/148; design §9
+> 2026-06-14).** The three remaining items DONE:
+> - **drift/drift LED** — `phrase_drift` (per-group, distinct from `seq_pattern_dirty`), set at the
+>   `DirtySetTrack` chokepoint but GATED to EXCLUDE the generator's ambient auto-mutate
+>   (`seq_generator_in_automutate` around `SEQ_GENERATOR_Tick`'s write) — **user decision: drift = MY
+>   edits, not wandering**. Cleared at recall/capture/probe/reset tails (after CC-replay).
+>   `SEQ_PATTERN_PhraseDrifted()` winks the current waypoint amber↔green on `ui_cursor_flash`.
+>   Resolves the design-§10 "drifted-since-recall signal" thread (now unblocks the editable-waypoints
+>   pivot — still a choice).
+> - **naming** — full keypad (`SEQ_UI_KeyPad_*`) in a global modal over the PHRASE view; persisted
+>   FREE in the base (group-0) record name (`SEQ_FILE_B_PhraseWriteName` + the occupancy probe extended
+>   to re-seed names); `SEQ_PATTERN_PhraseName`/`PhraseNameCommit`; blank ⇒ shows the number.
+>   Provisional gesture: hold-capture opens the namer (decouple later).
+> - **capture-confirmation** — enriched to `PHn <name>` / `Phrase N`; capture also sets the current LED.
+>
+> Verbs folded onto `CMD_PHRASE_META 0x7f` (last free 7-bit opcode). **Only Stage C remains.**
 
 - **Two-face recall:** FREEZE-held = frozen tape (clear the recalled tracks'
   generators on recall — reuse FEARLESS Stage-B `SEQ_GENERATOR_TrackClear` path);

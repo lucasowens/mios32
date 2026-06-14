@@ -92,6 +92,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_PHRASE_PRESENT       0x7c
 #define CMD_TRG_BYTE_SET         0x7d
 #define CMD_FREEZE_SET           0x7e
+#define CMD_PHRASE_META          0x7f  // sub-op: 0=drift query, 1=name get, 2=name set, 3=name commit
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -152,7 +153,7 @@ static u8 header_ctr = 0;
 static u8 cmd = 0;
 static mios32_midi_port_t last_port = DEFAULT;
 
-#define PAYLOAD_BUF_MAX 16
+#define PAYLOAD_BUF_MAX 24  // fits CMD_PHRASE_META NAME_SET: [subop, n, 20 name bytes]
 static u8 payload_buf[PAYLOAD_BUF_MAX];
 static u8 payload_len = 0;
 
@@ -1573,6 +1574,94 @@ static void cmd_phrase_present(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// CMD_PHRASE_META — PHRASES Stage B (drift signal + naming). payload[0] = sub-op:
+//   0x00 DRIFT_QUERY: reply [drifted(0/1), last_recalled(0x7f=none else n), 0x01].
+//                     drifted = deliberately edited since last recall/capture
+//                     (excludes the generator's ambient auto-mutate).
+//   0x01 NAME_GET:    payload[1]=n -> reply [n, name[0..19] (20 bytes), ok].
+//   0x02 NAME_SET:    payload[1]=n, payload[2..] = up to 20 name bytes (7-bit
+//                     ASCII, space-padded) -> sets the RAM name only (no disk
+//                     write; capture or NAME_COMMIT persists) -> reply [n, ok].
+//   0x03 NAME_COMMIT: payload[1]=n -> persist the RAM name to the phrase's base
+//                     record (rename-without-recapture) -> reply [n, ok, status].
+// Folded onto one opcode: 0x7f is the last free 7-bit command byte.
+static void cmd_phrase_meta(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  if( len < 1 ) {
+    u8 reply[2] = { 0x00, 0x02 }; // malformed
+    send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+    return;
+  }
+
+  switch( payload[0] ) {
+    case 0x00: { // DRIFT_QUERY
+      s32 lr = SEQ_PATTERN_PhraseLastRecalled();
+      u8 reply[3];
+      reply[0] = SEQ_PATTERN_PhraseDrifted() ? 0x01 : 0x00;
+      reply[1] = (lr < 0) ? 0x7f : (u8)lr;
+      reply[2] = 0x01;
+      send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+    } break;
+
+    case 0x01: { // NAME_GET
+      if( len < 2 ) {
+        u8 reply[2] = { 0x00, 0x02 };
+        send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+        return;
+      }
+      u8 n = payload[1];
+      char *nm = SEQ_PATTERN_PhraseName(n);
+      u8 reply[22];
+      reply[0] = n;
+      int i;
+      for(i=0; i<20; ++i)
+        reply[1+i] = (nm != NULL) ? (u8)(nm[i] & 0x7f) : ' ';
+      reply[21] = (nm != NULL) ? 0x01 : 0x00;
+      send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+    } break;
+
+    case 0x02: { // NAME_SET (RAM only)
+      if( len < 2 ) {
+        u8 reply[2] = { 0x00, 0x02 };
+        send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+        return;
+      }
+      u8 n = payload[1];
+      char *nm = SEQ_PATTERN_PhraseName(n);
+      u8 reply[2];
+      if( nm == NULL ) {
+        reply[0] = n; reply[1] = 0x00; // invalid slot
+      } else {
+        u32 avail = (len >= 2) ? (len - 2) : 0;
+        int i;
+        for(i=0; i<20; ++i)
+          nm[i] = (i < (int)avail) ? (char)payload[2+i] : ' ';
+        nm[20] = 0;
+        reply[0] = n; reply[1] = 0x01;
+      }
+      send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+    } break;
+
+    case 0x03: { // NAME_COMMIT (persist RAM name to disk)
+      if( len < 2 ) {
+        u8 reply[2] = { 0x00, 0x02 };
+        send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+        return;
+      }
+      u8 n = payload[1];
+      s32 r = SEQ_PATTERN_PhraseNameCommit(n);
+      u8 reply[3] = { n, (r >= 0) ? 0x01 : 0x00, 0x01 };
+      send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+    } break;
+
+    default: {
+      u8 reply[2] = { 0x00, 0x02 }; // unknown sub-op
+      send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
+    } break;
+  }
+}
+
+
 // CMD_PATTERN_LOAD payload: [group, bank, pattern]
 // Reply payload: [group, bank, pattern, load_ok, dispatch_status]
 //   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
@@ -2167,6 +2256,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_FREEZE_SET:
             cmd_freeze_set(port, payload_buf, payload_len);
+            break;
+          case CMD_PHRASE_META:
+            cmd_phrase_meta(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

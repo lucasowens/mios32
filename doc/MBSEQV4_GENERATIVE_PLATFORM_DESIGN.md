@@ -1812,6 +1812,52 @@ both landed with NO phrase-file format change.
   the bar. Two independent adversarial reviews clean; pinned by
   `test_phrase_occupancy_survives_session_reload` + `test_phrase_recall_preserves_live_edit_to_working_slot`.
 
+**2026-06-14 — PHRASES Stage B-rest: the drift signal + naming (SHIPPED, by-ear/by-eye GO
+2026-06-14; HIL 148/148).** The three deferred Stage-B items, all landed with NO phrase-file
+format change. Resolves the §10 "drifted-since-recall signal" thread (the signal now exists).
+- **Drift signal (`phrase_drift`, per-group, seq_pattern.c).** The clean "edited since the last
+  recall/capture" that `seq_pattern_dirty` *can't* be — recall's own inversion ORs all of
+  `seq_pattern_dirty`, so it reads dirty the instant you recall. `phrase_drift` is set at the
+  SAME source-write chokepoint (`SEQ_PATTERN_DirtySetTrack`) and cleared by the recall/capture
+  acts (re-baseline to "on the waypoint") + the session-load probe + harness reset — the
+  over-fire-then-normalize-at-tail discipline `seq_pattern_dirty` already uses (CC-replay during
+  recall/Load trips it; the recall/capture tail clears it LAST, after the replay). **USER DECISION
+  (drift = MY edits, not the living organism wandering):** the generator's ambient per-measure
+  auto-mutate is GATED OUT via a new `seq_generator_in_automutate` flag scoped tightly around the
+  auto-mutate write in `SEQ_GENERATOR_Tick` — `seq_pattern_dirty` still sets (the wandered
+  organism must still write back), only `phrase_drift` skips. So the drift LED stays dark while
+  generators merely wander (FREEZE off), and the drift-LED + FREEZE read as one "anchored vs
+  adrift" story. Deliberate gestures (ROLL / Snap / ForceMutate / Engage), hands-on par/trg/CC
+  edits, and group switches DO drift. (Considered & rejected: making `seq_pattern_dirty` itself
+  clean — it's structurally the FEARLESS writeback bit; a separate mask is the right call.)
+- **Drift LED.** The current (last-recalled) waypoint, already amber on the PHRASE select-view,
+  **winks** when `SEQ_PATTERN_PhraseDrifted()` — its RED bit drops on `ui_cursor_flash` so it blinks
+  amber↔green (green occupancy bit stays solid → never reads un-occupied). Deliberately subtle (the
+  cursor flash is on only ~50ms/500ms); by-eye GO confirmed visible. A bolder 50/50 amber↔off blink
+  was staged then reverted — the subtle version was GO'd; revisit if it's missed in a live set.
+- **Capture now sets `last_recalled_phrase`** (you just committed there → that IS "where you are"),
+  so the current-LED follows captures, not just recalls, and drift reads meaningfully post-capture.
+- **Naming (full keypad).** Reuses the stock `SEQ_UI_KeyPad_*` editor in a GLOBAL modal
+  (`phrase_name_edit`) layered over the PHRASE view: the waypoints live on the SELECT row, the keypad
+  chars on the GP/step row + encoders, so they don't collide; the LCD is taken over by a gesture
+  overlay (mirrors the PATTERN-capture / pull overlays). Storage is FREE — the name is the phrase's
+  base (group-0) record name, persisted by a thin `SEQ_FILE_B_PhraseWriteName` (20-byte field write,
+  no format change) and RE-SEEDED on session load by the occupancy probe (extended to fill a names
+  array at zero extra I/O). Blank (all-spaces) ⇒ the UI shows the slot number; capture stamps the RAM
+  name into the record so disk == RAM (a never-named slot stays blank, NOT the inherited A-group
+  name) and preserves a name across re-capture. Rename-without-recapture = `SEQ_PATTERN_PhraseNameCommit`
+  (EXIT or GP16 in the editor). **Provisional gesture (tuned by ear, per FEARLESS precedent):
+  hold-capture drops straight into the namer** (the editor LCD IS the capture confirmation; EXIT keeps
+  the current name). User GO'd it "well enough for now" — likely decoupled when the whole system comes
+  together. Enriched confirmation: recall/empty show `PHn <name>` / `Phrase N`.
+- **Harness.** `CMD_PHRASE_META` (`0x7f` — the LAST free 7-bit command byte) folds four sub-ops
+  (drift query / name get / set / commit) behind a payload selector; `PAYLOAD_BUF_MAX` 16→24 to fit a
+  20-char name-set. +5 pins (148/148): drift trips on edit, recall clears, capture clears, **ambient
+  generator wander does NOT drift but a deliberate ForceMutate does** (driven through the real
+  measure-wrap path, mirroring test_freeze — the load-bearing semantic pin), name round-trip across a
+  session reload, rename-without-recapture. Build-path note: `make seq` emits `project.hex` in the
+  **app dir**, not `project_build/`.
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -2079,15 +2125,19 @@ processors rule names them).
   per bar. Reopened next to FORCE_SCALE in §9's freeze-faithfulness lineage.
 
 **PHRASES recall semantics — deferred threads (2026-06-13).** The cross-session probe +
-"never lose work" recall shipped (§9 2026-06-13). Two threads left open:
-- **Editable-waypoints recall (NOT chosen — possible pivot).** The shipped model keeps
-  phrases immutable (recall = pristine restore; a live nudge goes to the working slot,
+"never lose work" recall shipped (§9 2026-06-13). Threads:
+- **Editable-waypoints recall (NOT chosen — possible pivot; now UNBLOCKED).** The shipped model
+  keeps phrases immutable (recall = pristine restore; a live nudge goes to the working slot,
   not back onto the phrase). The user's *first instinct* was the opposite — switching away
   from a nudged phrase re-commits the nudge INTO it, so returning to A brings it back
-  (living waypoints). Rejected for v1: it forfeits the pristine-return guarantee and needs
-  a clean "drifted-since-recall" signal — the *same* deferred signal the Stage-B dirty LED
-  wants (today recall itself sets the dirty bit, so it isn't a clean "edited since" signal).
-  Revisit together if the immutable model feels wrong by ear over a longer set.
+  (living waypoints). Rejected for v1: it forfeits the pristine-return guarantee and needed
+  a clean "drifted-since-recall" signal. **That blocker is now gone** — `phrase_drift` shipped
+  with the Stage-B drift LED (§9 2026-06-14): a per-group "deliberately edited since recall/
+  capture" mask, distinct from `seq_pattern_dirty`, that excludes ambient generator wandering.
+  An editable-waypoints recall could now write live back onto the phrase IFF `phrase_drift` (a
+  deliberate edit, not just wandering) — but it still forfeits the pristine-return guarantee, so
+  it stays a *choice*, not a default. Revisit if the immutable model feels wrong by ear over a
+  longer set.
 - **Transient-SD probe-failure hardening (L1, deferred).** `SEQ_FILE_B_PhraseOccupancyProbe`
   returns mask=0 on ANY open/read failure; a *transient* read error on an existing phrase
   file would zero the RAM mask, and a subsequent out-of-order capture's gap-fill could then

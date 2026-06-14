@@ -172,6 +172,20 @@ static inline void SEQ_GENERATOR_MultSet(seq_generator_t *g, u8 step, u8 code)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Exported variables
+/////////////////////////////////////////////////////////////////////////////
+
+// Set (1) only while SEQ_GENERATOR_Tick is transcribing an AUTO-mutate (the
+// ambient per-measure wandering) into the source. PHRASES drift bookkeeping
+// reads it to EXCLUDE generator wandering from "edited-since-recall" — the
+// living organism drifting on its own is not a deliberate edit (the drift LED
+// stays dark while only the generator wanders; FREEZE off). Deliberate gestures
+// (ROLL / Snap / ForceMutate / Engage) are NOT flagged, so they still count as
+// drift. seq_pattern_dirty (FEARLESS writeback) is unaffected — it always sets.
+extern u8 seq_generator_in_automutate;
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Prototypes
 /////////////////////////////////////////////////////////////////////////////
 

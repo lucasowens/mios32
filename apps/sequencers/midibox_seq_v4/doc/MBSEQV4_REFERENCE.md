@@ -599,6 +599,48 @@ in three stages; by-ear hard GO 2026-06-13, HIL 135/135.
   `test_genstate_v4.py` (6), `test_fearless_checkpoint.py` (3); the gen-faithful
   pins use the V4-sized `genv4` session, the refuse pin a never-checkpointed `NOANC`.
 
+### PHRASES — the snapshot library ("a set is a path", 2026-06-13/14)
+
+Phrase mode promoted to *the* scene system (design §9 2026-06-11/13/14). A phrase is a
+whole-organism committed snapshot — capture/recall GENERALIZE CHECKPOINT/REVERT from the one
+anchor to N named slots. By-ear GO 2026-06-13 (Stage A/B) + 2026-06-14 (Stage B-rest); HIL 148.
+
+- **Storage.** Second sentinel bank `SEQ_FILE_B_PHRASE_BANK 0xfd` → `MBSEQ_PH.V4`
+  (`seq_file_phr_info`, resolved by `SEQ_FILE_B_InfoPtr`/`BuildPath`), a 64-pattern bank holding
+  `SEQ_FILE_B_NUM_PHRASES`=16 phrases × 4 group-records (phrase N → patterns `4N..4N+3`). Like the
+  anchor it's **outside** `0..NUM_BANKS-1` (never auto-loaded/navigable, survives session writeback).
+- **Capture/recall.** `SEQ_PATTERN_PhraseCapture/Recall` parameterize the FEARLESS
+  `SnapshotWrite`/`SnapshotRead` halves with `(bank, base_pattern=4N)`. Recall passes
+  `writeback_dirty_first=1` (never-lose-work: a live nudge writes back to the working slot first) and
+  **phrases stay IMMUTABLE** (recall restores the pristine snapshot). Two-face recall = the global
+  FREEZE switch (frozen tape vs living posture), not a per-recall clear.
+- **Occupancy (cross-session).** `phrase_present_mask` (u16) re-seeded on session load by
+  `SEQ_PATTERN_ProbePhrasesOnLoad` → `SEQ_FILE_B_PhraseOccupancyProbe` (probe-by-content: reads each
+  phrase base header, occupied iff `num_tracks∈[1,4]`; out-of-order-capture gaps carry an EMPTY
+  marker `SEQ_FILE_B_PatternWriteEmpty` so `f_lseek` garbage can't false-light). `last_recalled_phrase`
+  (s8, −1=none) = the "current" waypoint; **set by recall AND capture**.
+- **Drift signal (Stage B-rest).** `phrase_drift` (u8/group, seq_pattern.c) = "deliberately edited
+  since the last recall/capture" — the clean signal `seq_pattern_dirty` can't be (recall's inversion
+  ORs it). Set at the same `SEQ_PATTERN_DirtySetTrack` chokepoint, **gated** to exclude the generator's
+  ambient auto-mutate via `seq_generator_in_automutate` (set around `SEQ_GENERATOR_Tick`'s auto-mutate
+  write; `seq_pattern_dirty` still sets for writeback). Cleared at the recall/capture tails (after
+  CC-replay), `ProbePhrasesOnLoad`, and `PhraseResetState`. `SEQ_PATTERN_PhraseDrifted()` drives the
+  PHRASE-view drift LED (current waypoint winks amber↔green on `ui_cursor_flash` when drifted).
+- **Naming (Stage B-rest).** `seq_phrase_name[16][21]` (RAM, space-padded; blank ⇒ UI shows the slot
+  number) persisted FREE in the base (group-0) record name field — `SEQ_FILE_B_PhraseWriteName`
+  (20-byte write, no format change), re-seeded by the occupancy probe (now fills a names array).
+  `SEQ_PATTERN_PhraseName` (edit-in-place ptr) / `PhraseNameCommit` (rename-without-recapture).
+  Entry: stock `SEQ_UI_KeyPad_*` in a global modal `phrase_name_edit` over the PHRASE view (keypad on
+  GP/step row + encoders, LCD gesture-overlay; waypoints stay on the select row). Provisional gesture:
+  hold-capture opens the namer; GP16/EXIT save. Cleared on harness reset (`SEQ_UI_GestureStateReset`).
+- **PHRASE view** ([seq_ui.c](../core/seq_ui.c) `SEQ_UI_SEL_VIEW_PHRASE`): select-row GP tap = recall,
+  hold ≥`PHRASE_CAPTURE_HOLD_MS`(1s) = capture; LED nav-map green=occupied / amber=current / wink=drift.
+- **testctrl**: `PHRASE_CAPTURE 0x7a`, `PHRASE_RECALL 0x7b` (status `0x03`=empty refuse), `PHRASE_PRESENT
+  0x7c`, `FREEZE_SET 0x7e`, `PHRASE_META 0x7f` (sub-ops 0=drift query / 1=name get / 2=name set / 3=name
+  commit — 0x7f is the last free 7-bit opcode; `PAYLOAD_BUF_MAX` 16→24 for a 20-char name). Host:
+  `Board.phrase_capture/recall/present/drift/name_get/name_set/name_commit`. Pins: `test_phrases.py` (12),
+  V4-sized `genv4` session.
+
 ---
 
 ## 4. Feature catalog by version

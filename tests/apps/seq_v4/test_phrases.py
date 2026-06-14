@@ -39,7 +39,13 @@ import time
 import pytest
 
 from harness import Board, Button, CC, Page
-from harness.sysex import DIAL_DEPTH, DIAL_RATE, RESET_DEFAULT
+from harness.sysex import (
+    DIAL_DEPTH,
+    DIAL_RANGE_MAX,
+    DIAL_RANGE_MIN,
+    DIAL_RATE,
+    RESET_DEFAULT,
+)
 
 
 # The genv4 fixture may CREATE a session on first use — an async SD format worth
@@ -136,6 +142,34 @@ def _assert_same_slot(g_now, g_ref) -> None:
     assert g_now.range_min == g_ref.range_min
     assert g_now.range_max == g_ref.range_max
     assert g_now.contour_shape == g_ref.contour_shape
+
+
+# One bar at the default tempo runs in ~1.6s; 2.5s guarantees a step->0 wrap,
+# which is what fires the generator AUTO-mutate (mirrors test_freeze).
+PLAY_ACROSS_WRAP_S = 2.5
+
+
+def _engage_wide_mutator(board: Board, track: int = TRACK, instr: int = INSTR) -> None:
+    """ENGAGE a generator dialed to mutate aggressively (rate/depth 127, 4-octave
+    range) so a single measure wrap almost certainly moves the loop — for the
+    ambient-auto-mutate drift pin (mirrors test_freeze)."""
+    board.track_drum_init(track)
+    board.page_set(Page.PITCHGEN)
+    board.ui_instrument_set(instr)
+    time.sleep(SETTLE)
+    board.press(GP1)  # ENGAGE
+    time.sleep(ENGAGE_MSG_MS / 1000.0 + SETTLE)
+    board.generator_dial_set(track, instr, DIAL_RANGE_MIN, 36)
+    board.generator_dial_set(track, instr, DIAL_RANGE_MAX, 84)
+    board.generator_dial_set(track, instr, DIAL_RATE, 127)
+    board.generator_dial_set(track, instr, DIAL_DEPTH, 127)
+
+
+def _play_across_wrap(board: Board) -> None:
+    board.press(Button.PLAY)
+    time.sleep(PLAY_ACROSS_WRAP_S)
+    board.press(Button.STOP)
+    time.sleep(SETTLE)
 
 
 @pytest.mark.hardware
@@ -394,6 +428,151 @@ def test_phrase_occupancy_survives_session_reload(genv4):
     len_before = board.cc_get(0, CC.LENGTH)
     assert not board.phrase_recall(2), "an empty slot must still refuse after reload"
     assert board.cc_get(0, CC.LENGTH) == len_before, "a refused recall must not change live state"
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+# ---------------------------------------------------------------------------
+# Stage B-rest: the drift signal ("edited since last recall/capture") and naming
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.hardware
+def test_phrase_drift_trips_on_edit(genv4):
+    """The drift signal is the clean "edited-since" the existing dirty bit can't
+    be (recall's inversion poisons dirty). Capture re-baselines drift to 0; a
+    deliberate hands-on edit then trips it."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CAPTURE)
+    assert board.phrase_capture(0), "capture should commit"
+    drifted, last = board.phrase_drift()
+    assert not drifted, "capture re-baselines: no drift since the just-committed state"
+    assert last == 0, "capture sets the current waypoint to the captured slot"
+
+    board.cc_set(0, CC.LENGTH, LEN_JAM)  # a deliberate edit
+    drifted, _ = board.phrase_drift()
+    assert drifted, "a hands-on edit since capture must trip drift"
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_phrase_recall_clears_drift(genv4):
+    """Recall re-baselines drift to 0 (the organism now IS the waypoint), even
+    though recall's CC-replay passes through the same dirty chokepoint — the
+    recall tail clears drift LAST."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CAPTURE)
+    assert board.phrase_capture(0), "capture should commit"
+    board.cc_set(0, CC.LENGTH, LEN_JAM)  # drift away
+    drifted, _ = board.phrase_drift()
+    assert drifted, "edit should have drifted"
+
+    assert board.phrase_recall(0), "recall should commit"
+    drifted, last = board.phrase_drift()
+    assert not drifted, "recall re-baselines drift (back on the waypoint)"
+    assert last == 0, "recall sets the current waypoint"
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_phrase_generator_wander_not_drift(genv4):
+    """THE chosen semantic (user decision): the living organism wandering on its
+    own (generator AUTO-mutate, FREEZE off) is NOT a deliberate edit, so it must
+    NOT trip drift — while a deliberate ForceMutate IS an edit and DOES drift.
+    Driven through the real measure-wrap path (mirrors test_freeze); the gate is
+    seq_generator_in_automutate around SEQ_GENERATOR_Tick's auto-mutate write."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    _engage_wide_mutator(board)
+    assert board.phrase_capture(0), "capture should commit (re-baselines drift)"
+    drifted, _ = board.phrase_drift()
+    assert not drifted, "capture clears drift"
+
+    board.freeze_set(False)  # ensure ambient auto-mutate is active
+    before = board.generator_query(TRACK, INSTR)
+    assert before is not None
+    _play_across_wrap(board)  # a measure wrap fires the AUTO-mutate
+    after = board.generator_query(TRACK, INSTR)
+    assert after is not None and after.loop != before.loop, (
+        "preamble: the auto-mutate must actually have run across the wrap"
+    )
+
+    drifted, _ = board.phrase_drift()
+    assert not drifted, (
+        "ambient generator wandering must NOT count as drift (the live organism "
+        "drifting on its own is not a deliberate edit — user's chosen semantic)"
+    )
+
+    # but a DELIBERATE ForceMutate is an edit -> drifts
+    board.generator_tick_force(TRACK, INSTR)
+    drifted, _ = board.phrase_drift()
+    assert drifted, "a deliberate ForceMutate is an edit and must drift"
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_phrase_name_roundtrip(genv4):
+    """Naming: an un-named phrase reads back blank (the UI shows its number); a
+    named phrase round-trips and SURVIVES a session reload (capture stamps the
+    name into the base record; the occupancy probe re-seeds it on load)."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CAPTURE)
+    assert board.phrase_capture(0), "capture should commit"
+    assert board.phrase_name_get(0) == "", "an un-named phrase reads back blank"
+
+    board.phrase_name_set(1, "drop")  # set RAM name BEFORE capture stamps it
+    board.cc_set(0, CC.LENGTH, 13)
+    assert board.phrase_capture(1), "capture should commit (stamps the name)"
+    assert board.phrase_name_get(1) == "drop", "named phrase round-trips in RAM"
+
+    board.session_load(GENV4_SESSION, timeout=20.0)  # cross-session re-seed
+    assert board.phrase_name_get(1) == "drop", "the name must survive a session reload"
+    assert board.phrase_name_get(0) == "", "an un-named phrase stays blank after reload"
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_phrase_name_commit_without_recapture(genv4):
+    """Rename-without-recapture (what the UI's EXIT/GP16 does): set the RAM name
+    and commit just the name field to the base record, leaving the captured
+    organism untouched. Persists across a reload; refuses an un-captured slot."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CAPTURE)
+    assert board.phrase_capture(2), "capture should commit"
+
+    board.phrase_name_set(2, "verse A")
+    assert board.phrase_name_commit(2), "commit of a captured slot should persist"
+
+    board.session_load(GENV4_SESSION, timeout=20.0)
+    assert board.phrase_name_get(2) == "verse A", "rename-without-recapture must persist"
+    assert board.cc_get(0, CC.LENGTH) is not None  # organism intact (recall below)
+    assert board.phrase_recall(2), "the captured organism must be intact after a rename"
+    assert board.cc_get(0, CC.LENGTH) == LEN_CAPTURE, "rename must not touch the snapshot"
+
+    assert not board.phrase_name_commit(10), "commit must refuse an un-captured slot"
 
     for g in range(4):
         board.dirty_set(g, False)

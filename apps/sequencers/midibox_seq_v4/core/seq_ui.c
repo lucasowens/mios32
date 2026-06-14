@@ -204,6 +204,11 @@ static u8 pull_letter = 0xff;       // chosen source letter, 0xff = column group
 static char pull_status[24] = "";   // last commit result, shown in the held overlay
 
 
+// PHRASES name editor (Stage B) state — declared here (ahead of its uses) so the
+// gesture reset below can close a stuck editor. See the block above SEQ_UI_Button_GP.
+static u8 phrase_name_edit;       // 1 while the keypad name editor owns GP row + LCD
+static u8 phrase_name_edit_slot;  // which phrase (0..NUM_PHRASES-1) is being named
+
 // Reset the transient UI gesture state — the pull/capture held-modifier statics
 // and the active select-view. These are RAM-only performance state with no
 // reset path of their own, so a manual session (button-pressing on hardware)
@@ -221,6 +226,7 @@ void SEQ_UI_GestureStateReset(void)
   pattern_capture_group = 0xff;
   pattern_capture_dst_track = 0xff;
   seq_ui_sel_view = SEQ_UI_SEL_VIEW_NONE;
+  phrase_name_edit = 0; // close a stuck name editor (no own reset path)
 }
 
 
@@ -629,8 +635,67 @@ static void pull_commit_msg(s32 status, u8 bank, u8 letter, u8 num, u8 section, 
   }
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// PHRASES name editor (Stage B): a global keypad sub-mode layered over the
+// PHRASE select-view. The waypoint row lives on the SELECT row; the keypad
+// chars live on the GP/step row + encoders, so they don't collide. Entered
+// right after a CAPTURE (the editor's own LCD IS the capture confirmation);
+// GP16 or EXIT commits the name to disk and closes. seq_phrase_name is edited
+// in place via SEQ_PATTERN_PhraseName; persistence is SEQ_PATTERN_PhraseNameCommit.
+// Provisional gesture — tuned by ear with hardware, per the FEARLESS precedent.
+// (phrase_name_edit / phrase_name_edit_slot are declared earlier, ahead of
+// SEQ_UI_GestureStateReset which closes a stuck editor on harness reset.)
+/////////////////////////////////////////////////////////////////////////////
+
+// route one GP button (incrementer 0) / GP encoder (incrementer != 0) into the
+// keypad editor; GP16 commits the name + closes. Returns 1 when consumed.
+static s32 SEQ_UI_PhraseName_Input(seq_ui_encoder_t encoder, s32 incrementer)
+{
+  if( encoder == SEQ_UI_ENCODER_GP16 ) { // store name + exit (button only)
+    if( incrementer != 0 )
+      return 1;
+    SEQ_PATTERN_PhraseNameCommit(phrase_name_edit_slot);
+    phrase_name_edit = 0;
+    return 1;
+  }
+
+  char *buf = SEQ_PATTERN_PhraseName(phrase_name_edit_slot);
+  if( buf == NULL ) { phrase_name_edit = 0; return 1; }
+  return SEQ_UI_KeyPad_Handler(encoder, incrementer, buf, 20);
+}
+
+// format a phrase's confirmation label: trimmed name if named, else "Phrase N".
+static void SEQ_UI_PhraseName_MsgLabel(u8 n, char *out)
+{
+  char *nm = SEQ_PATTERN_PhraseName(n);
+  u8 has = 0;
+  int len = 0, i;
+  if( nm != NULL )
+    for(i=0; i<20; ++i)
+      if( nm[i] != ' ' ) { has = 1; len = i + 1; }
+
+  if( has ) {
+    sprintf(out, "PH%d ", n + 1);
+    int p = (int)strlen(out);
+    for(i=0; i<len && p<20; ++i)
+      out[p++] = nm[i];
+    out[p] = 0;
+  } else {
+    sprintf(out, "Phrase %d", n + 1);
+  }
+}
+
 static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
 {
+  // PHRASES name editor: while active it owns the GP/step row + encoders (the
+  // waypoints stay on the select row). Route presses into the keypad.
+  if( phrase_name_edit ) {
+    if( !depressed )
+      SEQ_UI_PhraseName_Input((seq_ui_encoder_t)gp, 0);
+    seq_ui_display_update_req = 1;
+    return 0;
+  }
+
   if( !depressed ) // selection button has been pressed while Bookm/Step/Track/Param/Trigger/Instr/Mute/Phrase button pressed: don't take over new sel view anymore
     seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
 
@@ -1692,6 +1757,15 @@ static s32 SEQ_UI_Button_Exit(s32 depressed)
 
   if( depressed ) return -1; // ignore when button depressed
 
+  // PHRASES name editor: EXIT commits the name + closes (same as GP16), and does
+  // NOT fall through to page/menu navigation.
+  if( phrase_name_edit ) {
+    SEQ_PATTERN_PhraseNameCommit(phrase_name_edit_slot);
+    phrase_name_edit = 0;
+    seq_ui_display_update_req = 1;
+    return 1;
+  }
+
   u8 prev_ui_page = ui_page;
 
   // forward to menu page
@@ -2154,6 +2228,11 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 
   if( sel_button >= 16 ) return -2; // max. 16 direct track buttons
 
+  // PHRASES name editor active: swallow the select row so a stray waypoint press
+  // doesn't recall/capture mid-rename (the GP/step row is the keypad).
+  if( phrase_name_edit )
+    return 0;
+
   // Capture gesture (PATTERN held): the select row picks a DESTINATION track
   // within the slot — stash it; the GP9-16 pattern press commits the capture
   // into that track of the chosen slot (persisted). Swallow the button so the
@@ -2300,17 +2379,28 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	ui_selected_phrase = n; // row highlight follows the touched waypoint
 	if( (u32)MIOS32_TIMESTAMP_GetDelay(phrase_t0) >= PHRASE_CAPTURE_HOLD_MS ) {
 	  s32 r = SEQ_PATTERN_PhraseCapture(n);
-	  if( r >= 0 )
-	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PHRASE", "captured");
-	  else
+	  if( r >= 0 ) {
+	    // Captured -> drop straight into the name editor for this slot. The
+	    // editor's LCD IS the capture confirmation; EXIT keeps the current name
+	    // (blank => the slot shows its number). Renames an already-named slot
+	    // too (the name is preserved across re-capture).
+	    phrase_name_edit_slot = n;
+	    phrase_name_edit = 1;
+	    SEQ_UI_KeyPad_Init();
+	    seq_ui_display_update_req = 1;
+	  } else
 	    SEQ_UI_SDCardErrMsg(2000, r);
 	} else if( SEQ_PATTERN_PhrasePresent(n) <= 0 ) {
-	  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1500, "PHRASE", "empty slot");
+	  char lbl[21];
+	  SEQ_UI_PhraseName_MsgLabel(n, lbl);
+	  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1500, lbl, "empty slot");
 	} else {
 	  s32 r = SEQ_PATTERN_PhraseRecall(n);
-	  if( r >= 0 )
-	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PHRASE", "recalled");
-	  else
+	  if( r >= 0 ) {
+	    char lbl[21];
+	    SEQ_UI_PhraseName_MsgLabel(n, lbl);
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, lbl, "recalled");
+	  } else
 	    SEQ_UI_SDCardErrMsg(2000, r);
 	}
       } break;
@@ -3179,6 +3269,10 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
     // encoder selects menu page like GP button
     if( encoder >= 1 && encoder <= 16 )
       SEQ_UI_PageSet(SEQ_UI_PAGES_MenuShortcutPageGet(encoder-1));
+  } else if( phrase_name_edit ) {
+    // PHRASES name editor: GP encoders 1..16 scroll the keypad (datawheel ignored)
+    if( encoder >= 1 && encoder <= 16 )
+      SEQ_UI_PhraseName_Input((seq_ui_encoder_t)(encoder-1), incrementer);
   } else if( ui_encoder_callback != NULL ) {
     if( seq_ui_button_state.ENC_BTN_FWD_PRESSED ) {
       // encoder emulates a GP button
@@ -3584,6 +3678,36 @@ s32 SEQ_UI_LCD_Handler(void)
         SEQ_LCD_PrintFormattedString("%c%d   ", prefix, i + 1);
       }
     }
+  } else if( phrase_name_edit ) {
+    // PHRASES name editor overlay (keypad). Mirrors the SAVE-page label editor,
+    // but for a phrase's name. GP/step row = keypad chars, GP16 or EXIT = save.
+    u8 n = phrase_name_edit_slot;
+    char *buf = SEQ_PATTERN_PhraseName(n);
+
+    SEQ_LCD_CursorSet(0, 0);
+    SEQ_LCD_PrintFormattedString("Name phrase %2d  <", n + 1);
+    {
+      int i;
+      if( buf != NULL )
+        for(i=0; i<20; ++i)
+          SEQ_LCD_PrintChar(buf[i]);
+      else
+        SEQ_LCD_PrintSpaces(20);
+    }
+    SEQ_LCD_PrintChar('>');
+    SEQ_LCD_PrintSpaces(2); // fill to col 40
+
+    SEQ_LCD_CursorSet(40, 0);
+    SEQ_LCD_PrintFormattedString("%-40s", "multi-tap keys; GP16/EXIT = save name");
+
+    // flashing cursor over the edited char (name starts at col 17)
+    if( ui_cursor_flash && buf != NULL ) {
+      SEQ_LCD_CursorSet(17 + ui_edit_name_cursor, 0);
+      SEQ_LCD_PrintChar('*');
+    }
+
+    SEQ_UI_KeyPad_LCD_Msg();       // line 1: 69 chars (charsets + Char <> Del Ins)
+    SEQ_LCD_PrintString("       SAVE"); // remaining 11 chars (GP15 unused, GP16=SAVE)
   } else {
     // re-init special chars
     if( screen_saver_was_active ) {
@@ -4319,15 +4443,21 @@ s32 SEQ_UI_LED_Handler_Periodic()
       case SEQ_UI_SEL_VIEW_PHRASE:
 	// PHRASES navigation map: every occupied waypoint lights in one colour,
 	// the current (last-recalled) waypoint in the other so it reads as "you
-	// are here" (bicolor on the slot, since you can only recall an occupied
-	// one). Pure display of the session-scoped occupancy state — no new
-	// global. Dirty/drift indication is deferred (seq_pattern_dirty is set by
-	// recall's own inversion, so it isn't a clean "drifted since" signal yet).
+	// are here" (bicolor/amber on the slot, since you can only recall an
+	// occupied one). Pure display of the session-scoped state — no new global.
 	select_leds_green = SEQ_PATTERN_PhrasePresentMask();
 	{
 	  s32 cur = SEQ_PATTERN_PhraseLastRecalled();
-	  if( cur >= 0 )
-	    select_leds_red = 1 << cur;
+	  if( cur >= 0 ) {
+	    // DRIFT: when the organism has been deliberately edited since this
+	    // waypoint was recalled/captured (SEQ_PATTERN_PhraseDrifted — excludes
+	    // ambient generator wandering), wink the current slot's RED bit on
+	    // ui_cursor_flash so it blinks amber<->green: "you've moved off this
+	    // waypoint — recall to snap back, or capture to commit." The green
+	    // occupancy bit stays solid, so the slot never reads as un-occupied.
+	    if( !(SEQ_PATTERN_PhraseDrifted() && ui_cursor_flash) )
+	      select_leds_red = 1 << cur;
+	  }
 	}
 	break;
       }
