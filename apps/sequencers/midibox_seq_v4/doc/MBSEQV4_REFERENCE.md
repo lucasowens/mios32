@@ -641,6 +641,48 @@ anchor to N named slots. By-ear GO 2026-06-13 (Stage A/B) + 2026-06-14 (Stage B-
   `Board.phrase_capture/recall/present/drift/name_get/name_set/name_commit`. Pins: `test_phrases.py` (12),
   V4-sized `genv4` session.
 
+### POSTURE-MORPH (Loop A) — per-group posture interpolation (2026-06-16)
+
+By-ear GO 2026-06-16; HIL 159 (10 morph pins). Design §10 "Phrase morphing". Glide ONE focused group's
+posture from its LIVE state (pos 0 = true pass-through) toward a target phrase's same-group slice (pos
+`PHRASE_MORPH_MAX`=16): `live = A + pos/MAX·(B−A)` per ext CC, applied per-measure.
+
+- **What morphs:** the **ext-CC posture block 0x80..0x9f only** (robotize mask/density/probabilities,
+  chord-mask strength, tension GRIP). NOT transpose/groove/length (main `cc[128]` array) or generator
+  dials (V4 gen sub-block) — those are follow-ons (design §10; user wants transpose+groove next).
+- **Engine** ([seq_pattern.c](../core/seq_pattern.c)): `SEQ_PATTERN_PhraseMorph{Arm,Set,Tick,Cancel,
+  Target,Value}` + static `phrase_morph_apply`. State ~260 B .bss: `phrase_morph_{target=0xff disarmed,
+  group,pos,dirty}` + `phrase_morph_a/b[4][32]` (A snapshotted from live at arm = reversible; B read once
+  from disk). Endpoint reader `SEQ_FILE_B_PhraseReadCCs(bank,pattern,slot_track,cc_out)` — read-only
+  ext-CC subset of `SEQ_FILE_B_TrackRead` (no live writes). Driven per-measure at the `ref_step==0`
+  boundary (`SEQ_PATTERN_PhraseMorphTick`, beside `TensionResolveBoundary` in seq_core.c). `phrase_morph_apply`
+  skips a CC whose value is unchanged (true pass-through at 0; also skips the unimplemented 0x9b..0x9f).
+- **Gesture** ([seq_ui.c](../core/seq_ui.c)): SELECT+tap a waypoint = arm (toward that phrase, focused
+  group); re-tap same slot = disarm. **Datawheel** = fine throw; **GP row** = 16-seg coarse bar + LED
+  thermometer. Controls gate on `ui_page == morph_armed_page` (the page armed on) — robust to
+  `simplified_antilog_frontpanel`. Released whenever the focused group's live CCs are replaced out-of-band:
+  `SnapshotRead` (recall/revert) → `PhraseMorphCancel`; `SEQ_PATTERN_Load`, `SEQ_CORE_LoadTrackFromSlot`
+  (pull), `SEQ_CORE_TrackUndoRestore` (UNDO) → `PhraseMorphInvalidateGroup(group)`; `ProbePhrasesOnLoad`
+  (session load) → cancel. Morph counts as drift; disarm is leave-as-live.
+- **testctrl** `CMD_PHRASE_MORPH 0x4f` (sub-ops 0=arm/1=set/2=query). **NB:** the 0x7a-0x7f phrase cluster
+  was full but the opcode space is NOT exhausted (~71 free) — the "0x7f last free" note above means "top
+  of that cluster", not the table. Host: `Board.phrase_morph_{arm,set,query}`. Pins: `test_phrase_morph.py` (10).
+
+### Phrase-recall landing feel + the interrupts-on timing fix (2026-06-16)
+
+- **Modes.** `seq_core_options.RECALL_SEAMLESS` (OPT menu "Phrase Recall lands Seamless", persisted
+  `RecallSeamless` in MBSEQ_C.V4): 0=**QUANTIZE** (keep bar-aligned restart) / 1=**SEAMLESS** (no re-phase).
+  Both drop the immediate sustain-cancel (the switch *click*). Implemented via `SEQ_PATTERN_SnapshotRead`
+  land-flags `SEQ_SNAPSHOT_NO_CANCEL` / `_NO_RESYNC`; `PhraseRecall` sets them from running + the option;
+  REVERT / stopped recall pass 0 (immediate hard restore, unchanged).
+- **Timing-glitch fix (platform).** Phrase recall read the 4-group snapshot inside `portENTER_CRITICAL`
+  (interrupts OFF for the whole multi-ms SD read). Recall runs in `TASK_Hooks`; emission/clock in
+  higher-priority `TASK_MIDI` — interrupts-off blocked `TASK_MIDI` mid-bar = an audible groove stall. Fix:
+  read with **interrupts ON** (drop the critical section in `SnapshotRead`, keep `MUTEX_SDCARD`), mirroring
+  `SEQ_PATTERN_Load` (the clean pattern-change path) so `TASK_MIDI` keeps emitting through the read. The
+  *true* deferred clip-launch ("nothing until the bar") is deferred — needs in-tick SD (mutex-nesting,
+  hang risk) or a ~tens-of-KB scratch buffer (RAM); see design §10.
+
 ---
 
 ## 4. Feature catalog by version

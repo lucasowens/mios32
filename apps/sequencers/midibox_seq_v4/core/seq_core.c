@@ -1827,6 +1827,10 @@ s32 SEQ_CORE_TrackUndoRestore(void)
 
   SEQ_CORE_ManualSynchToMeasure(1 << track);
 
+  // an UNDO restored this track's CCs out-of-band -> stale any morph armed on its
+  // group (same stale-A class as the pull/switch it usually reverts).
+  SEQ_PATTERN_PhraseMorphInvalidateGroup(track / SEQ_CORE_NUM_TRACKS_PER_GROUP);
+
   return track;
 }
 
@@ -1933,6 +1937,10 @@ s32 SEQ_CORE_LoadTrackFromSlot(u8 dst_track, u8 src_bank, u8 src_pattern, u8 src
 
   // bar-aligned drop (also delivers RATOPC's musical intent, see above)
   SEQ_CORE_ManualSynchToMeasure(1 << dst_track);
+
+  // a pull into the morph's focused group replaced a track's live CCs -> the
+  // arm-time A is stale; release the morph (per-group, like the pattern switch).
+  SEQ_PATTERN_PhraseMorphInvalidateGroup(dst_track / SEQ_CORE_NUM_TRACKS_PER_GROUP);
 
   return 0;
 }
@@ -2565,6 +2573,10 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
     if( seq_core_state.ref_step == 0 ) {
       // RESOLVE lands GRAVITY exactly on the One (§3 cadence).
       SEQ_CORE_TensionResolveBoundary();
+
+      // POSTURE-MORPH lands a pending position change on the One too — per-
+      // measure granularity (no-op while disarmed / position unchanged).
+      SEQ_PATTERN_PhraseMorphTick();
 
       if( synch_to_measure_req && SEQ_SONG_ActiveGet() && seq_song_guide_track ) {
 	seq_core_trk_t *t_ms = &seq_core_trk[0];

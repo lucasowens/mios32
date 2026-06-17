@@ -77,10 +77,15 @@ from .sysex import (
     CMD_PHRASE_RECALL,
     CMD_PHRASE_PRESENT,
     CMD_PHRASE_META,
+    CMD_PHRASE_MORPH,
     PHRASE_META_DRIFT,
     PHRASE_META_NAME_GET,
     PHRASE_META_NAME_SET,
     PHRASE_META_NAME_COMMIT,
+    PHRASE_MORPH_ARM,
+    PHRASE_MORPH_SET,
+    PHRASE_MORPH_QUERY,
+    PHRASE_MORPH_MAX,
     ENCODER_STATUS_DISPATCHED,
     ENCODER_STATUS_OUT_OF_RANGE,
     MidiPort,
@@ -1252,6 +1257,44 @@ class Board:
         if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
             raise RuntimeError(f"PHRASE_META name_commit reply: {payload!r}")
         return payload[1] == CMD_STATUS_OK
+
+    def phrase_morph_arm(self, n: int, timeout: float = 6.0) -> bool:
+        """POSTURE-MORPH (Loop A): arm a posture-morph toward phrase n for the
+        currently-focused group (ui_selected_group). Snapshots the live posture as
+        the morph=0 endpoint and reads phrase n's same-group slice as morph=MAX.
+        Returns False on a clean refuse (phrase not captured / no usable ext block).
+        Reads SD (the one-shot endpoint read) — generous timeout."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_MORPH, bytes([PHRASE_MORPH_ARM, n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_MORPH, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"PHRASE_MORPH arm reply: {payload!r}")
+        return payload[1] == 0x01
+
+    def phrase_morph_set(self, v: int, timeout: float = 2.0) -> int:
+        """POSTURE-MORPH: set the morph position (0..PHRASE_MORPH_MAX; 0 = live
+        pass-through, MAX = the armed phrase's posture). While running the lerp is
+        applied at the next measure boundary; stopped, it applies inline. Returns
+        the (clamped) position the engine now holds; raises if disarmed."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_MORPH, bytes([PHRASE_MORPH_SET, v & 0x7f])))
+        payload = self.wait_for_sysex(CMD_PHRASE_MORPH, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"PHRASE_MORPH set reply: {payload!r}")
+        if payload[1] != 0x01:
+            raise RuntimeError("PHRASE_MORPH set refused (morph disarmed?)")
+        return payload[0]
+
+    def phrase_morph_query(self, timeout: float = 2.0) -> tuple[int, int]:
+        """POSTURE-MORPH: returns (pos, target) — the current morph position and the
+        armed target phrase, or target == -1 if disarmed."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_MORPH, bytes([PHRASE_MORPH_QUERY])))
+        payload = self.wait_for_sysex(CMD_PHRASE_MORPH, timeout=timeout, since=since)
+        if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_MORPH query reply: {payload!r}")
+        target = -1 if payload[1] == 0x7f else payload[1]
+        return (payload[0], target)
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

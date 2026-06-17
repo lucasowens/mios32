@@ -95,6 +95,21 @@ static u8 phrase_drift;
 // disk == RAM (a never-named slot stays blank, not the inherited A-group name).
 static char seq_phrase_name[SEQ_FILE_B_NUM_PHRASES][21];
 
+// POSTURE-MORPH (Loop A, design §10) — per-group posture interpolation from the
+// group's LIVE posture (pos 0, true pass-through) toward a target phrase's same-
+// group slice (pos PHRASE_MORPH_MAX). A is snapshotted at arm time so pos 0
+// returns to it exactly (reversible); B is read once from disk at arm time (no
+// per-step SD). Only the ext CCs 0x80..0x9f move — grid/notes and the other 3
+// groups are untouched. The apply is DEFERRED to the per-measure boundary
+// (SEQ_PATTERN_PhraseMorphTick); the encoder/GP handlers only move the position.
+// 260 bytes of .bss, no render-cache.
+static u8 phrase_morph_target;  // armed target phrase B (0xff = disarmed)
+static u8 phrase_morph_group;   // focused group, LATCHED at arm time (0..NUM_GROUPS-1)
+static u8 phrase_morph_pos;     // morph position 0..PHRASE_MORPH_MAX
+static u8 phrase_morph_dirty;   // pos moved since last boundary apply
+static u8 phrase_morph_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_FILE_B_TRK_EXT_CC_COUNT]; // arm-time live CCs
+static u8 phrase_morph_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_FILE_B_TRK_EXT_CC_COUNT]; // target slice CCs
+
 // fill a 20-char name field with spaces + NUL (blank => UI shows the number)
 static void phrase_name_blank(char *p)
 {
@@ -119,6 +134,9 @@ s32 SEQ_PATTERN_Init(u32 mode)
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
   phrase_drift = 0;
+  phrase_morph_target = 0xff; // disarmed
+  phrase_morph_pos = 0;
+  phrase_morph_dirty = 0;
   {
     u8 n;
     for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
@@ -384,7 +402,14 @@ s32 SEQ_PATTERN_Checkpoint(void)
 // phrase. The phrase file is untouched, so the phrase stays a pristine committed
 // snapshot. REVERT passes 0: it deliberately discards live state back to the
 // checkpoint, so preserving the pre-revert divergence would defeat the gesture.
-static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty_first)
+// SnapshotRead landing flags — how the restored organism lands relative to the
+// running groove. Default 0 = the immediate hard restore (REVERT / stopped recall):
+// cut sustained notes + bar-aligned restart. Phrase recall WHILE PLAYING sets these
+// per the RECALL_SEAMLESS option so a switch doesn't click/jump (design: recall feel).
+#define SEQ_SNAPSHOT_NO_CANCEL  0x01  // don't cut sustained notes (let them ring through) -> kills the switch click
+#define SEQ_SNAPSHOT_NO_RESYNC  0x02  // don't bar-align-restart -> the groove continues in phase (SEAMLESS)
+
+static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty_first, u8 land_flags)
 {
   s32 status;
 
@@ -413,8 +438,16 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
   if( writeback_dirty_first )
     SEQ_PATTERN_WritebackAllDirty();
 
+  // Read the snapshot into live with INTERRUPTS ON (mirror SEQ_PATTERN_Load, the
+  // clean pattern-change path). The 4-group SD read takes several ms; the old
+  // portENTER_CRITICAL around it disabled interrupts for the whole read, so the
+  // higher-priority emission task (TASK_MIDI) couldn't preempt the recall (which
+  // runs in TASK_Hooks) -> the clock/emission stalled mid-bar = the audible
+  // timing glitch on a live phrase switch. The SD mutex still serializes the
+  // read; a tick mid-read keeps emitting the CURRENT output mirror (the new
+  // mirror is built by the forced render below, only after the read completes),
+  // exactly as SEQ_PATTERN_Load does for a normal pattern change.
   MUTEX_SDCARD_TAKE;
-  portENTER_CRITICAL();
   {
     u8 group;
     for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
@@ -423,18 +456,20 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
         status = err;
     }
   }
-  portEXIT_CRITICAL();
   MUTEX_SDCARD_GIVE;
 
-  // force a full quiet render + sustain-cancel for every track (mirrors the
-  // SEQ_PATTERN_Load / SEQ_CORE_LoadTrackFromSlot fan, all groups at once)
+  // force a full quiet render for every track (mirrors the SEQ_PATTERN_Load /
+  // SEQ_CORE_LoadTrackFromSlot fan, all groups at once). Sustain-cancel is the
+  // immediate note-cut that clicks on a live phrase switch -> skip it for a
+  // SEAMLESS/QUANTIZE recall (NO_CANCEL); REVERT/stopped keep the clean cut.
   {
     u8 track;
     for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
       seq_render_touched_ms[track] = 0;
       seq_render_dirty[track] = 1;
       SEQ_CORE_RenderTrack(track);
-      SEQ_CORE_CancelSustainedNotes(track);
+      if( !(land_flags & SEQ_SNAPSHOT_NO_CANCEL) )
+        SEQ_CORE_CancelSustainedNotes(track);
     }
   }
 
@@ -474,15 +509,22 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
   SEQ_GENERATOR_UndoInvalidate();
 
   // bar-aligned restart of all tracks (pull precedent; also delivers RATOPC's
-  // musical intent — a mid-jam restore lands on the next bar, not off-phase)
-  SEQ_CORE_ManualSynchToMeasure(0xffff);
+  // musical intent — a mid-jam restore lands on the next bar, not off-phase).
+  // SEAMLESS recall skips it (NO_RESYNC) so the groove continues in phase.
+  if( !(land_flags & SEQ_SNAPSHOT_NO_RESYNC) )
+    SEQ_CORE_ManualSynchToMeasure(0xffff);
+
+  // a whole-organism restore (recall/revert) replaces every group's live CCs ->
+  // any armed posture-morph's arm-time A is now stale. Release it (recall is "the
+  // arrival" — the morph's transition is done). Covers PhraseRecall + Revert.
+  SEQ_PATTERN_PhraseMorphCancel();
 
   return status;
 }
 
 s32 SEQ_PATTERN_Revert(void)
 {
-  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0, 0);
+  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0, 0, 0); // REVERT = immediate hard restore
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] REVERT status %d", SEQ_BPM_TickGet(), status);
@@ -570,6 +612,9 @@ void SEQ_PATTERN_PhraseResetState(void)
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
   phrase_drift = 0;
+  phrase_morph_target = 0xff; // disarmed
+  phrase_morph_pos = 0;
+  phrase_morph_dirty = 0;
   {
     u8 n;
     for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
@@ -586,6 +631,11 @@ void SEQ_PATTERN_PhraseResetState(void)
 // recalled this session. Falls back to all-empty on any probe error.
 void SEQ_PATTERN_ProbePhrasesOnLoad(void)
 {
+  // the whole session just changed under us -> any armed morph holds the OLD
+  // session's A/B/group; release it so a stray nudge can't clobber the new set.
+  // (The single chokepoint every SEQ_FILE_LoadAllFiles path runs.)
+  SEQ_PATTERN_PhraseMorphCancel();
+
   last_recalled_phrase = -1;
   // freshly loaded session: nothing recalled yet, so nothing has drifted. (Runs
   // AFTER SEQ_FILE_B_LoadAllBanks in SEQ_FILE_LoadAllFiles, so it also wipes any
@@ -649,7 +699,19 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
   if( !(phrase_present_mask & (1 << n)) )
     return SEQ_FILE_B_ERR_NO_FILE;
 
-  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n, 1);
+  // Recall feel (design: how a phrase switch lands). STOPPED -> immediate hard
+  // restore (land=0, unchanged). PLAYING -> never cut notes (kills the click);
+  // SEAMLESS also skips the bar-realign so the groove continues in phase, while
+  // QUANTIZE (default) keeps the bar-aligned restart (clean downbeat). REVERT
+  // is the undo and stays immediate (land=0) regardless.
+  u8 land = 0;
+  if( SEQ_BPM_IsRunning() ) {
+    land = SEQ_SNAPSHOT_NO_CANCEL;
+    if( seq_core_options.RECALL_SEAMLESS )
+      land |= SEQ_SNAPSHOT_NO_RESYNC;
+  }
+
+  s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n, 1, land);
 
   if( status >= 0 ) {
     last_recalled_phrase = n;
@@ -663,6 +725,185 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
     DEBUG_MSG("[SEQ_PATTERN:%d] PHRASE RECALL %d status %d", SEQ_BPM_TickGet(), n, status);
 
   return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// POSTURE-MORPH (Loop A) — per-group posture interpolation. See design §10.
+//
+// live = A + pos/PHRASE_MORPH_MAX * (B - A), per ext CC 0x80..0x9f, clamped
+// 0..127. A = the focused group's posture at arm time (pos 0 returns to it
+// exactly); B = the target phrase's same-group slice. Only the ext CCs move
+// (grid/notes untouched); only the focused group's 4 tracks are touched (the
+// other 3 groups untouched by construction). The apply is per-measure.
+/////////////////////////////////////////////////////////////////////////////
+
+// lerp the focused group's 4 tracks toward pos, write live, force a full quiet
+// render (the sweep-safe idiom from SEQ_PATTERN_SnapshotRead). Grid/notes are
+// untouched, so sustained notes are NOT cancelled (no per-measure clicks).
+static void phrase_morph_apply(void)
+{
+  u8 slot;
+  for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot) {
+    u8 track = phrase_morph_group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
+    u8 changed = 0;
+    u8 i;
+    for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
+      s32 a = phrase_morph_a[slot][i];
+      s32 b = phrase_morph_b[slot][i];
+      s32 lerped = a + (b - a) * (s32)phrase_morph_pos / PHRASE_MORPH_MAX;
+      if( lerped < 0 ) lerped = 0;
+      if( lerped > 127 ) lerped = 127;
+      // Only write a CC that actually changed: keeps pos 0 a TRUE pass-through
+      // (no spurious dirty/drift when live already == A), and the SEQ_CC_Set>=0
+      // guard skips the CCs 0x9b..0x9f the chokepoint doesn't implement (returns
+      // <0, writes nothing) so they never force a needless render.
+      if( (u8)lerped != (u8)SEQ_CC_Get(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i) &&
+          SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, (u8)lerped) >= 0 )
+        changed = 1;
+    }
+    // forced full quiet render, only if a CC moved: zero touched_ms (kill sweep
+    // regime -> whole-buffer refresh), arm dirty, render now. SEQ_CC_Set does NOT
+    // arm a render for most ext CCs (only SlotSync-routed ones), so the morph
+    // must force it; skip the work entirely when the posture didn't change.
+    if( changed ) {
+      seq_render_touched_ms[track] = 0;
+      seq_render_dirty[track] = 1;
+      SEQ_CORE_RenderTrack(track);
+    }
+  }
+  phrase_morph_dirty = 0;
+}
+
+// ARM target B = phrase n, focused group latched = ui_selected_group. Snapshots
+// A from live and reads B's group-slice ext CCs from disk (once). Refuses an
+// un-captured phrase or a missing/old ext block (no live change on refuse). pos
+// resets to 0 (pass-through) — arming alone changes nothing audible.
+s32 SEQ_PATTERN_PhraseMorphArm(u8 n)
+{
+  if( n >= SEQ_FILE_B_NUM_PHRASES )
+    return -1;
+
+  // refuse before any SD op if this phrase was never captured this session
+  if( !(phrase_present_mask & (1 << n)) )
+    return SEQ_FILE_B_ERR_NO_FILE;
+
+  u8 group = ui_selected_group;
+  if( group >= SEQ_CORE_NUM_GROUPS )
+    group = 0;
+
+  // DISARM for the duration of the SD reads: phrase_morph_b is overwritten in
+  // place across 4 blocking reads, and the per-measure PhraseMorphTick runs in a
+  // higher-priority task. Leaving the morph armed here would let a boundary mid-
+  // read lerp toward a half-overwritten B (a measure of garbage CCs). target ==
+  // 0xff makes the tick a clean no-op until the buffers are fully populated and
+  // re-armed below. A read failure simply leaves it disarmed (the refuse path).
+  phrase_morph_target = 0xff;
+  phrase_morph_dirty = 0;
+
+  // read B = target phrase's group-slice ext CCs (4 track sections).
+  // Refuse the whole arm if any slice lacks a usable (V3/V4/V2) ext block — better
+  // to not arm than to morph toward undefined values (phrases here are always V4).
+  MUTEX_SDCARD_TAKE;
+  s32 status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_PHRASE_BANK);
+  if( status >= 0 ) {
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP && status >= 0; ++slot)
+      status = SEQ_FILE_B_PhraseReadCCs(SEQ_FILE_B_PHRASE_BANK,
+                                        SEQ_CORE_NUM_GROUPS * n + group, slot,
+                                        phrase_morph_b[slot]);
+  }
+  MUTEX_SDCARD_GIVE;
+  if( status < 0 )
+    return status; // refuse — do NOT arm, no live change
+
+  // snapshot A = the focused group's live ext CCs (reversible pass-through at 0)
+  {
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot) {
+      u8 track = group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
+      u8 i;
+      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+        phrase_morph_a[slot][i] = (u8)SEQ_CC_Get(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i);
+    }
+  }
+
+  phrase_morph_target = n;
+  phrase_morph_group = group;
+  phrase_morph_pos = 0;
+  phrase_morph_dirty = 0; // pos 0 == live A already -> nothing to apply
+
+  if( seq_pattern_log_load_time )
+    DEBUG_MSG("[SEQ_PATTERN:%d] PHRASE MORPH ARM %d group %d", SEQ_BPM_TickGet(), n, group);
+
+  return 0;
+}
+
+// SET morph position 0..PHRASE_MORPH_MAX. Defers the apply to the next measure
+// boundary while running (per-measure granularity); applies inline when stopped
+// (mirrors RESOLVE's snap-now-when-stopped, so auditioning works). No-op if the
+// value is unchanged (avoids a wasted per-measure re-render while held).
+s32 SEQ_PATTERN_PhraseMorphSet(u8 v)
+{
+  if( phrase_morph_target == 0xff )
+    return -1; // disarmed
+
+  if( v > PHRASE_MORPH_MAX )
+    v = PHRASE_MORPH_MAX;
+
+  if( v == phrase_morph_pos )
+    return 0; // unchanged
+
+  phrase_morph_pos = v;
+  phrase_morph_dirty = 1;
+
+  if( !SEQ_BPM_IsRunning() )
+    phrase_morph_apply(); // snap now when stopped (clears dirty)
+
+  return 0;
+}
+
+// PER-MEASURE driver — called from the ref_step==0 boundary. Applies a pending
+// position change (lerp + re-render the focused group) once per measure.
+s32 SEQ_PATTERN_PhraseMorphTick(void)
+{
+  if( phrase_morph_target == 0xff || !phrase_morph_dirty )
+    return 0;
+
+  phrase_morph_apply();
+  return 1;
+}
+
+// DISARM. Does NOT revert live CCs — the morph leaves you wherever you stopped
+// (FEARLESS leave-as-live; UNDO is the safety net). The next switch/recall will
+// writeback whatever is live.
+void SEQ_PATTERN_PhraseMorphCancel(void)
+{
+  phrase_morph_target = 0xff;
+  phrase_morph_pos = 0;
+  phrase_morph_dirty = 0;
+}
+
+// Release an armed morph when its focused group's live posture was replaced out-
+// of-band (pattern switch / track pull): the arm-time A is now stale, so pos 0
+// would no longer be the live state and a further nudge would lerp off the old A.
+// Recall/revert/session-load replace ALL groups -> they call Cancel directly.
+void SEQ_PATTERN_PhraseMorphInvalidateGroup(u8 group)
+{
+  if( phrase_morph_target != 0xff && group == phrase_morph_group )
+    SEQ_PATTERN_PhraseMorphCancel();
+}
+
+// armed target phrase n, or -1 if disarmed.
+s32 SEQ_PATTERN_PhraseMorphTarget(void)
+{
+  return (phrase_morph_target == 0xff) ? -1 : (s32)phrase_morph_target;
+}
+
+// current morph position 0..PHRASE_MORPH_MAX.
+u8 SEQ_PATTERN_PhraseMorphValue(void)
+{
+  return phrase_morph_pos;
 }
 
 
@@ -892,6 +1133,9 @@ s32 SEQ_PATTERN_Load(u8 group, seq_pattern_t pattern)
   // snapshot (an UNDO would otherwise clobber a freshly-loaded track with pre-load
   // bytes). Global/one-deep, so an unconditional drop is correct here.
   SEQ_GENERATOR_UndoInvalidate();
+
+  // a pattern switch into the morph's focused group makes its arm-time A stale.
+  SEQ_PATTERN_PhraseMorphInvalidateGroup(group);
 
   return status;
 }

@@ -1898,6 +1898,34 @@ no new musical surface.
 - Low-severity cluster filed to TODO_TRIAGE ("Fork hardening backlog"); the L1 transient-SD
   distinction stays deferred (§10).
 
+**2026-06-16 — POSTURE-MORPH (Loop A) + phrase-recall landing feel (SHIPPED, by-ear GO; HIL 159/159)**
+The phrase-morphing bundle (queued in §10 since 2026-06-13) plus a recall-feel fix the user
+hit while evaluating it. Both by-ear-confirmed, committed together.
+- **POSTURE-MORPH (Loop A).** Per-group posture interpolation, live→target phrase's same-group
+  slice, over the ext-CC posture block (0x80..0x9f: robotize / chord-mask / GRIP). Full §10
+  "Phrase morphing" SHIPPED note has the detail + the two deliberate divergences from the
+  original theory (ext-CC subset only; per-measure, not immediate). Scope decided by the user
+  via AskUserQuestion: per-group / from-live→target / datawheel-fine + GP-bar-coarse. The
+  arm-time A snapshot makes pos 0 a true reversible pass-through. SELECT+tap arms (controls are
+  scoped to the page armed on — robust to `simplified_antilog_frontpanel`, which means the PHRASE
+  button may not switch to SONG). Released on any out-of-band CC replace (recall/revert/switch/
+  pull/UNDO/session-load). Adversarial review (two workflow passes) caught + fixed a cluster
+  (cross-page control hijack, stale-A after recall, an arm/boundary TOCTOU, spurious drift at
+  pos 0) — every fix is a no-op when disarmed, so the 149 baseline was structurally safe.
+- **Phrase-recall landing feel.** Recall while playing used to **click** (immediate mid-bar
+  sustain-cancel) and **groove-jump** (the `ManualSynchToMeasure` re-phase). New `RECALL_SEAMLESS`
+  option (OPT menu, persisted in MBSEQ_C.V4): **QUANTIZE** (default — keep the bar-aligned
+  restart, clean downbeat) vs **SEAMLESS** (no re-phase, groove continues). Both drop the
+  note-cut. REVERT / stopped recall keep the immediate hard restore. Parameterized via
+  `SnapshotRead` land-flags (`SEQ_SNAPSHOT_NO_CANCEL` / `_NO_RESYNC`); no deferral, no RAM hit.
+- **The real timing glitch (platform fix).** Even seamless/quantize still glitched: phrase
+  recall read the 4-group snapshot off SD inside `portENTER_CRITICAL` (interrupts OFF for the
+  whole multi-ms read). Recall runs in `TASK_Hooks`; emission/clock in higher-priority
+  `TASK_MIDI` — interrupts-off blocked `TASK_MIDI` mid-bar = the stall. Fix: read with
+  interrupts ON (drop the critical section, keep the SD mutex), mirroring `SEQ_PATTERN_Load`
+  (the clean pattern-change path) so `TASK_MIDI` keeps emitting through the read. Applies to
+  every recall + REVERT.
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -2192,9 +2220,11 @@ processors rule names them).
   posture (disposable SD); fix is to distinguish "no file" (0) from "file unreadable" (<0)
   and refuse gap-fill on the latter. Build only if it bites.
 
-**Phrase morphing — a third morph model unlocked by the snapshot library (2026-06-13,
-candidate; its own future bundle, NOT built).** Surfaced by the user right after the
-PHRASES Stage A by-ear GO ("does this open up morphing between phrases?"). Because a
+**Phrase morphing (Loop A) — SHIPPED + by-ear GO 2026-06-16** (candidate 2026-06-13).
+Surfaced by the user right after the PHRASES Stage A by-ear GO ("does this open up
+morphing between phrases?"). The analysis below is the original design rationale; what
+Loop A actually shipped (and where it diverged) is the SHIPPED note at the end of this
+entry. Because a
 phrase stores the full committed organism as *values* (not refs — see the §9
 2026-06-13 snapshot-library entry), **both endpoints A and B are available as data**,
 and the engine already re-renders the organism from source into the output mirror on
@@ -2226,6 +2256,44 @@ is load-bearing:
   transition; the (shipped) bar-aligned recall is the arrival — two complementary
   gestures. Open: generators-during-morph; grid-crossfade ordering; the morph control
   surface (knob/fader assignment).
+
+**SHIPPED (Loop A, 2026-06-16) — what was built, and where it diverged from the theory
+above.** Per-group posture morph from the focused group's LIVE posture (pos 0 = true
+pass-through, A snapshotted at arm so it's reversible) toward a target phrase's same-
+group slice (pos `PHRASE_MORPH_MAX`=16). Control: SELECT+tap a waypoint = arm (toward
+that phrase, for the focused group); the **datawheel** is the fine throw and the **GP
+row** is a 16-segment coarse bar + LED thermometer; tap-to-recall = the arrival (lands
+structure, releases the morph). Two divergences from the rationale above, both
+deliberate: (1) **the morphed set is the ext-CC posture block 0x80..0x9f ONLY** —
+robotize (mask/density/probabilities), chord-mask strength, tension GRIP. Transpose/
+groove/length live in the main `cc[128]` array (outside the ext block) and the generator
+dials in the V4 gen sub-block — *neither morphs in Loop A* (the "GRAVITY position,
+transpose, groove, generator dials" list above was aspirational). (2) **applied
+per-measure** at the `ref_step==0` boundary (beside the RESOLVE landing), not "immediate"
+— per-bar stepping reads as intentional and is cheap; immediate is unnecessary. Resolved
+opens: the control surface (datawheel + GP-bar + SELECT+tap arm). New: `CMD_PHRASE_MORPH`
+0x4f; the morph counts as drift (a hands gesture); disarm is leave-as-live (UNDO is the
+net); an armed morph is RELEASED whenever the focused group's live CCs are replaced
+out-of-band (recall/revert/pattern-switch/pull/UNDO/session-load) so a later nudge can't
+lerp off a stale A. Engine in `seq_pattern.c` (`SEQ_PATTERN_PhraseMorph{Arm,Set,Tick,
+Cancel,Target,Value}` + `phrase_morph_apply`, ~260 B .bss), endpoint reader
+`SEQ_FILE_B_PhraseReadCCs`. **Follow-ons (still open):** widen the morphed set to the
+main-array posture CCs (transpose/groove/length) and the generator dials — the user
+explicitly wants transpose+groove; note-content/grid crossfade stays RAM-gated and
+deferred (the "swap grid discretely" steer holds); generators-during-morph.
+
+**Phrase-recall landing — true deferred clip-launch (follow-on; SHIPPED feel is the
+immediate variant, 2026-06-16).** Loop A's recall now lands clean (QUANTIZE = bar-aligned
+restart / SEAMLESS = in-phase, both no click) and the mid-bar timing glitch is fixed
+(interrupts-on SD read — see §9). But QUANTIZE still swaps content *immediately* on tap,
+so for *different* phrases a short mid-phase tail plays before the downbeat. True
+clip-launch ("nothing changes until the bar") needs either SD I/O from the audio tick
+(the synched-pattern-change does this, but its mutex/critical nesting is unverified — a
+hang risk on hardware, so NOT rushed) or a whole-organism scratch buffer (~tens of KB —
+blows the RAM budget). Deferred deliberately; revisit if the tail bothers by ear. The
+two unhooked out-of-band CC-replace paths from the morph review (`SEQ_PATTERN_Fix`, the
+seq_ui_disk.c cross-session copy) and the pre-existing `SEQ_FILE_B_Open` FILE_ReadReOpen
+leak stay filed (negligible / never mid-morph).
 
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).

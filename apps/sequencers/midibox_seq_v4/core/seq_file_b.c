@@ -62,9 +62,9 @@
 #define SEQ_FILE_B_TRK_EXT_TAG_V3       0x03  // ext CCs 0x80..0x9f (adds chord-mask 0x96..0x99 + tension GRIP 0x9a) + anchors
 #define SEQ_FILE_B_TRK_EXT_TAG_V4       0x04  // V3 payload + generator sub-block (FEARLESS SWITCHING Stage B)
 
-#define SEQ_FILE_B_TRK_EXT_CC_FIRST     0x80
-#define SEQ_FILE_B_TRK_EXT_CC_LAST      0x9f   // widened past GRIP (0x9a); a clean boundary with headroom
-#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)  // 32 (V3)
+// SEQ_FILE_B_TRK_EXT_CC_FIRST / _LAST / _COUNT now live in seq_file_b.h (shared
+// with the posture-morph in seq_pattern.c — they define SEQ_FILE_B_PhraseReadCCs's
+// cc_out contract). Still visible here via the include.
 // V2 count is FROZEN: V2 files on SD hold exactly this many ext-CC bytes, so the
 // V2 read arm must keep using it even though the live range above grew. (Bumping
 // LAST without freezing this would mis-align every V2 pattern's anchors on read.)
@@ -1179,6 +1179,148 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
   FILE_ReadClose((file_t*)&info->file);
 
   return 0; // no error (ext_status failures degraded to "loaded without ext")
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// POSTURE-MORPH endpoint reader — reads ONLY one section's ext-CC block
+// (0x80..0x9f) into cc_out[SEQ_FILE_B_TRK_EXT_CC_COUNT] with NO live writes.
+//
+// A strict read-only subset of SEQ_FILE_B_TrackRead: it skips EVERY section's
+// data (not just the ones before slot_track) to reach the ext base, then peeks
+// the shared tag and indexes slot_track's ext block directly. Reads only the
+// 32 CC bytes — never the robotize anchors, never the generator sub-block, and
+// never SEQ_CC_Set / seq_cc_trk[] / seq_par/trg. The morph lerp does the live
+// writes (via SEQ_CC_Set) so seq_cc_trk[] + the tension slot stay consistent.
+//
+// V3/V4 -> 32 CCs; V2 -> 22 CCs with cc_out[22..31] zero-extended; V1 / absent
+// / tag-mismatch -> SEQ_FILE_B_ERR_READ (the caller refuses to arm rather than
+// morph toward undefined values — phrases written by this fork are always V4).
+//
+// returns < 0 on errors (error codes are documented in seq_file.h)
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_PhraseReadCCs(u8 bank, u8 pattern, u8 slot_track, u8 *cc_out)
+{
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
+    return SEQ_FILE_B_ERR_INVALID_BANK;
+
+  if( slot_track >= SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+
+  if( cc_out == NULL )
+    return -1;
+
+  if( !info->valid )
+    return SEQ_FILE_B_ERR_NO_FILE;
+
+  if( pattern >= info->header.num_patterns )
+    return SEQ_FILE_B_ERR_INVALID_PATTERN;
+
+  // re-open file
+  if( FILE_ReadReOpen((file_t*)&info->file) < 0 )
+    return -1; // file cannot be re-opened
+
+  // seek to the record
+  s32 status;
+  u32 offset = 10 + sizeof(seq_file_b_header_t) + pattern * info->header.pattern_size;
+  if( (status=FILE_ReadSeek(offset)) < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // pattern header: name (20) + num_tracks + mixer_map + sysex_setup + reserved1
+  u8 dummy_pattern_name[20];
+  status |= FILE_ReadBuffer(dummy_pattern_name, 20);
+
+  u8 num_tracks;
+  status |= FILE_ReadByte(&num_tracks);
+
+  u8 dummy_byte;
+  status |= FILE_ReadByte(&dummy_byte); // mixer_map
+  status |= FILE_ReadByte(&dummy_byte); // sysex_setup
+  status |= FILE_ReadByte(&dummy_byte); // reserved1
+
+  if( num_tracks > SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    num_tracks = SEQ_CORE_NUM_TRACKS_PER_GROUP;
+
+  if( status < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // refuse a section the slot doesn't store (same caveat as TrackRead: NOT a
+  // reliable unwritten-slot guard — the caller gates on the occupancy mask)
+  if( slot_track >= num_tracks ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+  }
+
+  // walk ALL sections' data to reach the ext base — each section's size depends
+  // on its own stored geometry (no fixed stride); only the ext blocks past the
+  // base are fixed stride
+  u8 track_i;
+  for(track_i=0; track_i<num_tracks; ++track_i) {
+    u8 dummy_name[80];
+    status |= FILE_ReadBuffer(dummy_name, 80);
+
+    u8 skip_p_instruments, skip_t_instruments, skip_p_layers, skip_t_layers;
+    u16 skip_p_size, skip_t_size;
+    status |= FILE_ReadByte(&skip_p_instruments);
+    status |= FILE_ReadByte(&skip_t_instruments);
+    status |= FILE_ReadByte(&skip_p_layers);
+    status |= FILE_ReadByte(&skip_t_layers);
+    status |= FILE_ReadHWord(&skip_p_size);
+    status |= FILE_ReadHWord(&skip_t_size);
+
+    u32 skip_par = skip_p_instruments * skip_p_layers * skip_p_size;
+    u32 skip_trg = skip_t_instruments * skip_t_layers * skip_t_size;
+    u32 new_pos = FILE_ReadGetCurrentPosition() + 128 + skip_par + skip_trg;
+    if( status < 0 || (status=FILE_ReadSeek(new_pos)) < 0 ) {
+      FILE_ReadClose((file_t*)&info->file);
+      return SEQ_FILE_B_ERR_READ;
+    }
+  }
+
+  // ext base: peek the shared tag, index slot_track's block, read its CC bytes
+  u32 ext_base = FILE_ReadGetCurrentPosition();
+  s32 rc = SEQ_FILE_B_ERR_READ; // assume "no usable ext" until a V3/V4/V2 read lands
+  u8 first_tag = 0;
+  if( FILE_ReadByte(&first_tag) >= 0 ) {
+    u16 per_track_ext_size = 0;
+    if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+      per_track_ext_size = SEQ_FILE_B_TRK_EXT_V4_SIZE;
+    else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
+      per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
+    else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
+      per_track_ext_size = SEQ_FILE_B_TRK_EXT_V2_SIZE;
+    else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V1 )
+      per_track_ext_size = SEQ_FILE_B_TRK_EXT_V1_SIZE;
+
+    if( per_track_ext_size &&
+	FILE_ReadSeek(ext_base + slot_track * per_track_ext_size) >= 0 ) {
+      u8 tag = 0;
+      // only a tag matching first_tag may be parsed at the indexed position
+      // (mixed tags are never written -> a mismatch means corruption)
+      if( FILE_ReadByte(&tag) >= 0 && tag == first_tag ) {
+	if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	  if( FILE_ReadBuffer(cc_out, SEQ_FILE_B_TRK_EXT_CC_COUNT) >= 0 )
+	    rc = 0;
+	} else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
+	  if( FILE_ReadBuffer(cc_out, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2) >= 0 ) {
+	    u8 i;
+	    for(i=SEQ_FILE_B_TRK_EXT_CC_COUNT_V2; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+	      cc_out[i] = 0; // zero-extend chord-mask 0x96..0x99 + GRIP 0x9a
+	    rc = 0;
+	  }
+	}
+	// V1 (anchors only) leaves rc = ERR_READ — no ext CCs to morph toward
+      }
+    }
+  }
+
+  FILE_ReadClose((file_t*)&info->file);
+  return rc;
 }
 
 

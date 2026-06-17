@@ -580,6 +580,25 @@ Names and occupancy survive a session reload. Recalling shows `PHn <name>` (or
 `Phrase N` if unnamed). Track-grain recombination still happens *live* (the Pull)
 — then capture the result as a phrase.
 
+**Morphing between phrases (posture).** A recall is an instant jump; a **morph** is
+a continuous glide. **Hold SELECT + tap a waypoint** to arm a morph toward it (for
+the focused group). The **datawheel** rides the morph from 0 to full; the **GP row**
+is a coarse 16-segment bar (the LEDs show how far you've gone). At 0 you're on your
+own live posture — nothing changes. Sweeping up glides the *feel* toward the target
+phrase — robotize density, chord-mask snap, tension GRIP — while the notes keep
+playing underneath. (It's the **posture** that morphs, not the notes or the groove;
+transpose/groove/generators are a later add.) Sweep back to 0 to land exactly where
+you started. Then **tap that waypoint (a normal recall) to arrive** — the structure
+lands on the bar and the morph lets go. While playing it steps on each bar; stopped,
+it moves immediately. Re-arm the same slot (SELECT+tap) to cancel; the morph also
+releases on its own if you recall, switch, pull, or UNDO that group. *Set up the two
+phrases to differ in robotize / chord-mask / GRIP — that's what you'll hear move.*
+
+**Recall feel — Quantize vs Seamless.** `OPT` → *Phrase Recall lands Seamless*.
+**Off (Quantize):** a recall restarts on the next bar — a clean downbeat. **On
+(Seamless):** the groove flows straight through, no restart. Either way the switch
+no longer clicks or stutters. (REVERT always snaps back immediately — it's an undo.)
+
 > Gestures here are provisional and will get refined as the wider instrument
 > comes together; capture-then-name in particular may decouple.
 

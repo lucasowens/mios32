@@ -75,8 +75,9 @@
 #define ITEM_MIXER_CC1234                 31
 #define ITEM_MENU_SHORTCUTS               32
 #define ITEM_SCREEN_SAVER                 33
+#define ITEM_RECALL_MODE                  34
 
-#define NUM_OF_ITEMS                      34
+#define NUM_OF_ITEMS                      35
 
 
 static const char *item_text[NUM_OF_ITEMS][2] = {
@@ -250,6 +251,11 @@ static const char *item_text[NUM_OF_ITEMS][2] = {
     "Screen Saver:",
     ""
   },
+
+  {//<-------------------------------------->
+    "Phrase Recall lands Seamless",
+    NULL, // disabled = Quantize (bar restart); enabled = Seamless
+  },
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -338,6 +344,14 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 	seq_core_options.SYNCHED_PATTERN_CHANGE = (incrementer > 0) ? 1 : 0;
       else
 	seq_core_options.SYNCHED_PATTERN_CHANGE ^= 1;
+      ui_store_file_required = 1;
+      return 1;
+
+    case ITEM_RECALL_MODE:
+      if( incrementer )
+	seq_core_options.RECALL_SEAMLESS = (incrementer > 0) ? 1 : 0;
+      else
+	seq_core_options.RECALL_SEAMLESS ^= 1;
       ui_store_file_required = 1;
       return 1;
 
@@ -971,6 +985,10 @@ static s32 LCD_Handler(u8 high_prio)
   ///////////////////////////////////////////////////////////////////////////
   case ITEM_SYNC_CHANGE: {
     enabled_value = seq_core_options.SYNCHED_PATTERN_CHANGE;
+  } break;
+
+  case ITEM_RECALL_MODE: {
+    enabled_value = seq_core_options.RECALL_SEAMLESS;
   } break;
 
   ///////////////////////////////////////////////////////////////////////////

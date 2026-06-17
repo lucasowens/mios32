@@ -97,6 +97,10 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_TRG_BYTE_SET         0x7d
 #define CMD_FREEZE_SET           0x7e
 #define CMD_PHRASE_META          0x7f  // sub-op: 0=drift query, 1=name get, 2=name set, 3=name commit
+// POSTURE-MORPH (Loop A) — the 0x7a-0x7f phrase cluster was full, so this fills
+// the low gap at 0x4f (highest free byte below the 0x50 block). sub-op:
+// 0=ARM target n, 1=SET pos 0..PHRASE_MORPH_MAX, 2=QUERY [pos, target, status].
+#define CMD_PHRASE_MORPH         0x4f
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1666,6 +1670,59 @@ static void cmd_phrase_meta(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// CMD_PHRASE_MORPH — POSTURE-MORPH (Loop A). payload[0] = sub-op:
+//   0x00 ARM:   payload[1]=n (target phrase B) -> reply [n, armed(0/1), status]
+//               status 0x01 ok, 0x03 clean-refuse (un-captured / no ext block).
+//   0x01 SET:   payload[1]=v (0..PHRASE_MORPH_MAX) -> reply [pos, set(0/1), 0x01]
+//               set=0 means disarmed (refused).
+//   0x02 QUERY: -> reply [pos, target(0x7f=disarmed), 0x01].
+static void cmd_phrase_morph(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  if( len < 1 ) {
+    u8 reply[2] = { 0x00, 0x02 }; // malformed
+    send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+    return;
+  }
+
+  switch( payload[0] ) {
+    case 0x00: { // ARM
+      if( len < 2 ) {
+        u8 reply[2] = { 0x00, 0x02 };
+        send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+        return;
+      }
+      u8 n = payload[1];
+      s32 r = SEQ_PATTERN_PhraseMorphArm(n);
+      u8 reply[3] = { n, (r >= 0) ? 0x01 : 0x00, (r >= 0) ? 0x01 : 0x03 };
+      send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+    } break;
+
+    case 0x01: { // SET
+      if( len < 2 ) {
+        u8 reply[2] = { 0x00, 0x02 };
+        send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+        return;
+      }
+      u8 v = payload[1];
+      s32 r = SEQ_PATTERN_PhraseMorphSet(v);
+      u8 reply[3] = { SEQ_PATTERN_PhraseMorphValue(), (r >= 0) ? 0x01 : 0x00, 0x01 };
+      send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+    } break;
+
+    case 0x02: { // QUERY
+      s32 tgt = SEQ_PATTERN_PhraseMorphTarget();
+      u8 reply[3] = { SEQ_PATTERN_PhraseMorphValue(), (tgt < 0) ? 0x7f : (u8)tgt, 0x01 };
+      send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+    } break;
+
+    default: {
+      u8 reply[2] = { 0x00, 0x02 }; // unknown sub-op
+      send_reply(port, CMD_PHRASE_MORPH, reply, sizeof(reply));
+    } break;
+  }
+}
+
+
 // CMD_PATTERN_LOAD payload: [group, bank, pattern]
 // Reply payload: [group, bank, pattern, load_ok, dispatch_status]
 //   load_ok 0x01 = SEQ_PATTERN_Load returned >=0, 0x00 = returned <0.
@@ -2263,6 +2320,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_PHRASE_META:
             cmd_phrase_meta(port, payload_buf, payload_len);
+            break;
+          case CMD_PHRASE_MORPH:
+            cmd_phrase_morph(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

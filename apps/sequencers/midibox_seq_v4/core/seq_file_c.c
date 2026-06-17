@@ -301,6 +301,10 @@ s32 SEQ_FILE_C_Read(char *session)
 	    s32 value = get_dec_range(word, parameter, 0, 1);
 	    if( value >= 0 )
 	      seq_core_options.SYNCHED_PATTERN_CHANGE = value;
+	  } else if( strcmp(parameter, "RecallSeamless") == 0 ) {
+	    s32 value = get_dec_range(word, parameter, 0, 1);
+	    if( value >= 0 )
+	      seq_core_options.RECALL_SEAMLESS = value;
 	  } else if( strcmp(parameter, "SynchedMute") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 1);
 	    if( value >= 0 )
@@ -979,6 +983,9 @@ static s32 SEQ_FILE_C_Write_Hlp(u8 write_to_file)
   }
 
   sprintf(line_buffer, "SynchedPatternChange %d\n", seq_core_options.SYNCHED_PATTERN_CHANGE);
+  FLUSH_BUFFER;
+
+  sprintf(line_buffer, "RecallSeamless %d\n", seq_core_options.RECALL_SEAMLESS);
   FLUSH_BUFFER;
 
   sprintf(line_buffer, "SynchedMute %d\n", seq_core_options.SYNCHED_MUTE);

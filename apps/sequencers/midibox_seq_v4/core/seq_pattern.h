@@ -79,6 +79,19 @@ extern s32 SEQ_PATTERN_PhraseNameCommit(u8 n);
 extern void SEQ_PATTERN_PhraseResetState(void);
 extern void SEQ_PATTERN_ProbePhrasesOnLoad(void);
 
+// POSTURE-MORPH (Loop A) — glide ONE group's posture (ext CCs 0x80..0x9f) from
+// its live state (pos 0, true pass-through) toward a target phrase's same-group
+// slice (pos PHRASE_MORPH_MAX). live = A + pos/MAX*(B-A), applied per-measure.
+// Grid/notes untouched; the other 3 groups untouched. See design §10.
+#define PHRASE_MORPH_MAX 16
+extern s32 SEQ_PATTERN_PhraseMorphArm(u8 n);    // arm target B = phrase n, group = ui_selected_group
+extern s32 SEQ_PATTERN_PhraseMorphSet(u8 v);    // set pos 0..PHRASE_MORPH_MAX (defers apply to boundary)
+extern s32 SEQ_PATTERN_PhraseMorphTick(void);   // PER-MEASURE: if dirty, lerp+set+rerender the focused group
+extern void SEQ_PATTERN_PhraseMorphCancel(void);// disarm (does NOT revert live CCs — leave-as-live)
+extern void SEQ_PATTERN_PhraseMorphInvalidateGroup(u8 group); // disarm if `group` is the morph's (out-of-band CC replace)
+extern s32 SEQ_PATTERN_PhraseMorphTarget(void); // armed phrase n, or -1 if disarmed
+extern u8  SEQ_PATTERN_PhraseMorphValue(void);  // current pos 0..PHRASE_MORPH_MAX
+
 extern s32 SEQ_PATTERN_PeekName(seq_pattern_t pattern, char *pattern_name);
 extern s32 SEQ_PATTERN_PeekPatternsOfGroup(seq_pattern_t pattern);
 

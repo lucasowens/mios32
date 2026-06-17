@@ -209,6 +209,14 @@ static char pull_status[24] = "";   // last commit result, shown in the held ove
 static u8 phrase_name_edit;       // 1 while the keypad name editor owns GP row + LCD
 static u8 phrase_name_edit_slot;  // which phrase (0..NUM_PHRASES-1) is being named
 
+// POSTURE-MORPH: the ui_page the morph was armed on. The morph's GP-bar/datawheel/
+// LED controls are scoped to THIS page — sel_view==PHRASE can stay latched on top
+// of EDIT/other pages (and on a simplified frontpanel the PHRASE button doesn't
+// even switch to SONG), where the GP row/datawheel belong to that page. Gating on
+// the armed page (not a hardcoded page) releases the controls the moment you
+// navigate away, regardless of how PHRASE view was entered.
+static seq_ui_page_t morph_armed_page;
+
 // Reset the transient UI gesture state — the pull/capture held-modifier statics
 // and the active select-view. These are RAM-only performance state with no
 // reset path of their own, so a manual session (button-pressing on hardware)
@@ -227,6 +235,7 @@ void SEQ_UI_GestureStateReset(void)
   pattern_capture_dst_track = 0xff;
   seq_ui_sel_view = SEQ_UI_SEL_VIEW_NONE;
   phrase_name_edit = 0; // close a stuck name editor (no own reset path)
+  SEQ_PATTERN_PhraseMorphCancel(); // disarm any armed posture-morph (same hardening)
 }
 
 
@@ -798,6 +807,19 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     s32 r = SEQ_CORE_LoadTrackFromSlot(pull_held_track, src_bank, src_pattern, src_section);
     pull_commit_msg(r, src_bank, letter, (u8)(gp - 8), src_section, pull_held_track);
     // aim stays set so the user can rapid-fire pulls from neighboring patterns
+    return 0;
+  }
+
+  // POSTURE-MORPH coarse bar: while a posture-morph is armed in PHRASE view, the
+  // GP row is a 16-segment morph-position bar — GP_k grabs position k+1 (GP16 =
+  // full throw). Fine-trim with the datawheel from there. Consumes the press
+  // (mirrors the pull intercept) so the underlying page never sees it. Scoped to
+  // the page the morph was armed on: sel_view==PHRASE can stay LATCHED on top of
+  // EDIT/other pages, where the GP row belongs to that page — don't hijack it.
+  if( !depressed && seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE && ui_page == morph_armed_page &&
+      SEQ_PATTERN_PhraseMorphTarget() >= 0 && gp < 16 ) {
+    SEQ_PATTERN_PhraseMorphSet((u8)(gp + 1));
+    seq_ui_display_update_req = 1;
     return 0;
   }
 
@@ -2379,6 +2401,39 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	// by ear with hardware in hand per the FEARLESS precedent.)
 	static u32 phrase_t0 = 0;
 	static u8  phrase_armed_btn = 0xff;
+
+	// SELECT + tap a waypoint = ARM a POSTURE-MORPH toward that phrase (the
+	// continuous transition: ride the feel toward B, then the structural jump
+	// is the ordinary bar-aligned recall — two complementary gestures, §10).
+	// Tap-alone stays recall, hold stays capture; SELECT + the armed slot again
+	// disarms. Acts on release; consumes the press so the hold timer never fires.
+	if( seq_ui_button_state.SELECT_PRESSED ) {
+	  phrase_armed_btn = 0xff;                 // SELECT-held -> never a capture
+	  if( depressed ) {                        // act on RELEASE
+	    u8 n = (u8)sel_button;
+	    ui_selected_phrase = n;
+	    if( SEQ_PATTERN_PhraseMorphTarget() == (s32)n ) {
+	      SEQ_PATTERN_PhraseMorphCancel();     // re-arm same slot = toggle off
+	      SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "posture morph", "off");
+	    } else if( SEQ_PATTERN_PhrasePresent(n) <= 0 ) {
+	      char lbl[21];
+	      SEQ_UI_PhraseName_MsgLabel(n, lbl);
+	      SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1500, lbl, "can't morph: empty");
+	    } else {
+	      s32 r = SEQ_PATTERN_PhraseMorphArm(n);
+	      if( r >= 0 ) {
+		morph_armed_page = ui_page; // scope the GP/datawheel/LED controls to here
+		char lbl[21];
+		SEQ_UI_PhraseName_MsgLabel(n, lbl);
+		SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, lbl, "morph armed");
+	      } else
+		SEQ_UI_SDCardErrMsg(2000, r);
+	    }
+	    seq_ui_display_update_req = 1;
+	  }
+	  return 0;
+	}
+
 	if( !depressed ) {                         // PRESS: arm the hold timer
 	  phrase_t0 = (u32)MIOS32_TIMESTAMP_Get();
 	  phrase_armed_btn = (u8)sel_button;
@@ -3286,6 +3341,18 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
     // PHRASES name editor: GP encoders 1..16 scroll the keypad (datawheel ignored)
     if( encoder >= 1 && encoder <= 16 )
       SEQ_UI_PhraseName_Input((seq_ui_encoder_t)(encoder-1), incrementer);
+  } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE && ui_page == morph_armed_page &&
+	     SEQ_PATTERN_PhraseMorphTarget() >= 0 && encoder == 0 ) {
+    // POSTURE-MORPH fine throw: the datawheel rides the morph position 0..MAX
+    // (0 = pass-through to the live posture, MAX = the armed phrase's posture).
+    // The GP row mirrors it as a 16-segment bar; both route through MorphSet.
+    // Armed-page-scoped (see the GP-bar intercept) so it doesn't steal the
+    // datawheel from EDIT/other pages while PHRASE view is latched on top.
+    u8 p = SEQ_PATTERN_PhraseMorphValue();
+    if( SEQ_UI_Var8_Inc(&p, 0, PHRASE_MORPH_MAX, incrementer) ) {
+      SEQ_PATTERN_PhraseMorphSet(p);
+      seq_ui_display_update_req = 1;
+    }
   } else if( ui_encoder_callback != NULL ) {
     if( seq_ui_button_state.ENC_BTN_FWD_PRESSED ) {
       // encoder emulates a GP button
@@ -4062,6 +4129,16 @@ s32 SEQ_UI_LED_Handler(void)
       ui_led_callback(&new_ui_gp_leds);
 
     ui_gp_leds = new_ui_gp_leds;
+
+    // POSTURE-MORPH bar: while armed in PHRASE view on the armed page, override the
+    // GP row with a 16-segment thermometer of the morph position. Armed-page-scoped
+    // to match the GP/datawheel intercepts (don't paint over EDIT's GP LEDs while
+    // PHRASE view is latched on top of another page).
+    if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE && ui_page == morph_armed_page &&
+	SEQ_PATTERN_PhraseMorphTarget() >= 0 ) {
+      u8 k = (SEQ_PATTERN_PhraseMorphValue() * 16) / PHRASE_MORPH_MAX;
+      ui_gp_leds = k ? (u16)((1 << k) - 1) : 0x0000;
+    }
   }
 
   // update BLM LEDs

@@ -46,6 +46,12 @@ typedef union {
     u32 MIXER_LIVE_SEND:1;
     u32 INIT_WITH_TRIGGERS:1;
     u32 LIVE_LAYER_MUTE_STEPS:3; // 0=off, 1=permanent, 2..4 steps
+    u32 RECALL_SEAMLESS:1;       // phrase recall feel while playing: 0=QUANTIZE
+                                 // (keep the bar-aligned restart = clean downbeat),
+                                 // 1=SEAMLESS (no re-phase, groove continues). Both
+                                 // skip the immediate note-cut (the switch click).
+                                 // REVERT / stopped recall ignore this (hard restore).
+                                 // Appended last so existing bit positions don't shift.
   };
 } seq_core_options_t;
 

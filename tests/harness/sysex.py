@@ -65,12 +65,19 @@ CMD_PHRASE_PRESENT = 0x7c
 CMD_TRG_BYTE_SET = 0x7d
 CMD_FREEZE_SET = 0x7e
 CMD_PHRASE_META = 0x7f  # sub-op: 0=drift query, 1=name get, 2=name set, 3=name commit
+CMD_PHRASE_MORPH = 0x4f  # POSTURE-MORPH (Loop A) — sub-op: 0=arm, 1=set, 2=query
 
 # CMD_PHRASE_META sub-ops — keep in sync with seq_testctrl.c
 PHRASE_META_DRIFT = 0x00
 PHRASE_META_NAME_GET = 0x01
 PHRASE_META_NAME_SET = 0x02
 PHRASE_META_NAME_COMMIT = 0x03
+
+# CMD_PHRASE_MORPH sub-ops + range — keep in sync with seq_testctrl.c / seq_pattern.h
+PHRASE_MORPH_ARM = 0x00
+PHRASE_MORPH_SET = 0x01
+PHRASE_MORPH_QUERY = 0x02
+PHRASE_MORPH_MAX = 16     # PHRASE_MORPH_MAX in seq_pattern.h (pos full-throw)
 
 # Dial IDs for CMD_GENERATOR_DIAL_SET — keep in sync with seq_testctrl.c.
 DIAL_RANGE_MIN = 0

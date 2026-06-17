@@ -40,6 +40,15 @@
 // 16 phrases, each a 4-group snapshot -> exactly fills a 64-pattern bank.
 #define SEQ_FILE_B_NUM_PHRASES 16
 
+// The ext-CC "posture" block carried in every track record: CC 0x80..0x9f
+// (robotize mask/probabilities, chord-mask 0x96..0x99, tension GRIP 0x9a, ...).
+// Public because SEQ_FILE_B_PhraseReadCCs fills exactly SEQ_FILE_B_TRK_EXT_CC_COUNT
+// bytes (the caller's cc_out must be at least that big) and the posture-morph
+// reads/writes this CC range live via SEQ_CC_Get/Set(track, _CC_FIRST + i).
+#define SEQ_FILE_B_TRK_EXT_CC_FIRST     0x80
+#define SEQ_FILE_B_TRK_EXT_CC_LAST      0x9f   // widened past GRIP (0x9a); a clean boundary with headroom
+#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)  // 32 (V3)
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -62,6 +71,11 @@ extern s32 SEQ_FILE_B_Open(char *session, u8 bank);
 
 extern s32 SEQ_FILE_B_PatternRead(u8 bank, u8 pattern, u8 target_group,  u16 remix_map);
 extern s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track);
+
+// POSTURE-MORPH: read ONLY one section's ext-CC block (0x80..0x9f, 32 bytes)
+// into cc_out, with zero live writes — the morph endpoint reader. V3/V4 -> 32
+// CCs; V2 -> 22 CCs zero-extended; V1/absent/mismatch -> error (caller refuses).
+extern s32 SEQ_FILE_B_PhraseReadCCs(u8 bank, u8 pattern, u8 slot_track, u8 *cc_out);
 extern s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group, u8 rename_if_empty_name);
 extern s32 SEQ_FILE_B_PatternWriteEmpty(char *session, u8 bank, u8 pattern);
 
