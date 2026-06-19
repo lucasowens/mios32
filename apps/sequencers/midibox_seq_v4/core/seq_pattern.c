@@ -33,6 +33,10 @@
 #include "seq_song.h"
 #include "seq_mixer.h"
 #include "seq_generator.h"
+#include "seq_par.h"
+#include "seq_trg.h"
+#include "seq_layer.h"
+#include "seq_random.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -95,20 +99,46 @@ static u8 phrase_drift;
 // disk == RAM (a never-named slot stays blank, not the inherited A-group name).
 static char seq_phrase_name[SEQ_FILE_B_NUM_PHRASES][21];
 
-// POSTURE-MORPH (Loop A, design §10) — per-group posture interpolation from the
-// group's LIVE posture (pos 0, true pass-through) toward a target phrase's same-
-// group slice (pos PHRASE_MORPH_MAX). A is snapshotted at arm time so pos 0
-// returns to it exactly (reversible); B is read once from disk at arm time (no
-// per-step SD). Only the ext CCs 0x80..0x9f move — grid/notes and the other 3
-// groups are untouched. The apply is DEFERRED to the per-measure boundary
+// POSTURE-MORPH (Loop A+B, design §10) — per-group posture interpolation from
+// the group's LIVE posture (pos 0, true pass-through) toward a target phrase's
+// same-group slice (pos PHRASE_MORPH_MAX).  A is snapshotted at arm time so
+// pos 0 returns to it exactly (reversible); B is read once from disk at arm
+// time (no per-step SD).  The apply is DEFERRED to the per-measure boundary
 // (SEQ_PATTERN_PhraseMorphTick); the encoder/GP handlers only move the position.
-// 260 bytes of .bss, no render-cache.
+//
+// Loop A: ext CCs 0x80..0x9f (robotize / chord-mask / GRIP) — ~260 B .bss.
+// Loop B: main CC whitelist (GROOVE_VALUE, TRANSPOSE_SEMI lerp; GROOVE_STYLE,
+//         TRANSPOSE_OCT reversible snap) + per-step velocity lerp + reversible
+//         per-step gate crossfade + discrete per-step NOTE swap (Phase 1) for
+//         non-drum tracks.  Extra ~6.5 KB .bss.  Grid and the other 3 groups
+//         are untouched.  Note swap and gate share one frozen per-step threshold
+//         so each step commits to B as a unit.
 static u8 phrase_morph_target;  // armed target phrase B (0xff = disarmed)
 static u8 phrase_morph_group;   // focused group, LATCHED at arm time (0..NUM_GROUPS-1)
 static u8 phrase_morph_pos;     // morph position 0..PHRASE_MORPH_MAX
 static u8 phrase_morph_dirty;   // pos moved since last boundary apply
-static u8 phrase_morph_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_FILE_B_TRK_EXT_CC_COUNT]; // arm-time live CCs
-static u8 phrase_morph_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_FILE_B_TRK_EXT_CC_COUNT]; // target slice CCs
+// Loop A buffers
+static u8 phrase_morph_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_FILE_B_TRK_EXT_CC_COUNT]; // arm-time ext CCs
+static u8 phrase_morph_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_FILE_B_TRK_EXT_CC_COUNT]; // target ext CCs
+// Loop B buffers
+static u8 phrase_morph_main_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][128]; // arm-time main CC[0..127]
+static u8 phrase_morph_main_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][128]; // target main CC[0..127]
+static u8 phrase_morph_vel_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][256];  // arm-time velocity steps
+static u8 phrase_morph_vel_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][256];  // target velocity steps
+static u8 phrase_morph_note_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][256]; // arm-time note pitches
+static u8 phrase_morph_note_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][256]; // target note pitches
+static u8 phrase_morph_gate_a[SEQ_CORE_NUM_TRACKS_PER_GROUP][32];  // arm-time gate bits (256 steps packed)
+static u8 phrase_morph_gate_b[SEQ_CORE_NUM_TRACKS_PER_GROUP][32];  // target gate bits (256 steps packed)
+// per-step gate switchover threshold in [0..MAX-1], FROZEN at arm: a step that
+// differs between A and B shows B when thresh < pos, else A. The random seeding
+// makes each differing step B with prob pos/MAX, but the crossfade is then
+// DETERMINISTIC + REVERSIBLE (pos->0 restores A bit-exactly) + STABLE at a held
+// position (no per-measure creep).
+static u8 phrase_morph_gate_thresh[SEQ_CORE_NUM_TRACKS_PER_GROUP][256];
+static u16 phrase_morph_p_size[SEQ_CORE_NUM_TRACKS_PER_GROUP];     // LIVE par step count at arm = the index stride
+static u8  phrase_morph_vel_layer[SEQ_CORE_NUM_TRACKS_PER_GROUP];  // velocity par layer index (0xff = none)
+static u8  phrase_morph_note_layer[SEQ_CORE_NUM_TRACKS_PER_GROUP]; // note par layer index (0xff = none)
+static u8  phrase_morph_has_steps[SEQ_CORE_NUM_TRACKS_PER_GROUP];  // 1 = step data valid for this slot
 
 // fill a 20-char name field with spaces + NUL (blank => UI shows the number)
 static void phrase_name_blank(char *p)
@@ -137,6 +167,11 @@ s32 SEQ_PATTERN_Init(u32 mode)
   phrase_morph_target = 0xff; // disarmed
   phrase_morph_pos = 0;
   phrase_morph_dirty = 0;
+  {
+    u8 s;
+    for(s=0; s<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++s)
+      phrase_morph_has_steps[s] = 0;
+  }
   {
     u8 n;
     for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
@@ -729,18 +764,26 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
 
 
 /////////////////////////////////////////////////////////////////////////////
-// POSTURE-MORPH (Loop A) — per-group posture interpolation. See design §10.
+// POSTURE-MORPH (Loop A+B) — per-group posture interpolation. See design §10.
 //
-// live = A + pos/PHRASE_MORPH_MAX * (B - A), per ext CC 0x80..0x9f, clamped
-// 0..127. A = the focused group's posture at arm time (pos 0 returns to it
-// exactly); B = the target phrase's same-group slice. Only the ext CCs move
-// (grid/notes untouched); only the focused group's 4 tracks are touched (the
-// other 3 groups untouched by construction). The apply is per-measure.
+// Loop A: live = A + pos/MAX*(B-A) per ext CC 0x80..0x9f.
+// Loop B: same lerp for main CC whitelist (groove_value, transpose_semi);
+//         reversible discrete snap for groove_style, transpose_oct (B at MAX,
+//         A below MAX); per-step velocity lerp; reversible per-step gate
+//         crossfade via frozen thresholds (non-drum only).
+//
+// EVERY dimension is reversible: A is snapshotted at arm time and re-derived
+// each apply, so pulling pos back to 0 returns to A exactly.  B is read from
+// disk once at arm time.  The apply is per-measure; only the focused group's 4
+// tracks are touched.
 /////////////////////////////////////////////////////////////////////////////
 
-// lerp the focused group's 4 tracks toward pos, write live, force a full quiet
-// render (the sweep-safe idiom from SEQ_PATTERN_SnapshotRead). Grid/notes are
-// untouched, so sustained notes are NOT cancelled (no per-measure clicks).
+// main CC whitelist: lerped CCs first, then snap-at-MAX CCs
+#define MORPH_CC_GROOVE_VALUE   SEQ_CC_GROOVE_VALUE   // 0x52 lerp
+#define MORPH_CC_TRANSPOSE_SEMI SEQ_CC_TRANSPOSE_SEMI // 0x50 lerp
+#define MORPH_CC_GROOVE_STYLE   SEQ_CC_GROOVE_STYLE   // 0x53 snap
+#define MORPH_CC_TRANSPOSE_OCT  SEQ_CC_TRANSPOSE_OCT  // 0x51 snap
+
 static void phrase_morph_apply(void)
 {
   u8 slot;
@@ -748,24 +791,133 @@ static void phrase_morph_apply(void)
     u8 track = phrase_morph_group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
     u8 changed = 0;
     u8 i;
+
+    // ---- Loop A: ext CCs 0x80..0x9f ----------------------------------------
     for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
       s32 a = phrase_morph_a[slot][i];
       s32 b = phrase_morph_b[slot][i];
       s32 lerped = a + (b - a) * (s32)phrase_morph_pos / PHRASE_MORPH_MAX;
       if( lerped < 0 ) lerped = 0;
       if( lerped > 127 ) lerped = 127;
-      // Only write a CC that actually changed: keeps pos 0 a TRUE pass-through
-      // (no spurious dirty/drift when live already == A), and the SEQ_CC_Set>=0
-      // guard skips the CCs 0x9b..0x9f the chokepoint doesn't implement (returns
-      // <0, writes nothing) so they never force a needless render.
+      // Only write if changed; SEQ_CC_Set>=0 guard skips unimplemented CCs.
       if( (u8)lerped != (u8)SEQ_CC_Get(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i) &&
           SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, (u8)lerped) >= 0 )
         changed = 1;
     }
-    // forced full quiet render, only if a CC moved: zero touched_ms (kill sweep
-    // regime -> whole-buffer refresh), arm dirty, render now. SEQ_CC_Set does NOT
-    // arm a render for most ext CCs (only SlotSync-routed ones), so the morph
-    // must force it; skip the work entirely when the posture didn't change.
+
+    // ---- Loop B: main CC whitelist ------------------------------------------
+    {
+      // lerped CCs: groove_value, transpose_semi
+      static const u8 lerp_ccs[] = { MORPH_CC_GROOVE_VALUE, MORPH_CC_TRANSPOSE_SEMI };
+      u8 ci;
+      for(ci=0; ci<2; ++ci) {
+	u8 cc = lerp_ccs[ci];
+	s32 a = phrase_morph_main_a[slot][cc];
+	s32 b = phrase_morph_main_b[slot][cc];
+	s32 lerped = a + (b - a) * (s32)phrase_morph_pos / PHRASE_MORPH_MAX;
+	if( lerped < 0 ) lerped = 0;
+	if( lerped > 127 ) lerped = 127;
+	if( (u8)lerped != (u8)SEQ_CC_Get(track, cc) &&
+	    SEQ_CC_Set(track, cc, (u8)lerped) >= 0 )
+	  changed = 1;
+      }
+      // snap CCs: groove_style, transpose_oct (discrete — B at full throw, A
+      // below it). Reversible: pulling the dial back below MAX restores the
+      // arm-time A, matching the lerped CCs / velocity (a lerp would yield
+      // musically meaningless intermediate enum/octave values, hence the snap).
+      {
+	static const u8 snap_ccs[] = { MORPH_CC_GROOVE_STYLE, MORPH_CC_TRANSPOSE_OCT };
+	for(ci=0; ci<2; ++ci) {
+	  u8 cc = snap_ccs[ci];
+	  u8 want = (phrase_morph_pos == PHRASE_MORPH_MAX)
+	            ? phrase_morph_main_b[slot][cc] : phrase_morph_main_a[slot][cc];
+	  if( want != (u8)SEQ_CC_Get(track, cc) &&
+	      SEQ_CC_Set(track, cc, want) >= 0 )
+	    changed = 1;
+	}
+      }
+    }
+
+    // ---- Loop B: per-step velocity lerp (non-drum, has_steps) ---------------
+    // p_size is the LIVE par step count (the index stride), so vl*p_size+step
+    // matches SEQ_PAR_Get's instrument-0 layout; the idx guard is belt-and-braces
+    // against a geometry mismatch (phrase captured at a different track length).
+    if( phrase_morph_has_steps[slot] &&
+        SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE) != SEQ_EVENT_MODE_Drum ) {
+      u16 p_size = phrase_morph_p_size[slot];
+      u8  vl     = phrase_morph_vel_layer[slot];
+      u16 step;
+      for(step=0; step<p_size; ++step) {
+	u16 idx = (u16)vl * p_size + step;
+	if( idx >= SEQ_PAR_MAX_BYTES )
+	  break;
+	s32 a = phrase_morph_vel_a[slot][step];
+	s32 b = phrase_morph_vel_b[slot][step];
+	s32 lerped = a + (b - a) * (s32)phrase_morph_pos / PHRASE_MORPH_MAX;
+	if( lerped < 0 ) lerped = 0;
+	if( lerped > 127 ) lerped = 127;
+	if( seq_par_layer_value[track][idx] != (u8)lerped ) {
+	  seq_par_layer_value[track][idx] = (u8)lerped;
+	  changed = 1;
+	}
+      }
+      if( changed )
+        SEQ_PATTERN_DirtySetTrack(track);
+    }
+
+    // ---- Loop B: reversible per-step gate crossfade (non-drum, has_steps) ----
+    // Each step where A!=B carries a switchover threshold frozen at arm: it shows
+    // B when thresh < pos, else A.  Deterministic + reversible (pos->0 restores A)
+    // + stable at a held pos (no per-measure creep).  A==B steps never move.
+    if( phrase_morph_has_steps[slot] &&
+        SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE) != SEQ_EVENT_MODE_Drum ) {
+      u16 p_size = phrase_morph_p_size[slot];
+      u16 step;
+      for(step=0; step<p_size && (step/8) < 32; ++step) {
+	u8 a_gate = (phrase_morph_gate_a[slot][step/8] >> (step%8)) & 1;
+	u8 b_gate = (phrase_morph_gate_b[slot][step/8] >> (step%8)) & 1;
+	if( a_gate != b_gate ) {
+	  u8 want = (phrase_morph_gate_thresh[slot][step] < phrase_morph_pos) ? b_gate : a_gate;
+	  u8 cur  = (seq_trg_layer_value[track][step/8] >> (step%8)) & 1;
+	  if( want != cur ) {
+	    if( want )
+	      seq_trg_layer_value[track][step/8] |=  (1 << (step%8));
+	    else
+	      seq_trg_layer_value[track][step/8] &= ~(1 << (step%8));
+	    SEQ_PATTERN_DirtySetTrack(track);
+	    changed = 1;
+	  }
+	}
+      }
+    }
+
+    // ---- Loop B: discrete per-step NOTE swap (non-drum, note layer present) --
+    // Shares the gate's frozen per-step threshold so each step commits to B as a
+    // unit: below thresh the step keeps A's pitch, above it B's pitch — a discrete
+    // swap (no off-scale interpolation), reversible (pos->0 restores A), stable.
+    if( phrase_morph_has_steps[slot] &&
+        phrase_morph_note_layer[slot] != 0xff &&
+        SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE) != SEQ_EVENT_MODE_Drum ) {
+      u16 p_size = phrase_morph_p_size[slot];
+      u8  nl     = phrase_morph_note_layer[slot];
+      u16 step;
+      for(step=0; step<p_size; ++step) {
+	u16 idx = (u16)nl * p_size + step;
+	if( idx >= SEQ_PAR_MAX_BYTES )
+	  break;
+	u8 want = (phrase_morph_gate_thresh[slot][step] < phrase_morph_pos)
+	          ? phrase_morph_note_b[slot][step] : phrase_morph_note_a[slot][step];
+	if( seq_par_layer_value[track][idx] != want ) {
+	  seq_par_layer_value[track][idx] = want;
+	  changed = 1;
+	}
+      }
+      if( changed )
+        SEQ_PATTERN_DirtySetTrack(track);
+    }
+
+    // forced full quiet render: zero touched_ms (kill sweep -> whole-buffer
+    // refresh), arm dirty, render now.  The same idiom as SEQ_PATTERN_SnapshotRead.
     if( changed ) {
       seq_render_touched_ms[track] = 0;
       seq_render_dirty[track] = 1;
@@ -776,9 +928,10 @@ static void phrase_morph_apply(void)
 }
 
 // ARM target B = phrase n, focused group latched = ui_selected_group. Snapshots
-// A from live and reads B's group-slice ext CCs from disk (once). Refuses an
-// un-captured phrase or a missing/old ext block (no live change on refuse). pos
-// resets to 0 (pass-through) — arming alone changes nothing audible.
+// A from live and reads B's group-slice from disk (once).  Refuses if the ext-CC
+// block (Loop A gate) is missing.  Loop B data (main CCs + vel + gate) is
+// best-effort: failures disable step morph for that slot without refusing the arm.
+// pos resets to 0 (pass-through) — arming alone changes nothing audible.
 s32 SEQ_PATTERN_PhraseMorphArm(u8 n)
 {
   if( n >= SEQ_FILE_B_NUM_PHRASES )
@@ -801,9 +954,7 @@ s32 SEQ_PATTERN_PhraseMorphArm(u8 n)
   phrase_morph_target = 0xff;
   phrase_morph_dirty = 0;
 
-  // read B = target phrase's group-slice ext CCs (4 track sections).
-  // Refuse the whole arm if any slice lacks a usable (V3/V4/V2) ext block — better
-  // to not arm than to morph toward undefined values (phrases here are always V4).
+  // --- Loop A: read B's ext CCs (mandatory — refuses the whole arm on failure) ---
   MUTEX_SDCARD_TAKE;
   s32 status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_PHRASE_BANK);
   if( status >= 0 ) {
@@ -817,14 +968,111 @@ s32 SEQ_PATTERN_PhraseMorphArm(u8 n)
   if( status < 0 )
     return status; // refuse — do NOT arm, no live change
 
-  // snapshot A = the focused group's live ext CCs (reversible pass-through at 0)
+  // --- Loop B: read B's main CCs + velocity + gate (best-effort; no arm refusal) ---
+  // Determine velocity layer index from the LIVE track geometry before the SD read.
+  // Phrases are captured from the same organism so their geometry should match.
+  {
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot) {
+      u8 track = group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
+      // find note + velocity par layers (first layer of each type)
+      u8 vl = 0xff, nl = 0xff;
+      {
+	s32 nlayers = SEQ_PAR_NumLayersGet(track);
+	u8 li;
+	for(li=0; li<(u8)nlayers; ++li) {
+	  seq_par_layer_type_t t = SEQ_PAR_AssignmentGet(track, li);
+	  if( t == SEQ_PAR_Type_Velocity && vl == 0xff ) vl = li;
+	  if( t == SEQ_PAR_Type_Note     && nl == 0xff ) nl = li;
+	}
+      }
+      phrase_morph_vel_layer[slot]  = vl;
+      phrase_morph_note_layer[slot] = nl;
+    }
+  }
+  MUTEX_SDCARD_TAKE;
+  status = SEQ_FILE_B_Open(seq_file_session_name, SEQ_FILE_B_PHRASE_BANK);
+  if( status >= 0 ) {
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot) {
+      u8 track = group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
+      u8 vl = phrase_morph_vel_layer[slot];
+      u8 nl = phrase_morph_note_layer[slot];
+      s32 rc = SEQ_FILE_B_PhraseReadTrackData(
+	SEQ_FILE_B_PHRASE_BANK,
+	SEQ_CORE_NUM_GROUPS * n + group, slot,
+	phrase_morph_main_b[slot],
+	(vl < 0xff) ? vl : 0, phrase_morph_vel_b[slot],  (vl < 0xff) ? 256 : 0,
+	(nl < 0xff) ? nl : 0, phrase_morph_note_b[slot], (nl < 0xff) ? 256 : 0,
+	phrase_morph_gate_b[slot], 32,
+	NULL, NULL);
+      // Stride by the LIVE track geometry (SEQ_PAR_NumStepsGet), NOT the phrase's
+      // on-disk p_size: the index vl*p_size+step must match the live
+      // seq_par_layer_value layout, and live num_p_steps*num_p_layers <=
+      // SEQ_PAR_MAX_BYTES by construction so the write can't overrun.  (vel_b is
+      // located on disk by the reader using the phrase's own geometry.)
+      if( rc >= 0 && vl < 0xff ) {
+	s32 live_steps = SEQ_PAR_NumStepsGet(track);
+	if( live_steps < 0 ) live_steps = 0;
+	if( live_steps > 256 ) live_steps = 256;
+	phrase_morph_p_size[slot]    = (u16)live_steps;
+	phrase_morph_has_steps[slot] = (live_steps > 0) ? 1 : 0;
+      } else {
+	phrase_morph_has_steps[slot] = 0;
+      }
+    }
+  } else {
+    u8 slot;
+    for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot)
+      phrase_morph_has_steps[slot] = 0;
+  }
+  MUTEX_SDCARD_GIVE;
+
+  // --- Snapshot A = the focused group's live posture ---
   {
     u8 slot;
     for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot) {
       u8 track = group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
       u8 i;
+      // Loop A: ext CCs 0x80..0x9f
       for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
         phrase_morph_a[slot][i] = (u8)SEQ_CC_Get(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i);
+      // Loop B: main CC[0..127] (all 128 — only whitelisted ones used at apply)
+      for(i=0; i<128; ++i)
+        phrase_morph_main_a[slot][i] = (u8)SEQ_CC_Get(track, i);
+      // Loop B: snapshot velocity steps + gate bits from the live source, and
+      // freeze a per-step random gate threshold (the reversible gate crossfade).
+      if( phrase_morph_has_steps[slot] ) {
+	u16 p_size = phrase_morph_p_size[slot];
+	u8  vl     = phrase_morph_vel_layer[slot];
+	u16 step;
+	for(step=0; step<p_size; ++step) {
+	  u16 idx = (u16)vl * p_size + step;
+	  phrase_morph_vel_a[slot][step] =
+	    (idx < SEQ_PAR_MAX_BYTES) ? seq_par_layer_value[track][idx] : 64;
+	}
+	// note A (only if the track has a note layer)
+	if( phrase_morph_note_layer[slot] < 0xff ) {
+	  u8 nl = phrase_morph_note_layer[slot];
+	  for(step=0; step<p_size; ++step) {
+	    u16 idx = (u16)nl * p_size + step;
+	    phrase_morph_note_a[slot][step] =
+	      (idx < SEQ_PAR_MAX_BYTES) ? seq_par_layer_value[track][idx] : 0;
+	  }
+	}
+	// gate A = the live trg layer-0 bytes (non-drum: par steps == trg steps)
+	{
+	  u16 nbytes = (p_size + 7) / 8;
+	  u16 bi;
+	  if( nbytes > 32 ) nbytes = 32;
+	  for(bi=0; bi<nbytes; ++bi)
+	    phrase_morph_gate_a[slot][bi] = seq_trg_layer_value[track][bi];
+	}
+	// freeze the per-step switchover thresholds ONCE at arm so the gate
+	// crossfade is deterministic / reversible / stable thereafter.
+	for(step=0; step<p_size; ++step)
+	  phrase_morph_gate_thresh[slot][step] = (u8)SEQ_RANDOM_Gen_Range(0, PHRASE_MORPH_MAX - 1);
+      }
     }
   }
 

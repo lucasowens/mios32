@@ -1183,6 +1183,178 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// POSTURE-MORPH Loop B reader — reads the main CC block (128 bytes), two par
+// layers (vel_layer + note_layer, instrument 0), and the gate trg layer 0
+// (instrument 0) for slot_track in the given phrase pattern.  Every out pointer
+// is optional (NULL/max==0 = skip).  p_size_out / t_size_out receive the phrase's
+// geometry so the caller knows how many of the returned bytes are valid.
+//
+// Called 4 times per arm (once per slot_track 0..3) inside MUTEX_SDCARD, with
+// the phrase bank already opened by the caller (same as PhraseReadCCs).  On any
+// read error the partially-filled buffers are left zeroed/default (velocity 64,
+// note 0, gate 0) and SEQ_FILE_B_ERR_READ is returned.  Each layer is located by
+// an ABSOLUTE seek, so the read order is independent.
+//
+// returns 0 on success, < 0 on error (error codes in seq_file.h)
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_PhraseReadTrackData(u8 bank, u8 pattern, u8 slot_track,
+				   u8 *cc128_out,
+				   u8 vel_layer, u8 *vel_out, u16 max_vel,
+				   u8 note_layer, u8 *note_out, u16 max_note,
+				   u8 *gate_out, u16 max_gate,
+				   u16 *p_size_out, u16 *t_size_out)
+{
+  seq_file_b_info_t *info = SEQ_FILE_B_InfoPtr(bank);
+  if( info == NULL )
+    return SEQ_FILE_B_ERR_INVALID_BANK;
+  if( slot_track >= SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+  if( !info->valid )
+    return SEQ_FILE_B_ERR_NO_FILE;
+  if( pattern >= info->header.num_patterns )
+    return SEQ_FILE_B_ERR_INVALID_PATTERN;
+
+  if( FILE_ReadReOpen((file_t*)&info->file) < 0 )
+    return -1;
+
+  s32 status;
+  u32 offset = 10 + sizeof(seq_file_b_header_t) + (u32)pattern * info->header.pattern_size;
+  if( (status=FILE_ReadSeek(offset)) < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  // pattern header: name[20] + num_tracks[1] + mixer_map[1] + sysex_setup[1] + reserved1[1]
+  u8 skip80[80]; // scratch: big enough for track name (80) and pattern name (20)
+  status |= FILE_ReadBuffer(skip80, 20);
+  u8 num_tracks;
+  status |= FILE_ReadByte(&num_tracks);
+  { u8 db; status |= FILE_ReadByte(&db); status |= FILE_ReadByte(&db); status |= FILE_ReadByte(&db); }
+  if( status < 0 ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_READ;
+  }
+
+  if( num_tracks > SEQ_CORE_NUM_TRACKS_PER_GROUP )
+    num_tracks = SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  if( slot_track >= num_tracks ) {
+    FILE_ReadClose((file_t*)&info->file);
+    return SEQ_FILE_B_ERR_INVALID_TRACK;
+  }
+
+  // walk tracks 0..(slot_track-1): skip each one
+  {
+    u8 ti;
+    for( ti=0; ti<slot_track; ++ti ) {
+      u8 pi, tii, pl, tl; u16 ps, ts;
+      status |= FILE_ReadBuffer(skip80, 80); // track name
+      status |= FILE_ReadByte(&pi);  status |= FILE_ReadByte(&tii);
+      status |= FILE_ReadByte(&pl);  status |= FILE_ReadByte(&tl);
+      status |= FILE_ReadHWord(&ps); status |= FILE_ReadHWord(&ts);
+      if( status < 0 ) {
+	FILE_ReadClose((file_t*)&info->file);
+	return SEQ_FILE_B_ERR_READ;
+      }
+      u32 new_pos = FILE_ReadGetCurrentPosition() + 128
+	+ (u32)pi*pl*ps + (u32)tii*tl*ts;
+      if( (status=FILE_ReadSeek(new_pos)) < 0 ) {
+	FILE_ReadClose((file_t*)&info->file);
+	return SEQ_FILE_B_ERR_READ;
+      }
+    }
+  }
+
+  // target slot_track header
+  {
+    u8 p_instr, t_instr, p_layers, t_layers;
+    u16 p_size, t_size;
+    status |= FILE_ReadBuffer(skip80, 80);
+    status |= FILE_ReadByte(&p_instr);  status |= FILE_ReadByte(&t_instr);
+    status |= FILE_ReadByte(&p_layers); status |= FILE_ReadByte(&t_layers);
+    status |= FILE_ReadHWord(&p_size);  status |= FILE_ReadHWord(&t_size);
+    if( status < 0 ) {
+      FILE_ReadClose((file_t*)&info->file);
+      return SEQ_FILE_B_ERR_READ;
+    }
+
+    if( p_size_out ) *p_size_out = p_size;
+    if( t_size_out ) *t_size_out = t_size;
+
+    u32 cc_base  = FILE_ReadGetCurrentPosition();
+    u32 par_base = cc_base + 128;
+    u32 trg_base = par_base + (u32)p_instr * p_layers * p_size;
+
+    // main CC block (128 bytes)
+    if( cc128_out ) {
+      if( (status=FILE_ReadSeek(cc_base)) < 0
+	  || (status |= FILE_ReadBuffer(cc128_out, 128)) < 0 ) {
+	FILE_ReadClose((file_t*)&info->file);
+	return SEQ_FILE_B_ERR_READ;
+      }
+    }
+
+    // velocity par layer (instrument 0 only)
+    if( vel_out && max_vel > 0 ) {
+      if( vel_layer < p_layers ) {
+	u32 vpos = par_base + (u32)vel_layer * p_size;
+	if( (status=FILE_ReadSeek(vpos)) < 0 ) {
+	  FILE_ReadClose((file_t*)&info->file);
+	  return SEQ_FILE_B_ERR_READ;
+	}
+	u16 n = ((u16)p_size < max_vel) ? (u16)p_size : max_vel;
+	status |= FILE_ReadBuffer(vel_out, n);
+	if( status < 0 ) {
+	  FILE_ReadClose((file_t*)&info->file);
+	  return SEQ_FILE_B_ERR_READ;
+	}
+	u16 i; for( i=n; i<max_vel; ++i ) vel_out[i] = 64;
+      } else {
+	u16 i; for( i=0; i<max_vel; ++i ) vel_out[i] = 64;
+      }
+    }
+
+    // note par layer (instrument 0 only) — default-fill 0 when absent/short
+    if( note_out && max_note > 0 ) {
+      if( note_layer < p_layers ) {
+	u32 npos = par_base + (u32)note_layer * p_size;
+	if( (status=FILE_ReadSeek(npos)) < 0 ) {
+	  FILE_ReadClose((file_t*)&info->file);
+	  return SEQ_FILE_B_ERR_READ;
+	}
+	u16 n = ((u16)p_size < max_note) ? (u16)p_size : max_note;
+	status |= FILE_ReadBuffer(note_out, n);
+	if( status < 0 ) {
+	  FILE_ReadClose((file_t*)&info->file);
+	  return SEQ_FILE_B_ERR_READ;
+	}
+	u16 i; for( i=n; i<max_note; ++i ) note_out[i] = 0;
+      } else {
+	u16 i; for( i=0; i<max_note; ++i ) note_out[i] = 0;
+      }
+    }
+
+    // gate trg layer 0 (instrument 0 only)
+    if( gate_out && max_gate > 0 ) {
+      if( (status=FILE_ReadSeek(trg_base)) < 0 ) {
+	FILE_ReadClose((file_t*)&info->file);
+	return SEQ_FILE_B_ERR_READ;
+      }
+      u16 n = ((u16)t_size < max_gate) ? (u16)t_size : max_gate;
+      status |= FILE_ReadBuffer(gate_out, n);
+      if( status < 0 ) {
+	FILE_ReadClose((file_t*)&info->file);
+	return SEQ_FILE_B_ERR_READ;
+      }
+      u16 i; for( i=n; i<max_gate; ++i ) gate_out[i] = 0;
+    }
+  }
+
+  FILE_ReadClose((file_t*)&info->file);
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // POSTURE-MORPH endpoint reader — reads ONLY one section's ext-CC block
 // (0x80..0x9f) into cc_out[SEQ_FILE_B_TRK_EXT_CC_COUNT] with NO live writes.
 //

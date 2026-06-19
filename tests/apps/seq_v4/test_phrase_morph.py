@@ -344,3 +344,318 @@ def test_morph_releases_on_undo(genv4):
     assert board.track_undo() is not None, "undo should restore the pulled track"
     assert board.phrase_morph_query() == (0, -1), "an UNDO into the morph's group releases it"
     _clean(board)
+
+
+# ============================================================================
+# Loop B pins — main CC whitelist (groove, transpose) + velocity + gate
+# ============================================================================
+
+# Par layer indices for a default normal track: 0=Note, 1=Velocity, 2=Length, 3=Prob
+VEL_LAYER = 1
+NOTE_LAYER = 0
+# Velocity markers: phrases A and B differ on all steps of track 0
+VEL_A = 64   # arm-time velocity (will be snapshotted as A)
+VEL_B = 100  # target phrase velocity
+VEL_MID = VEL_A + (VEL_B - VEL_A) * MID // PHRASE_MORPH_MAX  # expected midpoint
+
+# Note markers: A and B differ in pitch on all steps of track 0 (discrete swap,
+# NOT lerped — at any pos each step is exactly A's pitch or B's pitch).
+NOTE_A = 48  # C-3
+NOTE_B = 55  # G-3
+
+GROOVE_A = 40
+GROOVE_B = 80
+GROOVE_MID = GROOVE_A + (GROOVE_B - GROOVE_A) * MID // PHRASE_MORPH_MAX
+
+TRANSPOSE_A = 2   # 2 semitones up
+TRANSPOSE_B = 10  # 10 semitones up
+
+# Snap CCs (discrete — reversible snap: B at full throw, arm-time A below it).
+GROOVE_STYLE_A = 0
+GROOVE_STYLE_B = 2
+TRANSPOSE_OCT_A = 0
+TRANSPOSE_OCT_B = 3
+
+# A simple 4-step gate pattern: A has steps 0,1 on; B has steps 2,3 on.
+# After a max-throw morph, the live gate must match B exactly; pulled back to 0
+# it must restore A exactly (the gate crossfade is reversible).
+# We test only the first byte (steps 0..7) of track 0.
+GATE_A_BYTE = 0b00000011  # steps 0,1 on
+GATE_B_BYTE = 0b00001100  # steps 2,3 on
+
+
+def _build_loop_b_phrases(board: Board) -> dict:
+    """Build phrase B with B-markers, leave live state at A-markers.
+    Returns the actually-stored snap-CC values (read back, in case the firmware
+    clamps an out-of-range value) so callers assert against the true endpoints."""
+    board.ui_track_set(0)  # focus group 0
+
+    # --- set B state on track 0 ---
+    board.cc_set(0, CC.GROOVE_VALUE, GROOVE_B)
+    board.cc_set(0, CC.TRANSPOSE_SEMI, TRANSPOSE_B)
+    board.cc_set(0, CC.GROOVE_STYLE, GROOVE_STYLE_B)
+    board.cc_set(0, CC.TRANSPOSE_OCT, TRANSPOSE_OCT_B)
+    for step in range(4):
+        board.track_par_set(0, VEL_LAYER, 0, step, VEL_B)
+        board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_B)
+    board.trg_byte_set(0, 0, GATE_B_BYTE, trg_layer=0)  # first gate byte
+    style_b = board.cc_get(0, CC.GROOVE_STYLE)
+    oct_b = board.cc_get(0, CC.TRANSPOSE_OCT)
+
+    assert board.phrase_capture(PHRASE_B), "Loop B: capture B should commit"
+
+    # --- restore A state on track 0 ---
+    board.cc_set(0, CC.GROOVE_VALUE, GROOVE_A)
+    board.cc_set(0, CC.TRANSPOSE_SEMI, TRANSPOSE_A)
+    board.cc_set(0, CC.GROOVE_STYLE, GROOVE_STYLE_A)
+    board.cc_set(0, CC.TRANSPOSE_OCT, TRANSPOSE_OCT_A)
+    for step in range(4):
+        board.track_par_set(0, VEL_LAYER, 0, step, VEL_A)
+        board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_A)
+    board.trg_byte_set(0, 0, GATE_A_BYTE, trg_layer=0)
+    style_a = board.cc_get(0, CC.GROOVE_STYLE)
+    oct_a = board.cc_get(0, CC.TRANSPOSE_OCT)
+
+    return {"style_a": style_a, "style_b": style_b, "oct_a": oct_a, "oct_b": oct_b}
+
+
+@pytest.mark.hardware
+def test_morph_loopb_groove_transpose_stopped(genv4):
+    """Loop B pin: groove_value and transpose_semi lerp linearly between A and B;
+    pos 0 == A exactly, pos MAX == B exactly, midpoint ±1 tolerance (integer rounding).
+    Asserts on the SOURCE CC struct (SEQ_CC_Get), not the output mirror."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    _build_loop_b_phrases(board)
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+
+    # pos 0 = A values exactly
+    board.phrase_morph_set(0)
+    assert board.cc_get(0, CC.GROOVE_VALUE)   == GROOVE_A,    "pos 0 groove == A"
+    assert board.cc_get(0, CC.TRANSPOSE_SEMI) == TRANSPOSE_A, "pos 0 transpose == A"
+
+    # pos MAX = B values exactly
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    assert board.cc_get(0, CC.GROOVE_VALUE)   == GROOVE_B,    "pos MAX groove == B"
+    assert board.cc_get(0, CC.TRANSPOSE_SEMI) == TRANSPOSE_B, "pos MAX transpose == B"
+
+    # midpoint ±1
+    board.phrase_morph_set(MID)
+    assert abs(board.cc_get(0, CC.GROOVE_VALUE)   - GROOVE_MID) <= 1, "midpoint groove ±1"
+
+    # reversible: back to A
+    board.phrase_morph_set(0)
+    assert board.cc_get(0, CC.GROOVE_VALUE)   == GROOVE_A,    "reversible: groove back to A"
+    assert board.cc_get(0, CC.TRANSPOSE_SEMI) == TRANSPOSE_A, "reversible: transpose back to A"
+
+    _clean(board)
+
+
+@pytest.mark.hardware
+def test_morph_loopb_velocity_endpoints_stopped(genv4):
+    """Loop B pin: velocity steps lerp between A and B — pos 0 = A, pos MAX = B,
+    midpoint ±1, and reversible (MAX then back to 0 restores A).  Verified via the
+    output mirror (track_par_get) after the inline apply forces a render."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    _build_loop_b_phrases(board)
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+
+    # pos 0 = A velocity on all 4 test steps
+    board.phrase_morph_set(0)
+    for step in range(4):
+        v = board.track_par_get(0, VEL_LAYER, 0, step)
+        assert v == VEL_A, f"pos 0 velocity step {step} should == A ({VEL_A}), got {v}"
+
+    # pos MAX = B velocity on all 4 test steps
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    for step in range(4):
+        v = board.track_par_get(0, VEL_LAYER, 0, step)
+        assert v == VEL_B, f"pos MAX velocity step {step} should == B ({VEL_B}), got {v}"
+
+    # midpoint ±1 (integer rounding)
+    board.phrase_morph_set(MID)
+    for step in range(4):
+        v = board.track_par_get(0, VEL_LAYER, 0, step)
+        assert abs(v - VEL_MID) <= 1, f"midpoint velocity step {step} ~{VEL_MID}, got {v}"
+
+    # reversible: MAX already happened above; back to 0 restores A
+    board.phrase_morph_set(0)
+    for step in range(4):
+        v = board.track_par_get(0, VEL_LAYER, 0, step)
+        assert v == VEL_A, f"reversible: velocity step {step} should be A ({VEL_A}), got {v}"
+
+    _clean(board)
+
+
+@pytest.mark.hardware
+def test_morph_loopb_gate_max_matches_b(genv4):
+    """Loop B pin: at pos MAX the gate must be exactly B's gate.
+    The frozen-threshold crossfade is deterministic at full throw — every step's
+    threshold (0..MAX-1) is < MAX, so every differing step shows B.  Verified via
+    the source trg buffer (layer_bytes from trg_byte_get)."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    _build_loop_b_phrases(board)
+
+    # confirm live gate = A before arming
+    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
+    assert layer_bytes[0] == GATE_A_BYTE, (
+        f"preamble: live gate should be A ({GATE_A_BYTE:#010b}), got {layer_bytes[0]:#010b}"
+    )
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+    board.phrase_morph_set(PHRASE_MORPH_MAX)  # full throw -> all differing steps flip
+
+    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
+    assert layer_bytes[0] == GATE_B_BYTE, (
+        f"pos MAX gate should equal B ({GATE_B_BYTE:#010b}), got {layer_bytes[0]:#010b}"
+    )
+
+    _clean(board)
+
+
+@pytest.mark.hardware
+def test_morph_loopb_gate_zero_unchanged(genv4):
+    """Loop B pin: a fresh arm left at pos 0 leaves the gate at the live A state
+    (every threshold < 0 is impossible, so no step shows B)."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    _build_loop_b_phrases(board)
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+    board.phrase_morph_set(0)  # force an explicit apply at pos=0
+
+    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
+    assert layer_bytes[0] == GATE_A_BYTE, (
+        f"pos 0 gate must stay at A ({GATE_A_BYTE:#010b}), got {layer_bytes[0]:#010b}"
+    )
+
+    _clean(board)
+
+
+@pytest.mark.hardware
+def test_morph_loopb_gate_reversible(genv4):
+    """Loop B pin: the gate crossfade is REVERSIBLE, not a one-way ratchet.
+    After a full-throw morph (gate == B), pulling pos back to 0 restores A exactly
+    — the frozen-threshold model makes the gate deterministic and reversible.
+    Verified via the source trg buffer."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    _build_loop_b_phrases(board)
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+
+    # full throw -> B
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
+    assert layer_bytes[0] == GATE_B_BYTE, (
+        f"pos MAX gate should equal B ({GATE_B_BYTE:#010b}), got {layer_bytes[0]:#010b}"
+    )
+
+    # pull back to 0 -> A restored exactly (NOT stuck at B)
+    board.phrase_morph_set(0)
+    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
+    assert layer_bytes[0] == GATE_A_BYTE, (
+        f"reversible: pos 0 after MAX must restore A ({GATE_A_BYTE:#010b}), "
+        f"got {layer_bytes[0]:#010b}"
+    )
+
+    _clean(board)
+
+
+@pytest.mark.hardware
+def test_morph_loopb_snap_cc_reversible(genv4):
+    """Loop B pin: groove_style and transpose_oct snap to B at full throw and
+    restore arm-time A below it (reversible discrete snap).  Asserts on the SOURCE
+    CC struct (SEQ_CC_Get) against the actually-stored endpoints."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    vals = _build_loop_b_phrases(board)
+    # the snap is only meaningful if A and B actually differ after any clamping
+    assert vals["style_a"] != vals["style_b"], "test setup: groove_style A/B must differ"
+    assert vals["oct_a"] != vals["oct_b"], "test setup: transpose_oct A/B must differ"
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+
+    # below MAX (incl. midpoint) = A; the snap only fires at full throw
+    board.phrase_morph_set(MID)
+    assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_a"], "mid: groove_style stays A"
+    assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_a"],   "mid: transpose_oct stays A"
+
+    # full throw = B
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_b"], "MAX: groove_style == B"
+    assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_b"],   "MAX: transpose_oct == B"
+
+    # reversible: pull back below MAX restores A
+    board.phrase_morph_set(0)
+    assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_a"], "reversible: groove_style back to A"
+    assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_a"],   "reversible: transpose_oct back to A"
+
+    _clean(board)
+
+
+def _build_note_only_phrase(board: Board) -> None:
+    """Phrase B differs from live A ONLY in note pitch (transpose/groove/gate left
+    at reset default and identical A==B), so the note layer read back through the
+    output mirror (track_par_get == SEQ_PAR_Get) is not contaminated by a transpose
+    or groove morph — the only thing that moves across the sweep is the note swap."""
+    board.ui_track_set(0)
+    for step in range(4):
+        board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_B)
+    assert board.phrase_capture(PHRASE_B), "note phrase capture should commit"
+    for step in range(4):
+        board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_A)
+
+
+@pytest.mark.hardware
+def test_morph_loopb_note_swap_reversible(genv4):
+    """Loop B Phase 1 pin: per-step NOTE swap.  pos 0 = A pitches, pos MAX = B
+    pitches, reversible (MAX->0 restores A).  At an intermediate pos every step is
+    EITHER A's pitch or B's pitch — a discrete swap, never an interpolated value
+    (that's the whole point: no off-scale glide).
+
+    track_par_get reads the output mirror (transpose applied), so this phrase keeps
+    transpose constant A==B and asserts the swap against the OBSERVED endpoints —
+    robust to any fixed transpose/force-scale offset."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+    _build_note_only_phrase(board)
+
+    assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
+
+    # observed endpoints (transpose is constant A==B; only the note swap moves)
+    board.phrase_morph_set(0)
+    a_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(4)]
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    b_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(4)]
+    for s in range(4):
+        assert b_vals[s] != a_vals[s], (
+            f"pos MAX note step {s} must differ from A ({a_vals[s]}), got {b_vals[s]}"
+        )
+
+    # midpoint: each step is discretely A or B (never an interpolated pitch)
+    board.phrase_morph_set(MID)
+    for s in range(4):
+        v = board.track_par_get(0, NOTE_LAYER, 0, s)
+        assert v in (a_vals[s], b_vals[s]), (
+            f"midpoint note step {s} must be discrete A({a_vals[s]}) or B({b_vals[s]}), got {v}"
+        )
+
+    # reversible: back to 0 restores A exactly
+    board.phrase_morph_set(0)
+    for s in range(4):
+        v = board.track_par_get(0, NOTE_LAYER, 0, s)
+        assert v == a_vals[s], f"reversible: note step {s} back to A ({a_vals[s]}), got {v}"
+
+    _clean(board)

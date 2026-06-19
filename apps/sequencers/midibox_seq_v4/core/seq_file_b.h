@@ -72,6 +72,17 @@ extern s32 SEQ_FILE_B_Open(char *session, u8 bank);
 extern s32 SEQ_FILE_B_PatternRead(u8 bank, u8 pattern, u8 target_group,  u16 remix_map);
 extern s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track);
 
+// POSTURE-MORPH Loop B: read main CC[128] + two par layers (vel_layer + note_layer,
+// instr 0) + gate trg layer 0 (instr 0) for slot_track.  Any out pointer may be NULL
+// (max==0 skips that layer).  p_size_out / t_size_out receive the phrase's geometry
+// (bytes valid in vel/note/gate).
+extern s32 SEQ_FILE_B_PhraseReadTrackData(u8 bank, u8 pattern, u8 slot_track,
+					  u8 *cc128_out,
+					  u8 vel_layer, u8 *vel_out, u16 max_vel,
+					  u8 note_layer, u8 *note_out, u16 max_note,
+					  u8 *gate_out, u16 max_gate,
+					  u16 *p_size_out, u16 *t_size_out);
+
 // POSTURE-MORPH: read ONLY one section's ext-CC block (0x80..0x9f, 32 bytes)
 // into cc_out, with zero live writes — the morph endpoint reader. V3/V4 -> 32
 // CCs; V2 -> 22 CCs zero-extended; V1/absent/mismatch -> error (caller refuses).

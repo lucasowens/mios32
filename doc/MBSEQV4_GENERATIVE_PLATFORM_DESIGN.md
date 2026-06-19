@@ -2276,11 +2276,34 @@ opens: the control surface (datawheel + GP-bar + SELECT+tap arm). New: `CMD_PHRA
 net); an armed morph is RELEASED whenever the focused group's live CCs are replaced
 out-of-band (recall/revert/pattern-switch/pull/UNDO/session-load) so a later nudge can't
 lerp off a stale A. Engine in `seq_pattern.c` (`SEQ_PATTERN_PhraseMorph{Arm,Set,Tick,
-Cancel,Target,Value}` + `phrase_morph_apply`, ~260 B .bss), endpoint reader
-`SEQ_FILE_B_PhraseReadCCs`. **Follow-ons (still open):** widen the morphed set to the
-main-array posture CCs (transpose/groove/length) and the generator dials — the user
-explicitly wants transpose+groove; note-content/grid crossfade stays RAM-gated and
-deferred (the "swap grid discretely" steer holds); generators-during-morph.
+Cancel,Target,Value}` + `phrase_morph_apply`, ~260 B .bss Loop A), endpoint reader
+`SEQ_FILE_B_PhraseReadCCs`. **Loop B SHIPPED (2026-06-17):** extends the morphed set
+to (a) main-array CC whitelist — groove_value and transpose_semi lerp linearly, groove_style
+and transpose_oct *reversible* snap (B at full throw, arm-time A below it — pulling the dial
+back un-snaps them, since lerping an enum/octave index is musically meaningless); (b) per-step
+velocity lerp (from stored arm-time A toward B, per-measure, non-drum tracks only); (c)
+*reversible* per-step gate crossfade — each step that differs between A and B carries a random
+switchover threshold FROZEN at arm (in `phrase_morph_gate_thresh`): the step shows B when
+`thresh < pos`, else A. So each differing step is B with probability pos/MAX (pos 0 = all A,
+pos MAX = B exactly), but the crossfade is **deterministic, reversible (pos→0 restores A
+bit-exactly), and stable at a held position** — no per-measure creep and no one-way ratchet.
+Every Loop B dimension thus honors the Loop A reversibility invariant. The velocity/gate/note
+index strides by the LIVE track geometry (`SEQ_PAR_NumStepsGet`), never the phrase's on-disk
+`p_size`, with an `idx < SEQ_PAR_MAX_BYTES` guard — so a geometry mismatch (phrase captured at
+a different track length) can't mis-index or overrun the par buffer. New reader:
+`SEQ_FILE_B_PhraseReadTrackData` (reads main CC[128] + two par layers (velocity + note) + gate
+trg layer 0 from a phrase record without touching live state).
+**Note morph — Phase 1 SHIPPED (2026-06-18, discrete swap):** the note pitches now morph too,
+via a per-step discrete swap that *shares the gate's frozen threshold* — so each step commits
+to B as a unit (below `thresh`: A's pitch + A's gate; above: B's pitch + B's gate). A note
+never takes an interpolated value (no off-scale glide), and the swap is reversible/stable like
+the gate. Result: at full morph you land on **B's rhythm AND B's notes** (was: B-rhythm/A-melody
+hybrid); at the midpoint the two patterns are a frozen-random braid of pure-A and pure-B steps.
+`phrase_morph_note_a/_b` buffers; chord/poly tracks morph only the first note layer (full
+poly = a Phase-1 limitation); drums excluded. Total morph .bss: ~6.6 KB. HIL: 8 Loop B tests.
+**Note morph — Phase 2 (queued):** scale-quantized glide as a *selectable per-track mode*
+(pitch slides A→B through FORCE_SCALE degrees) alongside the discrete swap.
+**Follow-ons (still open):** generator dials; length/clock-div morph; generators-during-morph.
 
 **Phrase-recall landing — true deferred clip-launch (follow-on; SHIPPED feel is the
 immediate variant, 2026-06-16).** Loop A's recall now lands clean (QUANTIZE = bar-aligned
