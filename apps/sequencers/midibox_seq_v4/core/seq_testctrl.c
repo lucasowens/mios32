@@ -101,6 +101,9 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 // the low gap at 0x4f (highest free byte below the 0x50 block). sub-op:
 // 0=ARM target n, 1=SET pos 0..PHRASE_MORPH_MAX, 2=QUERY [pos, target, status].
 #define CMD_PHRASE_MORPH         0x4f
+// SWITCH-QUANTIZE — global switch-quantize grid + measured I/O margin (feature B).
+// sub-op: 0=GET [grid, measured_ms, status], 1=SET grid (also drives SYNCHED).
+#define CMD_SWITCH_QUANTIZE      0x4e
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1676,6 +1679,44 @@ static void cmd_phrase_meta(mios32_midi_port_t port, u8 *payload, u32 len)
 //   0x01 SET:   payload[1]=v (0..PHRASE_MORPH_MAX) -> reply [pos, set(0/1), 0x01]
 //               set=0 means disarmed (refused).
 //   0x02 QUERY: -> reply [pos, target(0x7f=disarmed), 0x01].
+static void cmd_switch_quantize(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  if( len < 1 ) {
+    u8 reply[2] = { 0x00, 0x02 }; // malformed
+    send_reply(port, CMD_SWITCH_QUANTIZE, reply, sizeof(reply));
+    return;
+  }
+
+  switch( payload[0] ) {
+    case 0x00: { // GET -> [grid, measured_ms, status]
+      u8 reply[3] = { seq_core_options.SWITCH_QUANTIZE_GRID,
+                      seq_core_pattern_switch_measured_ms, 0x01 };
+      send_reply(port, CMD_SWITCH_QUANTIZE, reply, sizeof(reply));
+    } break;
+
+    case 0x01: { // SET grid (0..8); grid>0 implies synched switching, 0=Instant
+      if( len < 2 ) {
+        u8 reply[2] = { 0x00, 0x02 };
+        send_reply(port, CMD_SWITCH_QUANTIZE, reply, sizeof(reply));
+        return;
+      }
+      u8 g = payload[1];
+      if( g > 8 ) g = 8;
+      seq_core_options.SWITCH_QUANTIZE_GRID = g;
+      seq_core_options.SYNCHED_PATTERN_CHANGE = (g > 0) ? 1 : 0;
+      u8 reply[3] = { seq_core_options.SWITCH_QUANTIZE_GRID,
+                      seq_core_pattern_switch_measured_ms, 0x01 };
+      send_reply(port, CMD_SWITCH_QUANTIZE, reply, sizeof(reply));
+    } break;
+
+    default: {
+      u8 reply[2] = { 0x00, 0x02 }; // unknown sub-op
+      send_reply(port, CMD_SWITCH_QUANTIZE, reply, sizeof(reply));
+    } break;
+  }
+}
+
+
 static void cmd_phrase_morph(mios32_midi_port_t port, u8 *payload, u32 len)
 {
   if( len < 1 ) {
@@ -2323,6 +2364,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_PHRASE_MORPH:
             cmd_phrase_morph(port, payload_buf, payload_len);
+            break;
+          case CMD_SWITCH_QUANTIZE:
+            cmd_switch_quantize(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

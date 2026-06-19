@@ -443,6 +443,7 @@ s32 SEQ_PATTERN_Checkpoint(void)
 // per the RECALL_SEAMLESS option so a switch doesn't click/jump (design: recall feel).
 #define SEQ_SNAPSHOT_NO_CANCEL  0x01  // don't cut sustained notes (let them ring through) -> kills the switch click
 #define SEQ_SNAPSHOT_NO_RESYNC  0x02  // don't bar-align-restart -> the groove continues in phase (SEAMLESS)
+#define SEQ_SNAPSHOT_GRID_REPHASE 0x04  // re-phase on the switch-quantize grid (deferred to the tick) instead of the immediate bar restart -> phrase recall lands on the selected grid
 
 static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty_first, u8 land_flags)
 {
@@ -546,8 +547,15 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
   // bar-aligned restart of all tracks (pull precedent; also delivers RATOPC's
   // musical intent — a mid-jam restore lands on the next bar, not off-phase).
   // SEAMLESS recall skips it (NO_RESYNC) so the groove continues in phase.
-  if( !(land_flags & SEQ_SNAPSHOT_NO_RESYNC) )
-    SEQ_CORE_ManualSynchToMeasure(0xffff);
+  // GRID_REPHASE (SWITCH-QUANTIZE Phase 2): defer the re-phase to the next grid
+  // boundary in the tick (reset_trkpos_req) instead of restarting at the next bar
+  // now — the recalled phrase lands on the selected grid (1/2/4/8 bar etc.).
+  if( !(land_flags & SEQ_SNAPSHOT_NO_RESYNC) ) {
+    if( land_flags & SEQ_SNAPSHOT_GRID_REPHASE )
+      seq_core_recall_rephase_req = 1;
+    else
+      SEQ_CORE_ManualSynchToMeasure(0xffff);
+  }
 
   // a whole-organism restore (recall/revert) replaces every group's live CCs ->
   // any armed posture-morph's arm-time A is now stale. Release it (recall is "the
@@ -744,6 +752,8 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
     land = SEQ_SNAPSHOT_NO_CANCEL;
     if( seq_core_options.RECALL_SEAMLESS )
       land |= SEQ_SNAPSHOT_NO_RESYNC;
+    else if( SEQ_CORE_SwitchQuantize16ths() > 0 )
+      land |= SEQ_SNAPSHOT_GRID_REPHASE; // QUANTIZE + a grid set -> land the recall on the grid, not the next bar
   }
 
   s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_PHRASE_BANK, 4 * n, 1, land);
@@ -1206,10 +1216,11 @@ s32 SEQ_PATTERN_Change(u8 group, seq_pattern_t pattern, u8 force_immediate_chang
       // pregenerate bpm ticks
       // (won't be generated again if there is already an ongoing request)
       MUTEX_MIDIOUT_TAKE;
-      s32 delay_ticks = SEQ_CORE_AddForwardDelay(seq_core_pattern_switch_margin_ms);
+      u16 switch_margin_ms = SEQ_CORE_SwitchMarginMs(); // measured I/O margin (B)
+      s32 delay_ticks = SEQ_CORE_AddForwardDelay(switch_margin_ms);
       if( delay_ticks >= 0 ) {
       if( seq_pattern_log_load_time ) {
-	DEBUG_MSG("[SEQ_PATTERN:%d] Forward Delay %d ticks based on %d mS margin", SEQ_BPM_TickGet(), delay_ticks, seq_core_pattern_switch_margin_ms);
+	DEBUG_MSG("[SEQ_PATTERN:%d] Forward Delay %d ticks based on %d mS margin", SEQ_BPM_TickGet(), delay_ticks, switch_margin_ms);
       }
       }
       MUTEX_MIDIOUT_GIVE;
@@ -1302,6 +1313,15 @@ s32 SEQ_PATTERN_Handler(void)
 #endif
 
   if( any_pattern_loaded ) {
+    // B: size the switch-quantize forward-delay margin from the REAL I/O time.
+    // Keep the worst case seen (ms, u8) so the margin never undershoots a heavy
+    // switch; >65 mS overflow pins it high. SEQ_CORE_SwitchMarginMs() adds headroom.
+    // (Pattern-change path only for now; phrase recall keeps the fixed margin.)
+    u32 measured_ms = (stopwatch_delta == 0xffffffff) ? 65 : (stopwatch_delta / 1000);
+    if( measured_ms > 255 ) measured_ms = 255;
+    if( (u8)measured_ms > seq_core_pattern_switch_measured_ms )
+      seq_core_pattern_switch_measured_ms = (u8)measured_ms;
+
     if( stopwatch_delta == 0xffffffff ) {
       if( seq_pattern_log_load_time ) {
 	DEBUG_MSG("[SEQ_PATTERN:%d] All patterns loaded in more than 65 mS!", SEQ_BPM_TickGet());

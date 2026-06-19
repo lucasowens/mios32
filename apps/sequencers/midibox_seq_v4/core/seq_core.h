@@ -52,6 +52,13 @@ typedef union {
                                  // skip the immediate note-cut (the switch click).
                                  // REVERT / stopped recall ignore this (hard restore).
                                  // Appended last so existing bit positions don't shift.
+    u32 SWITCH_QUANTIZE_GRID:4;  // global switch-quantize grid (ladder index): the
+                                 // musical boundary a deferred pattern switch (Phase 2:
+                                 // phrase recall) lands on. 0=Instant(next 16th),
+                                 // 1=1/16, 2=1/8, 3=1/4 beat, 4=1/2 bar, 5=1 bar
+                                 // (default = today's feel), 6=2 bar, 7=4 bar, 8=8 bar.
+                                 // See seq_core_switch_quantize_16ths(). Floor-clamped
+                                 // at use-time to what the SD can service. Appended last.
   };
 } seq_core_options_t;
 
@@ -303,6 +310,8 @@ extern s32 SEQ_CORE_StepTriggerReq(u8 bus);
 extern s32 SEQ_CORE_NotifyIncomingMIDIEvent(u8 track, mios32_midi_package_t p);
 
 extern s32 SEQ_CORE_AddForwardDelay(u16 delay_ms);
+extern u16 SEQ_CORE_SwitchMarginMs(void);
+extern u16 SEQ_CORE_SwitchQuantize16ths(void);
 
 extern s32 SEQ_CORE_BPM_Update(float bpm, float sweep_ramp);
 extern s32 SEQ_CORE_BPM_SweepHandler(void);
@@ -323,6 +332,8 @@ extern u8 seq_core_steps_per_measure;
 extern u8 seq_core_steps_per_pattern;
 
 extern u8 seq_core_pattern_switch_margin_ms;
+extern u8 seq_core_pattern_switch_measured_ms;
+extern volatile u8 seq_core_recall_rephase_req;
 
 extern u16 seq_core_trk_muted;
 extern u16 seq_core_trk_synched_mute;

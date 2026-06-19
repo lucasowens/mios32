@@ -88,6 +88,10 @@ u8 seq_core_steps_per_pattern;
 
 u8 seq_core_pattern_switch_margin_ms;
 u8 seq_core_pattern_switch_measured_ms;
+// SWITCH-QUANTIZE (Phase 2): a phrase recall loads its content at TAP (interrupts-on,
+// off the hot path) then sets this to defer its bar-style re-phase to the next grid
+// boundary, landed in the tick via reset_trkpos_req (RATOPC's re-phase mechanism).
+volatile u8 seq_core_recall_rephase_req;
 
 u16 seq_core_trk_muted;
 u16 seq_core_trk_synched_mute;
@@ -190,8 +194,10 @@ s32 SEQ_CORE_Init(u32 mode)
   }
   seq_core_steps_per_measure = 16-1;
   seq_core_steps_per_pattern = 16-1;
-  seq_core_pattern_switch_margin_ms = 100; // covers FEARLESS writeback (SD write+read in the switch window; was 50 read-only — measure with seq_pattern_log_load_time and trim). Heaviest user is now PHRASE RECALL: it writes back ALL dirty groups + reads 4 patterns inside this one window (vs the per-group switch's 1+1). If a running recall wobbles/late-renders at the bar, bump this.
-  seq_core_pattern_switch_measured_ms = 0; // no measurement yet
+  seq_core_pattern_switch_margin_ms = 100; // FALLBACK only now: SEQ_PATTERN_Handler measures the real switch I/O into seq_core_pattern_switch_measured_ms and the effective margin tracks that (see SEQ_CORE_SwitchMarginMs). Covers FEARLESS writeback (SD write+read in the switch window). Heaviest user is now PHRASE RECALL: it writes back ALL dirty groups + reads 4 patterns inside this one window (vs the per-group switch's 1+1).
+  seq_core_pattern_switch_measured_ms = 0; // no measurement yet (set by SEQ_PATTERN_Handler)
+  seq_core_options.SWITCH_QUANTIZE_GRID = 0; // default Instant: grid==0 keeps the EXACT old pattern-boundary switching when synched is on (zero behaviour change / no regression). Dial up to quantize; the encoder/testctrl couples grid>0 -> SYNCHED on, grid 0 -> SYNCHED off.
+  seq_core_recall_rephase_req = 0;
   seq_core_global_scale = 0;
   seq_core_global_scale_root_selection = 0; // from keyboard
   seq_core_keyb_scale_root = 0; // taken if enabled in OPT menu
@@ -2327,7 +2333,7 @@ s32 SEQ_CORE_Handler(void)
 
 	// load new pattern/song step if reference step reached measure
 	// (this code is outside SEQ_CORE_Tick() to save stack space!)
-	u8 pre_ticks = SEQ_BPM_TicksFor_mS(seq_core_pattern_switch_margin_ms); // pattern switch depends on tempo and preconfigured margin
+	u8 pre_ticks = SEQ_BPM_TicksFor_mS(SEQ_CORE_SwitchMarginMs()); // pattern switch fires this many ticks before the boundary; margin tracks the measured I/O (B)
 	if( pre_ticks >= 95 )
 	  pre_ticks = 95;
 	if( (bpm_tick % 96) == (96-pre_ticks) ) {
@@ -2351,8 +2357,17 @@ s32 SEQ_CORE_Handler(void)
 	      SEQ_SONG_NextPos();
 	    }
 	  } else {
-	    if( seq_core_options.SYNCHED_PATTERN_CHANGE &&
-		seq_core_state.ref_step_pattern == seq_core_steps_per_pattern ) {
+	    // SWITCH-QUANTIZE: fire the deferred pattern change when the NEXT 16th
+	    // (the one this pre-margin check leads) is a multiple of the selected
+	    // grid. (bpm_tick/96) is the global 16th index; +1 = the upcoming one.
+	    // Default grid 16 (1 bar) == the old steps_per_pattern boundary for a
+	    // default-length pattern, so stock setups are unchanged; tighter grids
+	    // jump sooner, wider grids less often. Grid is floor-clamped to the I/O.
+	    u16 switch_grid = SEQ_CORE_SwitchQuantize16ths();
+	    u8 grid_fires = switch_grid
+	      ? ((((bpm_tick / 96) + 1) % switch_grid) == 0)             // quantize to the selected grid
+	      : (seq_core_state.ref_step_pattern == seq_core_steps_per_pattern); // grid 0 (Instant): EXACT old pattern-boundary behaviour
+	    if( seq_core_options.SYNCHED_PATTERN_CHANGE && grid_fires ) {
 	      SEQ_PATTERN_Handler();
 	    }
 	  }
@@ -2462,6 +2477,7 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
   // cancel prefetch requests/counter
   bpm_tick_prefetch_req = 0;
   bpm_tick_prefetched = bpm_start;
+  seq_core_recall_rephase_req = 0; // drop a pending grid re-phase on transport reset
 
   // cancel stop and set step request
   seq_core_state.MANUAL_TRIGGER_STOP_REQ = 0;
@@ -2510,6 +2526,18 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
   // set request flag on overrun (tracks can synch to measure)
   u8 synch_to_measure_req = 0;
   if( (bpm_tick % (384/4)) == 0 ) {
+    // SWITCH-QUANTIZE (Phase 2): land a deferred phrase-recall re-phase on the
+    // selected grid. The recall already loaded its content at tap; here, on the
+    // grid boundary, we request a full track-position reset (same mechanism as
+    // RATOPC / the bar-aligned QUANTIZE landing, just on the chosen grid). This
+    // is cheap (no SD), so it is safe in the tick. (bpm_tick/96)=16th index.
+    if( seq_core_recall_rephase_req ) {
+      u16 rq_grid = SEQ_CORE_SwitchQuantize16ths();
+      if( rq_grid == 0 || (((bpm_tick / 96)) % rq_grid) == 0 ) {
+        seq_core_state.reset_trkpos_req = 0xffff;
+        seq_core_recall_rephase_req = 0;
+      }
+    }
     seq_core_trk_t *t = &seq_core_trk[0];
     seq_cc_trk_t *tcc = &seq_cc_trk[0];
     u8 track;
@@ -4377,6 +4405,54 @@ s32 SEQ_CORE_AddForwardDelay(u16 delay_ms)
   bpm_tick_prefetch_req = SEQ_BPM_TickGet() + delay_ticks;
 
   return delay_ticks; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Effective forward-delay margin (ms) for a switch.  Tracks the MEASURED switch
+// I/O time (SEQ_PATTERN_Handler / phrase recall store it into
+// seq_core_pattern_switch_measured_ms) plus headroom, never below a small floor;
+// falls back to the configured seq_core_pattern_switch_margin_ms until the first
+// real measurement exists.  This is what shrinks the conservative fixed 100 mS to
+// the actual SD cost so the forward-delay window (and the switch feel) is tight.
+/////////////////////////////////////////////////////////////////////////////
+u16 SEQ_CORE_SwitchMarginMs(void)
+{
+  u16 m = seq_core_pattern_switch_measured_ms;
+  if( m ) {
+    m += 20; // headroom over the measured worst case
+    if( m < 30 )
+      m = 30;
+  } else {
+    m = seq_core_pattern_switch_margin_ms; // fallback until the first measurement
+  }
+  if( m > 250 )
+    m = 250; // sane cap (forward-delay window must stay well under a measure)
+  return m;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Global switch-quantize grid in 16th-note steps (0 = Instant).  Maps the
+// SWITCH_QUANTIZE_GRID ladder index to a grid, then FLOOR-CLAMPS it up so the
+// grid interval (grid*96 ticks) can never be shorter than the switch I/O needs
+// at the current tempo — otherwise a switch couldn't finish before its own
+// boundary.  The caller fires a deferred switch when the next 16th is a multiple.
+/////////////////////////////////////////////////////////////////////////////
+u16 SEQ_CORE_SwitchQuantize16ths(void)
+{
+  // ladder: 0=Instant 1=1/16 2=1/8 3=1/4beat 4=1/2bar 5=1bar 6=2bar 7=4bar 8=8bar
+  static const u16 grid_tab[9] = { 0, 1, 2, 4, 8, 16, 32, 64, 128 };
+  u8 q = seq_core_options.SWITCH_QUANTIZE_GRID;
+  if( q > 8 )
+    q = 8;
+  if( q == 0 )
+    return 0; // Instant (no quantize; handled by the immediate-change path)
+
+  u32 margin_ticks = SEQ_BPM_TicksFor_mS(SEQ_CORE_SwitchMarginMs());
+  while( q < 8 && (u32)grid_tab[q] * 96 < margin_ticks )
+    ++q; // bump up until the grid interval covers the I/O margin
+  return grid_tab[q];
 }
 
 

@@ -305,6 +305,10 @@ s32 SEQ_FILE_C_Read(char *session)
 	    s32 value = get_dec_range(word, parameter, 0, 1);
 	    if( value >= 0 )
 	      seq_core_options.RECALL_SEAMLESS = value;
+	  } else if( strcmp(parameter, "SwitchQuantizeGrid") == 0 ) {
+	    s32 value = get_dec_range(word, parameter, 0, 8);
+	      if( value >= 0 )
+	        seq_core_options.SWITCH_QUANTIZE_GRID = value;
 	  } else if( strcmp(parameter, "SynchedMute") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 1);
 	    if( value >= 0 )
@@ -986,6 +990,9 @@ static s32 SEQ_FILE_C_Write_Hlp(u8 write_to_file)
   FLUSH_BUFFER;
 
   sprintf(line_buffer, "RecallSeamless %d\n", seq_core_options.RECALL_SEAMLESS);
+  FLUSH_BUFFER;
+
+  sprintf(line_buffer, "SwitchQuantizeGrid %d\n", seq_core_options.SWITCH_QUANTIZE_GRID);
   FLUSH_BUFFER;
 
   sprintf(line_buffer, "SynchedMute %d\n", seq_core_options.SYNCHED_MUTE);

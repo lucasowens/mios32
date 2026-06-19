@@ -3353,6 +3353,20 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
       SEQ_PATTERN_PhraseMorphSet(p);
       seq_ui_display_update_req = 1;
     }
+  } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE && encoder == 0 ) {
+    // PHRASE view, datawheel (when no morph is armed — the morph branch above
+    // takes precedence): ride the global SWITCH-QUANTIZE grid. The phrase surface
+    // is the live hub — collect / morph / switch / set the switch-quantize from
+    // the one wheel. grid>0 implies synched switching, 0 (Instant) = immediate.
+    u8 g = seq_core_options.SWITCH_QUANTIZE_GRID;
+    if( SEQ_UI_Var8_Inc(&g, 0, 8, incrementer) ) {
+      static const char *const q_name[9] = {
+        "Instant", "1/16", "1/8", "1/4 beat", "1/2 bar", "1 bar", "2 bars", "4 bars", "8 bars" };
+      seq_core_options.SWITCH_QUANTIZE_GRID = g;
+      seq_core_options.SYNCHED_PATTERN_CHANGE = (g > 0) ? 1 : 0;
+      SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Switch Quant", (char *)q_name[g]);
+      seq_ui_display_update_req = 1;
+    }
   } else if( ui_encoder_callback != NULL ) {
     if( seq_ui_button_state.ENC_BTN_FWD_PRESSED ) {
       // encoder emulates a GP button

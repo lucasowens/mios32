@@ -78,6 +78,7 @@ from .sysex import (
     CMD_PHRASE_PRESENT,
     CMD_PHRASE_META,
     CMD_PHRASE_MORPH,
+    CMD_SWITCH_QUANTIZE,
     PHRASE_META_DRIFT,
     PHRASE_META_NAME_GET,
     PHRASE_META_NAME_SET,
@@ -1295,6 +1296,28 @@ class Board:
             raise RuntimeError(f"PHRASE_MORPH query reply: {payload!r}")
         target = -1 if payload[1] == 0x7f else payload[1]
         return (payload[0], target)
+
+    def switch_quantize_get(self, timeout: float = 1.0) -> tuple[int, int]:
+        """Global switch-quantize: returns (grid_index 0..8, measured_io_ms).
+        grid 0=Instant, 1=1/16, 2=1/8, 3=1/4(beat), 4=1/2bar, 5=1bar, 6=2bar,
+        7=4bar, 8=8bar. measured_io_ms is the worst-case switch I/O seen (feature B)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SWITCH_QUANTIZE, bytes([0x00])))
+        payload = self.wait_for_sysex(CMD_SWITCH_QUANTIZE, timeout=timeout, since=since)
+        if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"SWITCH_QUANTIZE get reply: {payload!r}")
+        return (payload[0], payload[1])
+
+    def switch_quantize_set(self, grid: int, timeout: float = 1.0) -> int:
+        """Set the global switch-quantize grid (0..8; clamps above). grid>0 also
+        enables synched pattern switching, grid 0 (Instant) disables it. Returns
+        the (clamped) grid the engine now holds."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SWITCH_QUANTIZE, bytes([0x01, grid & 0x7f])))
+        payload = self.wait_for_sysex(CMD_SWITCH_QUANTIZE, timeout=timeout, since=since)
+        if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"SWITCH_QUANTIZE set reply: {payload!r}")
+        return payload[0]
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

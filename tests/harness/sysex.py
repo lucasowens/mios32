@@ -66,6 +66,7 @@ CMD_TRG_BYTE_SET = 0x7d
 CMD_FREEZE_SET = 0x7e
 CMD_PHRASE_META = 0x7f  # sub-op: 0=drift query, 1=name get, 2=name set, 3=name commit
 CMD_PHRASE_MORPH = 0x4f  # POSTURE-MORPH (Loop A) — sub-op: 0=arm, 1=set, 2=query
+CMD_SWITCH_QUANTIZE = 0x4e  # global switch-quantize grid + measured margin — sub-op: 0=get, 1=set
 
 # CMD_PHRASE_META sub-ops — keep in sync with seq_testctrl.c
 PHRASE_META_DRIFT = 0x00
