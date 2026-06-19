@@ -442,6 +442,62 @@ against the backbone.
   tape (don't mutate); mix three windowed captures with one live Turing track → three
   stable layers, one degree of freedom under the thumb.
 
+### 5.6 Where your playing lives — the concept map (clarity audit 2026-06-19)
+
+A step-back review after a recall-freeze chase that made the box *feel* flakey. Finding:
+the model is **well-factored underneath** (the §3 spine is clean and trigger-generator-
+ready), but the *surface* has grown ~a dozen named save/recall concepts that share one
+dirty/writeback plumbing — and that overlap is what reads as fragility from the keys.
+This map names each concept **once** so the whole thing fits in your head; the
+**overlaps** below are the by-ear-gated simplification backlog (collapse one at a time,
+never speculatively).
+
+| Concept | What it is | Gesture | Lives in |
+|---|---|---|---|
+| **Working slot (= pattern)** | a group's live, editable state | pattern buttons select it; edits land here | user banks (4×64) on SD |
+| **Pattern change** | switch a group to another working slot | pattern buttons | — |
+| **FEARLESS auto-writeback** | on a switch, save the outgoing slot first (never lose work) | automatic | the outgoing working slot |
+| **CAPTURE / BOUNCE** | snapshot the *computed output* as a variation | PATTERN-hold + destination pick | a slot / track-slot |
+| **THE PULL** | track-grain load from any slot | SELECT-hold + source pick | RAM (one-deep undo) |
+| **PHRASES** | whole-organism snapshot library, 16 waypoints | PHRASE-view tap = recall / hold = capture | sentinel bank `MBSEQ_PH.V4` (0xfd) |
+| **Phrase recall** | restore the organism from a phrase (posture = regen; FREEZE+tap = frozen tape) | tap a waypoint | — |
+| **CHECKPOINT / REVERT** | one-deep whole-organism safety anchor | SELECT+BOOKMARK tap / hold | sentinel bank `MBSEQ_AN.V4` (0xfe) |
+| **UNDO / REDO** (Tier 1) | step back/forward the last *deliberate* gesture — consolidates the track / generator / utility one-deeps + adds the missing redo | one UNDO + one REDO (provisional) | shared shallow RAM store |
+| **SET (durable baseline)** | a blessed copy of the whole shelf you reload to (the DN2 split) | SAVE-SET / RELOAD-SET (provisional) | `/SETS/<name>/` on SD |
+| **DRIFT** | per-group *"my deliberate edits since the last recall/capture"* (excludes generator wander) | — (drives the drift LED) | RAM mask `phrase_drift` |
+| **FREEZE** | global master switch gating generator auto-mutation | METRONOME button | RAM state |
+| **Posture-/phrase-morph** | interpolate live↔a phrase (ext-CC, main-CC, velocity, gate, note) | SELECT+tap to arm; datawheel/GP-bar | RAM arm/target buffers |
+| **WINDOW** | sampler read-position over any buffer | 4 window encoders | per-track RAM state |
+| **Song mode** | arrangement of patterns | song page | song file |
+
+**Overlaps to collapse (by-ear-gated backlog, clarity-per-risk order):**
+1. **The return model — one verb family across three scopes (NAMED 2026-06-19, see §9).**
+   FEARLESS auto-writeback, CAPTURE-to-slot, PHRASE-capture, CHECKPOINT, and the scattered
+   undos were all variations of "save / get-back-to a state." The resolution is **"bless /
+   return" at three scopes** — reflexive **UNDO/REDO** (Tier 1; consolidates the
+   track/generator/utility one-deeps and adds the missing redo), organism
+   **CHECKPOINT/REVERT** (Tier 2), and the new durable **SAVE-SET/RELOAD-SET** (Tier 3) — with
+   auto-writeback as the automatic "persist to scratch" beneath them. All gated to *deliberate*
+   gestures (the `DRIFT`/`automutate` distinction). The model is documented; the build is
+   queued per scope (§10). *This was the highest-clarity / highest-risk overlap — naming it
+   was the win; the refactor stays by-ear-gated.*
+2. **Landing-feel is fragmented** across QUANTIZE / SEAMLESS / SWITCH-QUANTIZE-grid.
+   One "landing" control (Instant / Quantize-16th / Quantize-bar / Seamless) would unify it.
+   *Medium risk — touches recall feel.*
+3. **"Morph" means three different things** — WINDOW (read-position), posture-morph,
+   phrase-morph. Distinct names would remove the collision. *Pure clarity, low risk* — but
+   gated on the still-open morph keep/cut (§10).
+4. **Robotize is the lone emission-time special-case** (resets on bounce, §3). Migrating it
+   to a render-stack processor completes the §3 closure and drops the exception. *Its own
+   session (already queued in §10).*
+
+**Verdict:** no core restructuring needed. The spine earns its keep; these are surface
+consolidations to take one at a time, each proven by ear. The fragility locus is the one
+shared dirty/writeback mask — `DRIFT` is its "deliberate edits only" refinement and is the
+right primitive to lean on when any of the above is collapsed. *(2026-06-19: the three-tier
+return model does exactly this — all three tiers ride the deliberate-vs-wander gate, which is
+what keeps them coherent on a living instrument.)*
+
 ---
 
 ## 6. Platform realities (verified hardware constraints)
@@ -476,6 +532,12 @@ not running in the background. Reconstructed continuity, not literal concurrency
 > switch) and protection becomes the explicit CHECKPOINT/REVERT act. The
 > recall-relaunches clause is **unchanged**. See §9 (2026-06-11) and
 > `doc/plans/2026-06-11-save-model-groups-performing-curating.md`.
+>
+> **Refined 2026-06-19** (DECIDED; build queued): always-persist is precisely *"persist to
+> the SCRATCH session."* The durable baseline is the new **SET** — SAVE-SET blesses the whole
+> shelf, RELOAD-SET is the deliberate "back to what I saved" (the Digitone-2 split). This is
+> the third tier of the "bless / return" model (Tier 1 UNDO/REDO, Tier 2 CHECKPOINT/REVERT,
+> Tier 3 SET). The recall-relaunches clause still stands. See §9 (2026-06-19) and §10.
 
 ### Pattern infrastructure
 - 4 banks × 64 patterns = 256 group-states; 20-char names
@@ -483,7 +545,10 @@ not running in the background. Reconstructed continuity, not literal concurrency
 - A saved pattern persists trg/par layers + track CCs **0x80–0x95**
   ([seq_file_b.c:844](../core/seq_file_b.c#L844)) — i.e. the recording *and* the
   generative posture (robotize mask, probabilities, loop control, anchor seeds) in one
-  object. Disk-resident ≈ 6KB/pattern today.
+  object. Disk-resident ≈ **9 KB/pattern** today (`pattern_size` ≈ 8992 B with the V4 gen
+  ext-block; "≈ 6KB" was the pre-V4 figure — corrected 2026-06-19). A full bank file is
+  ~575 KB worst case but **sparse-grown**, so copying a set scales with *used* slots, not
+  capacity (~75 KB for ~8 used slots). See [REFERENCE](MBSEQV4_REFERENCE.md) for the byte map.
 - Per-track live buffers: `SEQ_PAR_MAX_BYTES = 1024`, `SEQ_TRG_MAX_BYTES = 256`
   ([seq_par.h:25](../core/seq_par.h#L25), [seq_trg.h:23](../core/seq_trg.h#L23)) → 1.25KB/track.
   `seq_par_layer_value` already uses `AHB_SECTION` placement (§A5 matters).
@@ -493,7 +558,8 @@ not running in the background. Reconstructed continuity, not literal concurrency
   mutation multiplier) per active generator. New sections append after the v2 data
   behind a magic-byte + version; v2 patterns load with default-init spine state
   (playable, spine-empty). Track slots use the same per-track section format. Size
-  growth ~6KB → ~15–20KB/pattern; 256 × 20KB ≈ 5MB on SD — comfortable. *(The format
+  growth ~6KB (v2 base) → ~15–20KB/pattern (full v3; ~9 KB today with the gen-ext only);
+  256 × 20KB ≈ 5MB on SD — comfortable. *(The format
   spec lives here; the implementation is gated behind §8.)*
 
 ### Bus tracks (inter-track transport)
@@ -515,6 +581,18 @@ not running in the background. Reconstructed continuity, not literal concurrency
     the whole `bus_notestack[bus][BUS_NOTESTACK_TRANSPOSER].note_items[]` as a
     pitch-class set and *constrains* `p->note` into it. Structurally an arp-branch
     variant; mechanism already exists.
+  - **Self-bus extension point (intra-track — distinct from the bus; spec'd §10(c) 2026-06-19).**
+    The bus is *cross-track* transport, and its real reach is **CC-routing**: a loopback track's
+    CC layer drives ~50+ of a target's config params (direction, length, groove, robotize, …) via
+    `SEQ_CC_MIDI_Set` — but at the cost of a whole **silent** loopback track. The **self-bus**
+    lets a track route a CC layer to its **own** params (local `SEQ_CC_Set`, no second track), and
+    at note-grain lets the render-stack PITCH/CHORD_MASK processors read a self-source (a control
+    layer / a Chord layer) instead of the bus notestack — self-modulation, *per-step*, without
+    spending a track (§10 c). The note-grain half is born-as-processor (captured/bounced editable);
+    the CC-routing half reuses `SEQ_CC_Set` wholesale (treat its config mutation as ambient —
+    exclude from dirty/drift; **not bounce-bakeable** — its static heard result is a tape/record
+    capture, not a buffer snapshot — see §10 c). (The plain bus can't self-modulate: shared
+    global state, written round 0 / read round 1, render before emission.)
   - `V4.097` already drives global Root/Scale over loopback; track Root/Scale par
     layers since `V4.092`.
   - **Verified in this fork (2026-05-24):**
@@ -1926,6 +2004,86 @@ hit while evaluating it. Both by-ear-confirmed, committed together.
   (the clean pattern-change path) so `TASK_MIDI` keeps emitting through the read. Applies to
   every recall + REVERT.
 
+**2026-06-19 — The three-tier "return" model + durable SET baseline + the generative freeze/bounce law (DECIDED; design-ahead, build queued)**
+A design conversation to refine the save paths. No firmware this round — the model is
+crystallized here; build order is a later GO.
+
+- **The unifying frame: one verb family, "bless / return," at three scopes.** Undo,
+  CHECKPOINT/REVERT, and the new SAVE-SET are the *same idea* — return to a previous or blessed
+  point — at reflexive / organism / set grain:
+  - **Tier 1 — UNDO/REDO** (reflexive): step back/forward the last *deliberate* gesture. RAM,
+    shallow, one gesture pair.
+  - **Tier 2 — CHECKPOINT/REVERT** (blessed organism): the 4-group safety anchor
+    (`MBSEQ_AN.V4`, shipped FEARLESS Stage C).
+  - **Tier 3 — SAVE-SET/RELOAD-SET** (blessed set): the durable whole-shelf baseline (new).
+
+  All three operate on **deliberate gestures only** — ambient generator wander is never a
+  return target (reuse the `seq_generator_in_automutate` gate that already drives
+  `phrase_drift`). This is what makes "undo" coherent on a living instrument: you return your
+  *edits*, not the organism breathing. The frame collapses §5.6 overlap #1 ("three commit
+  paths, one idea") by naming the verb.
+
+- **Durable SET baseline (the Digitone-2 split).** Today the fork always-persists —
+  auto-writeback flushes every dirty group to its working slot, so reload = your live state and
+  there is no explicit saved baseline. Decision: add a **SET** layer above the disposable
+  **SESSION**. The 2026-06-11 inversion is *reframed, not reversed* — always-persist now means
+  *"persist to the SCRATCH session"*; a SET is an explicitly-blessed copy. SAVE-SET blesses the
+  whole shelf; RELOAD-SET returns to it (the deliberate "back to what I saved"); the
+  recall-relaunches clause is unchanged.
+  - **Scope:** a SET = banks `B1–B4` + config `C` (+ `G/M/S/BM`, cheap and faithful).
+    **Phrases (`PH`) persist independently** — a growing durable library that survives
+    RELOAD-SET (a captured waypoint is never lost; keeps the §10 L1 probe hazard dormant). The
+    **anchor (`AN`) is excluded** (transient in-session undo). Global `GC` is already
+    root-scoped — untouched.
+  - **Boot:** resume the live scratch (unchanged); RELOAD-SET is the explicit baseline return.
+    A `GC` flag (`boot_from_set`, default off) offers pure-DN2 power-cycle-to-baseline as an
+    opt-in.
+  - **Mechanism (verified this session so a later build doesn't re-derive):** a file-copy layer
+    cloning `SEQ_FILE_CreateBackup` → `FILE_Copy` (with the corrected file list);
+    `SEQ_FILE_LoadAllFiles` is the reload engine and already re-seeds phrase occupancy; atomic
+    via a temp dir + `f_rename` (compiled, dir-capable). **SD-only, ~0 RAM** (reuses the
+    existing 512 B `tmp_buffer`, never touches the ~9 KB CCM wall); non-live (low-priority
+    `APP_SEQ_Task`, behind the LCD progress bar). Storage `/SETS/<name>/`, symmetric to a
+    session dir. **Rejected:** a snapshot-bank baseline (`SnapshotWrite` captures only the 4
+    *loaded* groups — fatal to the switched-away case) and an overlay/divergence scheme (adds
+    logic to the fragile shared dirty plumbing).
+  - **CHECKPOINT/REVERT stays — not merged.** Different grain + lifetime (in-session 4-group
+    quick undo vs durable whole-shelf baseline); REVERT structurally cannot restore a
+    switched-away pattern, only RELOAD-SET can. The set enters as CHECKPOINT's **durable-scope
+    sibling**, so the surface *shrinks* (one named model) even as capability grows.
+
+- **Unified UNDO/REDO (Tier 1).** Today undo is five bespoke one-deep mechanisms with four
+  gestures (track = SELECT+CLEAR, generator = GP2, utility = GP8, organism = SELECT+BOOKMARK)
+  and **no redo anywhere** — that scatter is the felt clunk. Decision: unify into one
+  context-aware UNDO + one REDO over the last deliberate gesture, a shared shallow RAM store
+  consolidating today's track/generator/utility one-deeps (~5 KB total today), redo added,
+  pushes gated by the `automutate`/`drift` flag. A deep linear (DAW-style) stack is rejected —
+  wrong altitude for an instrument whose state wanders; the blessed tiers are the deep return.
+
+- **The generative freeze/bounce law.** Everything generative is born a **render-stack
+  citizen**, so FREEZE means one thing (hold the wander) and BOUNCE means one thing (freeze the
+  heard result into editable steps) uniformly. Robotize is the lone emission-time exception
+  (queued §10, in FORCE_SCALE's bake-then-migrate lineage); new **trigger generators** must obey
+  this from birth so they never become a second robotize.
+  - **Where the law bends — temporal config modulation (named 2026-06-19).** Self-modulation
+    splits. Its *note-grain* half (self-transpose / chord) obeys the law — render-stack, so
+    BOUNCE freezes the static notes. Its *config-grain* centerpiece (self-routing CC: direction /
+    length / groove / clock-div …) does **not** — it modulates *playback behavior over time*,
+    not buffer content, so the heard result is a **timeline, not a buffer**. BOUNCE (a buffer
+    snapshot at one config instant) structurally can't hold it (harder than robotize: traversal,
+    not note values). The static result is still capturable — by **recording the emitted output
+    over time** (the tape / MIDI-as-sample family, §4/§5.5), which lays it flat and keeps only
+    the notes ("static output, not modulation"). So the rule generalizes: **BOUNCE freezes
+    content transforms; the tape freezes time-varying behavior** — config-grain self-mod, like
+    robotize, is a tape/record citizen, not a bounce one. **The resolution is the retroactive CAPTURE frame/ring
+    + per-track-RNG determinism (§10)** — offline re-simulation (seed-frame) plus recorded inputs
+    (bus + live) freezes the lived timeline, closing this gap. (Generators are pitch-only today;
+    trigger generators do not yet exist.)
+
+- **Build status:** all of the above is **DESIGN-AHEAD / build queued** — the SET layer, the
+  unified UNDO/REDO, trigger generators, and self-modulation each carry an actionable §10 sketch
+  for a later GO. This round wrote no firmware.
+
 **Provisional — recorded but NOT committed (Part II); revisit after §8 GO/NO-GO**
 - Processor catalog organized by layer type-class; one stack per (track, layer-class);
   strict stacking within a class; cross-track deferred (use Bus).
@@ -2220,6 +2378,216 @@ processors rule names them).
   posture (disposable SD); fix is to distinguish "no file" (0) from "file unreadable" (<0)
   and refuse gap-fill on the latter. Build only if it bites.
 
+**Save-path & generative directions — queued 2026-06-19 (model decided in §9; build on GO).**
+The save-paths refinement session. The model is in §9 (the three-tier "bless / return" frame +
+the generative freeze/bounce law); the actionable build sketches live here.
+
+- **(a) Durable SET baseline — design settled.** A file-copy layer above the disposable
+  session (the DN2 split). Storage `/SETS/<name>/`, symmetric to a session dir; live scratch
+  stays `/SESSIONS/<name>/` (name-equality for legibility). New `seq_file.c` fns mirroring
+  `SEQ_FILE_CreateBackup` with the **corrected file list** (`B1–4` + `C` [+ `G/M/S/BM`];
+  exclude `PH` and `AN`): `SEQ_FILE_SetSave` (WritebackAllDirty + SaveAllFiles, copy session →
+  `/SETS/_TMP_/`, then remove-old + `f_rename` for atomicity), `SEQ_FILE_SetLoad` (mkdir
+  session, copy SET → session, `SEQ_FILE_LoadAllFiles(0)` — which re-seeds phrase occupancy —
+  StoreSessionName on success only), `SEQ_FILE_SetReload` = SetLoad(current). Add a thin
+  `FILE_Rename` wrapper over `f_rename` (refuses if dst exists → remove-then-rename). Dispatch
+  from `APP_SEQ_Task` via request flags (mirror `seq_ui_backup_req`), under `MUTEX_SDCARD`,
+  behind LCD progress — **do not overload SAVE_ALL** (it stays "flush scratch"). Gestures: a
+  **SET section in the disk menu** (`seq_ui_menu.c`, reuse the keypad name editor) —
+  SELECT+BOOKMARK is taken by CHECKPOINT/REVERT, a live combo can come later (provisional /
+  by-ear). Boot: `boot_from_set` GC flag, default off (resume scratch). **SD-only, ~0 RAM**
+  (reuses `tmp_buffer`). HIL: testctrl `CMD_SET_SAVE 0x02` / `CMD_SET_LOAD 0x03` /
+  `CMD_SET_RELOAD 0x04` (0x02–0x0f free) → `board.py` verbs → `test_set_baseline.py` pins:
+  baseline-restore; **switched-away pin** (edit A, switch to B forcing writeback, save, edit B,
+  reload, load A → A == baseline — the thing the anchor structurally can't do); **phrase-
+  survives pin** (capture, save-set, reload-set → phrase still present); anchor-not-in-set pin;
+  failure pin. AUTOTEST-style scratch sets, never touch A1–A3. Failure modes: temp-dir+rename
+  (recoverable partial save); refuse + keep current on partial load; the L1 transient-SD probe
+  distinction stays deferred (phrases-out-of-set keeps it dormant).
+  - **Recon gotchas (2026-06-19).** **A12:** a byte-for-byte `FILE_Copy` of a bank from a
+    *legacy-firmware* session carries forward a too-small reserved `pattern_size`, so generator
+    state silently fails to round-trip (ext-tag degrades V4→V3→none by fit, `seq_file_b.c:1546-1558`).
+    SetSave should **re-Create V4-sized destination banks and re-write records** (not raw-copy), OR
+    document that SETs from legacy sessions lose gen state. **A4/A5:** the copy inherits the
+    ~290 ms-per-pattern flash wall × dirty groups — off-live-path dispatch is mandatory, and all SD
+    I/O runs in task context with **no port-critical held** (the recall-freeze mutex-ordering class:
+    take `MUTEX_SDCARD` before any `portENTER_CRITICAL`).
+
+- **(a2) Unified UNDO/REDO (Tier 1) — design settled.** A small global **action journal**:
+  each *deliberate* gesture pushes {scope, before-state, after-state} onto a shallow ring; UNDO
+  restores the before-state, REDO re-applies the after-state; any new deliberate gesture clears
+  the redo arm. Reuse the existing snapshot stores rather than inventing new ones — `track_undo`
+  (`seq_core.c`), the generator `undo_slot` (`seq_generator.c`), the utility buffers
+  (`seq_ui_util.c`) consolidate behind one store / one dispatcher. **Gate pushes on
+  `!seq_generator_in_automutate`** (the same flag that drives `phrase_drift`) so ambient wander
+  never lands on the stack. One UNDO + one REDO gesture (provisional / by-ear — today
+  SELECT+CLEAR = track, GP2 = generator, GP8 = utility consolidate). RAM: shallow, largely
+  *reuses* the ~5 KB the three one-deeps already cost; keep off the scarce CCM if it grows.
+  HIL: edit→UNDO→REDO byte-exact round-trip, and injected generator wander between UNDO and
+  REDO must NOT pollute or invalidate the stack.
+
+- **(b) Trigger generators — render-stack-native rhythm/gate Turing generators.** Generators
+  are pitch-only today; this adds rhythm. Mirror the pitch generator (`seq_generator.c`): a
+  per-(track, instrument) gate/trigger loop analogous to `loop[64]`, engaged → writes the
+  trigger-layer source, FREEZE-held, BOUNCE-frozen into editable triggers. Born under the
+  generative law (§9) so it never becomes a second emission-time exception. Spec before build:
+  density/contour, drum-layer interaction, pitch×rhythm coupling.
+
+- **(c) Self-modulation = the "self-bus" (musical intent decided 2026-06-19; build queued).**
+  Let a track source the bus's *own* modulations from its **own par layers** instead of
+  spending a second (silent) loopback track. **Centerpiece = a self-routing CC layer**
+  (config-grain — the broad reach); the render-stack pitch path is the note-grain complement.
+  - **Self-routing CC layer (the MVP) — reuses the whole CC surface.** Today a loopback track's
+    CC par layer routes `SEQ_MIDI_IN_BusReceive → SEQ_CC_MIDI_Set → SEQ_CC_Set` to **~50+
+    track-level config params** (direction, length, loop, clock-div, transpose, groove, mode,
+    echo×7, LFO×9, robotize×22, chord-mask, GRIP, limit, trigger-layer asg, step replay/skip;
+    `seq_cc.c:311-526`) — but at the cost of a whole **silent** loopback track. The self-bus
+    marks a CC par layer to route to **this** track's own params (local `SEQ_CC_Set(track,
+    mapped_cc, value)` at CC emission) while the track keeps sounding. New code is tiny: a
+    per-CC-layer **self-route flag** + a local-dispatch branch at the CC-emission site
+    (`seq_core.c` ~3027–3373); the CC-number-per-step = the existing layer assignment
+    (`lay_const` / `seq_layer_drum_cc`), value = the par layer per step. Verified safe
+    (synchronous, no recursion; the two-round tick handles it). **Reaches all track CONFIG;
+    excludes per-step note/vel/gate-length** (those are par layers → use the note-grain
+    complement below).
+  - **Target tiers (recon-verified 2026-06-19 — the traversal/phrasing reach is the prize).** Not
+    all ~50 params are equal:
+    - **Safe per-step (today):** **direction**, **clock-divider**, **loop**, and the whole
+      **progression section** (forward / jump-back / replay / repeat / skip / rs-interval) — all
+      fresh-read by `SEQ_CORE_NextStep` (`seq_core.c:3697`), so a change only steers the next hop.
+      Plus the confirmed scalars: groove, transpose, robotize dials, humanize, echo, LFO.
+      **Self-modulating direction + progression = a generative re-phrasing engine** (René /
+      Eloquencer-style path modulation) — it restructures *phrasing*, not just notes; the deepest
+      self-bus target.
+    - **Safe with boundary-deferral:** **LENGTH** — `SEQ_CC_Set` modulo-wraps the live step pointer
+      *immediately* (`seq_cc.c:382-386`, the glitch), so defer the change to the `ref_step==0`
+      boundary, reusing the phrase-morph dirty-flag pattern (`seq_core.c:2601-2626`). It lands on
+      the bar — which is how you want length to change anyway.
+    - **Blacklist (reshape the buffer, not the path):** **EVENT_MODE / MODE / par_assignment_drum**
+      re-run SlotSyncs / realloc layers mid-tick (`seq_cc.c:329-346,419-434`) — never a self-route
+      target.
+    - **Random traversal modes** (random-dir / random-step) draw the GLOBAL RNG
+      (`seq_core.c:3755/3759/3769`), so modulating *into* them pulls under the per-track-RNG
+      keystone (a 4-byte `random_dir_state`/track).
+  - **Dirty/wander interaction (design in — recon-corrected 2026-06-19, do not skip).** Self-routed
+    config mutation must be treated as **ambient** (like generator auto-mutate) so it does NOT mark
+    the pattern dirty — else it churns auto-writeback (the ~290 ms wall) every switch. **Correction:**
+    the existing `seq_generator_in_automutate` gate suppresses only `phrase_drift`, **NOT**
+    `seq_pattern_dirty` (set unconditionally in `SEQ_PATTERN_DirtySetTrack`, `seq_pattern.c:242`) — so
+    the self-bus needs a **new** `seq_config_in_self_route`-style flag suppressing `seq_pattern_dirty`
+    during self-route dispatch. Two gates, not one; same deliberate-vs-wander principle.
+  - **Note-grain complement (render-stack, per-step NOTE transforms).** Where you want pitch at
+    note-grain rather than config-grain: **self-transpose** (in `pitch_render_range` ~587: read
+    `control_layer[step] − 64` instead of `SEQ_MIDI_IN_TransposerNoteGet(bus)`, scale-quantized
+    by FTS) and **self-chord-mask** (in `chord_mask_render_range` ~443: build the per-step PC-set
+    from a Chord par layer via a `chord_layer_to_pcset()` mirror of `SEQ_CHORD_NoteGet`, vs
+    `SEQ_MIDI_IN_BusPCSetGet(bus)`). Carrier: `transpose_self_layer`/`chordmask_self_layer` in
+    `seq_cc_trk_t` (`0xFF`=off), SlotSync sets `slot->bus = 0xFF` self-sentinel; bounces editable.
+  - **Self-arp — deferred (hard).** Emission-time + stateful (`t->arp_pos`); needs a per-track
+    mini-notestack + reset hooks. Phase 2.
+  - **Capture/freeze (the §9 law bends here).** The note-grain complement BOUNCEs to static
+    notes (render-stack). The **CC self-routing half is not bounce-bakeable** — it modulates
+    playback behavior over time (a timeline, not buffer content), so freezing its **static heard
+    result** is a **tape/record** capture (§4/§5.5), not BOUNCE; the CC source layer is itself the
+    editable artifact. FREEZE (the wander gate) doesn't apply — self-routing is deterministic
+    layer replay, not wander; stop it by clearing the self-route flag (FREEZE only holds a
+    generator *feeding* the CC layer).
+  - **Build order:** the self-routing CC layer first — pick a couple of high-value targets to
+    prove by ear (e.g. direction + length, or the robotize dials) — then the note-grain
+    self-transpose / self-chord-mask, arp later.
+
+- **(d)** The third beneficiary of the generative law is the existing **robotize →
+  render-stack migration** (see the Bounce north-star entry above) — migrating it makes FREEZE
+  hold it and BOUNCE freeze it editable, dropping the lone emission-time exception.
+
+**Retroactive CAPTURE — the frame/ring ("Capture MIDI," generalized to the organism). Direction, 2026-06-19.**
+The user's north-star, reached by working up from robotize's per-bar anchor ring: **Ableton's
+Capture MIDI, generalized from "what I played" to "everything the organism did."** The box is
+always listening — it rings the last K bars — and after you like what happened you hit **CAPTURE**
+(no arming, no record-first) to retrieve them as self-contained, editable, bounce-able material.
+(Ableton's mechanics confirm the shape: always-listening retroactive retrieve; a bounded ring that
+discards oldest when full — Live uses 16384 events / drop oldest 1024; MIDI is low-bandwidth so it
+is cheap; capture mints a new clip.)
+
+- **The content split = the §5 two faces, at capture level.** The ring holds two kinds of thing:
+  - **Seed-frame (the spring) — what's *regenerable*.** A small per-bar snapshot of the
+    deterministic generative state (robotize seed, generator state, self-mod). Re-enter it →
+    regenerates; re-simulate it offline → bounce to static. Bytes/bar.
+  - **Recording (the tape) — what's *lived-through*.** The non-deterministic external streams:
+    consumed bus modulation (Design 1) **and live MIDI input** (the Capture-MIDI core). Recorded
+    as actual events — a human/bus can't be seed-replayed. Thin (MIDI is low-bandwidth).
+
+  CAPTURE grabs both for the last K bars → one self-contained unit. This is literally §5's
+  recording-+-posture resolved into a single gesture: **seed for the reproducible, recording for
+  the lived-in.**
+- **Determinism is the keystone (the seed-frame half).** For offline re-simulation to reproduce a
+  span exactly, the generative engine must be deterministic from **per-track seeds**. Robotize
+  already is (per-track xorshift32 — and `SEQ_ROBOTIZE_Freeze(K)` already does the seed-ring K-bar
+  grab, proving the UX). Generators are **not** — they draw from the **global** RNG (`jsw_rand`) +
+  carry big state. **Enabling refactor: move generators (and any generative RNG) to per-track
+  seeds.** Then any span re-simulates deterministically → offline bounce of robotize + generators
+  + self-mod, exact, with no hot-path recording.
+- **Design 1 — record consumed inputs (cross-track + live).** A track's frame records the external
+  inputs it consumed — bus modulation (transposer note / PC-set / routed CCs, per step) **and**
+  live MIDI in — so a modulated or played-over track captures self-contained **from its own
+  seat**, with no need to re-run the modulator, working even if the modulator is a live human.
+  (Design 2 — whole-organism lockstep re-sim — rejected as the heavier, more fragile purist
+  option.)
+- **What CAPTURE closes.** It resolves the "BOUNCE can't freeze time-varying behavior" gap (the §9
+  law caveat): offline re-sim (seed-frame) + recorded inputs (bus + live) freezes **any** span —
+  direction/length self-mod, robotize, generators, bus modulation, live keys — into a flat static
+  pattern. Division of labor: **BOUNCE freezes content transforms; CAPTURE freezes the lived
+  timeline.** Together they cover everything.
+- **The ring + output.** A bounded retroactive buffer, bar-grid-indexed (`robotize_measure_ctr` is
+  the precedent), discard-oldest when full (Ableton: 16384/1024). Depth = last K bars; CAPTURE
+  takes a span → a new track/layer (Ableton: a new clip). The recorded half is concrete notes
+  (trivially static/bounce-able); the seed half stays regenerable (the spring) or bounces via
+  re-sim.
+- **Relationship to existing.** Robotize Freeze = the seed-ring K-bar grab (built — the proof).
+  The deleted `seq_capture.c` = the *wrong* way (hot-path emission tape, lossy/raced — §9
+  2026-05-30). `SEQ_CORE_CaptureTrackOutput` = the right computed-capture pattern (force render,
+  snapshot, sweep-safe). Existing live-record = arm-then-play; CAPTURE = **play-then-keep**.
+- **Open / build-time.** The per-track-RNG generator refactor (scope: every `SEQ_RANDOM_Gen_Range`
+  call in `seq_generator.c`); exactly what the frame must hold for full determinism (global-RNG
+  seeding, generator firing order, polymetric bar alignment — flagged unknowns); the live-MIDI-in
+  tap point + event timing/quantize-or-loose; RAM (seed-ring cheap ~bytes/bar; recorded-input
+  thin; output-record only as a bounded fallback). **This is the keystone build** — it unlocks
+  self-mod bounce, robotize freeze-to-static, and live capture in one stroke.
+
+**Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
+A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six
+builds. Build-changing corrections are already folded into §9 / §10(a) / §10(c) above; the headlines:
+
+- **Keystone confirmed (A1).** Generators draw the GLOBAL RNG (`jsw_rand`) and store no seed — re-sim is
+  impossible until they move to per-track seeds via `SEQ_RANDOM_GenRangeXorshift` (the robotize
+  precedent). Scope is wider than generators: **humanize, probability, random-gate, random-direction,
+  echo all draw global RNG too** (C2). Trap: `SEQ_RANDOM_Gen_Range` doesn't advance when `min==max`.
+  Optimization: make the CHORD_MASK probability gate (A2) a pure `(track,step,zone)` hash like
+  `tension_grip_hash`, not a seed.
+- **Four render-stack fences any new reader must honor (A8):** Arp / Drum / Chord-layers / note-0
+  (= kit-preset, not rest). A naive self-bus / trigger / capture reader otherwise gets phantom drum hits
+  or chord-index-as-pitch.
+- **One-tick bus lag (A7):** render runs at the tick prologue *before* the loopback loop, so a render-stack
+  self-route sees prior-tick bus state — a real ordering constraint, not a race.
+- **RAM placement correction (C12/B6):** the new features are **cheap and belong in main SRAM, not the
+  scarce ~9 KB CCM** — per-track seed 64 B, self-bus fields <100 B, capture ring ~320–500 B (the robotize
+  ring's home). The relocation lever is ~**40 KB** of CCM-eligible main-RAM buffers (the doc's old "~56 KB"
+  counted a since-deleted ring), available if CCM tightens — feature cuts are not the lever.
+- **CAPTURE reuses existing machinery (B1–B3, B7):** robotize's `seed_snapshots[16]` ring + the
+  `ref_step==0` per-bar hook + `SEQ_CORE_CaptureTrackOutput` (force-renders first); tap live input at
+  `SEQ_MIDI_IN_BusReceive` (raw events, lossless). Self-bus persistence is free in ext-CCs 0x9B–0x9F (B5).
+- **Trigger-gen pool decision (A11):** the 64-slot pool is shared / first-come / no-fairness, and a
+  full-size separate pool (11.25 KB) won't fit CCM — so share-with-fairness, or a slim separate pool
+  (16–24 B/slot).
+- **Unified UNDO (A13):** the gen undo arms only on FIRST engage — the consolidated journal must define
+  re-engage + multi-step-gesture (ENGAGE+ROLL+BOUNCE) commit-as-unit semantics.
+
+**Coverage gaps the recon did NOT examine** (check before building): the UI / LED / encoder layer (menus,
+gestures, editing pages); the CV/AOUT path; song-mode / transport edge cases vs the capture-ring bar
+closure; concurrency beyond the named mutexes (MIDI-hooks vs core-tick task preemption for a shared ring);
+worst-case timing under load (not measured on device); and — per discipline — **no by-ear validation** of
+any of it.
+
 **Phrase morphing (Loop A) — SHIPPED + by-ear GO 2026-06-16** (candidate 2026-06-13).
 Surfaced by the user right after the PHRASES Stage A by-ear GO ("does this open up
 morphing between phrases?"). The analysis below is the original design rationale; what
@@ -2318,6 +2686,27 @@ two unhooked out-of-band CC-replace paths from the morph review (`SEQ_PATTERN_Fi
 seq_ui_disk.c cross-session copy) and the pre-existing `SEQ_FILE_B_Open` FILE_ReadReOpen
 leak stay filed (negligible / never mid-morph).
 
+**SWITCH-QUANTIZE — global launch grid + auto-measured margin (SHIPPED 2026-06-18,
+pending by-ear).** A live "global quantize" (Ableton-style): switches land on a selectable
+musical grid — `SWITCH_QUANTIZE_GRID` (persisted), ladder `0=Instant, 1/16, 1/8, 1/4 beat,
+1/2 bar, 1 bar, 2, 4, 8 bars`. The knob is the **datawheel on the PHRASE view** (when no
+morph is armed — morph keeps the wheel while armed), with an on-screen label; grid>0 couples
+synched-switching on, grid 0 = immediate. **(B) auto-measured margin:** `SEQ_PATTERN_Handler`
+times the real switch I/O (µs stopwatch, worst-case) into `seq_core_pattern_switch_measured_ms`,
+and the pattern-change forward-delay uses `SEQ_CORE_SwitchMarginMs()` = `measured+20ms` instead
+of the flat 100 — so the window self-sizes to the SD cost (tighter feel). The grid is
+floor-clamped to what the I/O can service (`SEQ_CORE_SwitchQuantize16ths`). **Two paths:**
+*pattern change* gated at the existing pre-margin decision point (`(bpm_tick/96+1) % grid`,
+grid 0 = the EXACT old pattern-boundary behaviour → zero regression); *phrase recall* (Phase 2)
+loads its content at tap (interrupts-on, off the hot path — preserves the §9 glitch fix) and
+defers only its **re-phase** to the grid boundary via `seq_core_recall_rephase_req` →
+`reset_trkpos_req` in the tick (RATOPC's re-phase mechanism; cheap, no SD, so tick-safe).
+SEAMLESS recall is unchanged (no re-phase). `CMD_SWITCH_QUANTIZE 0x4e` (testctrl get/set).
+**Open:** the knob is datawheel-when-not-morphing (no live quantize *during* an armed morph);
+sub-bar grids re-phase recall cleanly via reset_trkpos_req but pattern-change finer-than-bar
+landing depends on the pre-margin window (fine at techno tempi). The deferred true-clip-launch
+note above still stands for the content-swap-at-tap tail.
+
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
 - Window edge-wrap behavior (loop / freeze / hold-last / continue) — decide live.
@@ -2332,6 +2721,39 @@ leak stay filed (negligible / never mid-morph).
   four window encoders on the midiphy V4+ panel (verify hardware).
 - Automated firmware-upload path (`make upload` via `amidi -s file.syx` after
   bootloader handshake) — not gating any musical work; nice for AFK iteration.
+
+**Phrase-recall freeze — the ~290 ms SD save is the wall (investigated + PARKED 2026-06-19).**
+A live phrase recall during a generators-running jam froze the clock for up to ~1.3 s.
+Instrumented on hardware per-phase (the 1 µs stopwatch saturates at 65.5 ms and STM32F4
+`MIOS32_SYS_TimeGet` has no sub-second resolution — measure per-unit & accumulate; see
+REFERENCE). The recall *body* is cheap — open ~5 ms + 4-group read ~66 ms + 16-track render
+~1 ms ≈ **72 ms**, which fits the forward-delay margin. The cost is the **writeback**: one
+pattern SAVE ≈ **290 ms** (vs ~22 ms load), flash-PROGRAM-bound (NOT sync, NOT CPU, NOT the
+zero-fill; ~12–16 ms × ~18 sectors). Recall wrote back *every dirty group*, and **generator
+auto-mutate marks a group dirty** (`seq_generator.c` → `SEQ_PATTERN_DirtySetTrack`), so a
+4-group jam paid 4×290 ms.
+- *Margin-sizing can't fix it* (needs ~1.3 s; `SEQ_CORE_SwitchMarginMs` caps at 250 ms).
+- *Full-fidelity deferral can't fit* — snapshotting the outgoing organism is ~30 KB vs ~33 KB
+  free main SRAM. Dead end as a RAM snapshot.
+- *Tried + reverted (ephemeral-wander):* gate the recall writeback on `DRIFT` (deliberate
+  edits) instead of `seq_pattern_dirty`, so generator wander is abandoned on recall (snap to
+  the committed phrase). Worked on the bench (wander recall → 0 writebacks → ~72 ms), but the
+  live feel raised a "things revert" worry and prompted a step-back on whole-model complexity,
+  so it was reverted to baseline. The idea is sound and re-buildable; it's gated on the §5.6
+  clarity pass + a by-ear call on whether un-captured wander should survive a recall.
+- *The only structural cure* if the freeze must die without losing wander: **incremental save**
+  (program only the sectors that changed) — drops a save from ~18 sectors to a few. Its own
+  bundle; touches the SD/file write path.
+
+**RAM/CPU headroom levers (gated, do-not-cut-speculatively).** Measured 2026-06-19 (see §A5
+update): **CCM is the binding constraint at ~9 KB free; main SRAM ~33 KB free.** Each lever is
+gated:
+- generator pool 64 → ~16–32 slots reclaims ~6 KB of the scarce CCM — *pending a real
+  engaged-generator-count measurement* (owner: "not sure yet").
+- phrase-morph buffers ≈ 6.7 KB main SRAM — *pending the by-ear morph keep/cut* (§5.6 #3;
+  owner: "undecided").
+- render double-buffer = 40 KB CCM; single-buffering saves 20 KB but loses lock-free safety —
+  leave it. CPU is already well-gated (per-track processors run only when engaged).
 
 ---
 
@@ -2539,6 +2961,22 @@ onto the §8 build steps; each step's PR ships its primary tests; timing tests a
 global.
 
 ## A5. RAM budget (corrected; base measured 2026-05-24)
+
+**Re-measured 2026-06-19 (current build, post Phase A–H + PHRASES + morph).** The base
+table below is the 2026-05-24 *virgin* state; CCM is no longer 0. Actuals now (from
+`__ram_end` / `__ram_end_ccm`):
+
+| Region | Used | Free | Note |
+|---|---|---|---|
+| Main RAM (128 KB) | ~94.5 KB | **~33 KB** | par/trg layers + capture ring + per-track state + `ucHeap` + MSP region |
+| CCM (64 KB) | ~55 KB | **~9 KB** | render double-buffer (par/trg output mirrors ~40 KB) + generator pool (~11.5 KB) |
+
+**CCM is now the binding constraint (~9 KB), not main RAM** — the "all 64 KB CCM virgin"
+framing below is historical. Gated headroom levers (see §10 "RAM/CPU headroom levers"):
+generator pool 64→~16–32 (~6 KB CCM back, pending engaged-count); phrase-morph buffers
+~6.7 KB main (pending by-ear keep/cut); render single-buffer (20 KB CCM back, but loses
+lock-free — not recommended). *(A subagent audit this session mis-stated free main RAM as
+~92 KB; corrected here against the elf — verify RAM claims against source, per CLAUDE.md.)*
 
 **Measured base (2026-05-24, MBSEQV4P, commit `3d144ab2`):**
 

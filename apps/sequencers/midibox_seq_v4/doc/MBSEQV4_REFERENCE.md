@@ -147,6 +147,12 @@ Per-track block appended after the trigger layers, within each pattern slot:
   `pattern_size`), so the wider block fit without re-formatting. `SEQ_FILE_B_Create` is
   **header-only** (the slot-fill loop is `#if 0`) — a created bank isn't loadable until its
   slots are written.
+- **Per-pattern / bank totals (byte map).** `pattern_size` ≈ **8992 B** = 24-byte header +
+  4 tracks × 2242 B (per-track = 156 B `seq_file_b_track_t` + 1024 par + 256 trg + 806 v4-ext).
+  A full bank file is **~575 KB** worst case (64 × 8992 + header) but **sparse-grown** (Create
+  is header-only; slots extend on write), so a lightly-used bank (~8 slots) is ~75 KB. Copying
+  a session/set therefore scales with *used* slots, not capacity. *(Supersedes the design doc's
+  old "≈ 6 KB/pattern" — that was the pre-v4 figure, before the generator ext-block.)*
 
 ### Ring-buffer for retroactive state capture
 
@@ -1198,7 +1204,7 @@ Per-version highlights. Bugfix-only releases compressed to one line.
 ### File / Storage / SysEx
 - SD card FAT32 required.
 - Root files: `MBSEQ_GC.V4` (global config — shared across sessions), `MBSEQ_HW.V4` (hardware config).
-- `/SESSIONS/<name>/` (≤8 chars): `MBSEQ_B1..B4.V4` (banks), `MBSEQ_S.V4` (songs), `MBSEQ_G.V4` (grooves), `MBSEQ_C.V4` (session config), `MBSEQ_M.V4` (mixer maps), `MBSEQ_BM.V4` (bookmarks).
+- `/SESSIONS/<name>/` (≤8 chars): `MBSEQ_B1..B4.V4` (banks), `MBSEQ_S.V4` (songs), `MBSEQ_G.V4` (grooves), `MBSEQ_C.V4` (session config), `MBSEQ_M.V4` (mixer maps), `MBSEQ_BM.V4` (bookmarks). Plus two **sentinel-bank** files outside the `B1..B4` navigation: `MBSEQ_PH.V4` (phrase snapshot library, bank `0xfd`) and `MBSEQ_AN.V4` (CHECKPOINT anchor, bank `0xfe`).
 - `/PRESETS`, `/SYSEX/<device>/`, `/MIDI`, `/TRACKS` directories.
 - Auto-load DEFAULT session on startup.
 - Backup terminal command (experimental, `.tar`).
