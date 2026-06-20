@@ -113,6 +113,15 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 // Seed u32 is little-endian 5x7-bit (s0=bits0..6 .. s4=bits28..31). Fills the
 // low gap at 0x4d (below the 0x4e/0x4f morph/quantize pair).
 #define CMD_RNG_SEED             0x4d
+// CAPTURE bundle (retroactive CAPTURE ring, 2026-06-19) — the low gap 0x41..0x4c.
+// CLOCK_STEP: drive N bpm-ticks synchronously while transport is STOPPED, advancing
+//   NextStep/traversal/generator-wander/ref_step==0 deterministically. Closes the
+//   keystone HIL gap (no clock-START verb existed). payload [n_lo7, n_hi7] ->
+//   reply [tick0..4 (5x7), trk0_step] or [status] on error.
+#define CMD_CLOCK_STEP           0x4b
+// CAPTURE_SPAN: re-simulate + record the last K bars of the visible track into a static
+//   dst track. payload [src_track, K(1..16), dst_track] -> reply [src, dst, status].
+#define CMD_CAPTURE_SPAN         0x4c
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1792,6 +1801,87 @@ static void cmd_rng_seed(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// CMD_CLOCK_STEP — drive N bpm-ticks of the engine synchronously, in this RX context,
+// ONLY while transport is stopped. With the transport stopped SEQ_CORE_Handler no-ops
+// SEQ_CORE_Tick (seq_core.c), so there is no concurrent +4-task driver to race the
+// engine state; SEQ_CORE_Tick itself has no IsRunning gate, so calling it directly
+// advances NextStep/traversal/generator-wander/the ref_step==0 per-bar hook exactly like
+// a live clock would. mute_nonloopback=1 suppresses spurious MIDI emission during the
+// drive (we only want the state advance). This is the missing clock-step harness driver
+// the per-track-RNG keystone flagged (no clock-START verb existed -> no behavioral pin
+// for traversal trajectory / SCRUB). payload [n_lo7, n_hi7]; reply [tick 5x7, trk0_step]
+// or [status] on error (0x02 malformed, 0x03 transport-running-refused).
+static void cmd_clock_step(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  if( len < 2 ) {
+    u8 r[1] = { 0x02 };
+    send_reply(port, CMD_CLOCK_STEP, r, sizeof(r));
+    return;
+  }
+  if( SEQ_BPM_IsRunning() ) {
+    u8 r[1] = { 0x03 }; // refuse: would race the live +4 tick
+    send_reply(port, CMD_CLOCK_STEP, r, sizeof(r));
+    return;
+  }
+  u32 n = (payload[0] & 0x7f) | ((u32)(payload[1] & 0x7f) << 7);
+
+  MUTEX_MIDIOUT_TAKE;
+  u32 i;
+  for(i=0; i<n; ++i) {
+    u32 t = SEQ_BPM_TickGet() + 1;
+    SEQ_BPM_TickSet(t);
+    SEQ_CORE_Tick(t, -1, 1); // -1 = all tracks, mute non-loopback emission
+  }
+  MUTEX_MIDIOUT_GIVE;
+
+  u32 tk = SEQ_BPM_TickGet();
+  u8 reply[6];
+  reply[0] = (tk >> 0)  & 0x7f;
+  reply[1] = (tk >> 7)  & 0x7f;
+  reply[2] = (tk >> 14) & 0x7f;
+  reply[3] = (tk >> 21) & 0x7f;
+  reply[4] = (tk >> 28) & 0x0f;
+  reply[5] = seq_core_trk[0].step & 0x7f;
+  send_reply(port, CMD_CLOCK_STEP, reply, sizeof(reply));
+}
+
+
+// CMD_CAPTURE_SPAN — retroactive CAPTURE. sub-op:
+//   0 = CAPTURE  [0, src, k, dst]  -> [src, dst, status]
+//         status: 0x01 ok; else 0x10|(-r) for SEQ_CORE_CaptureSpanReSim refusal
+//         (-1 args, -2 src==dst, -3 running, -4 wrong-track, -5 overflow,
+//          -6 history, -7 steps>256, -8 not-whole-measure, -9 par-overflow).
+//   1 = RING QUERY [1]            -> [ring_track, ring_depth, ring_overflow]
+static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 subop = (len >= 1) ? payload[0] : 0xff;
+  switch( subop ) {
+    case 0x00: {
+      if( len < 4 ) { u8 r[3] = {0,0,0x02}; send_reply(port, CMD_CAPTURE_SPAN, r, 3); return; }
+      u8 src = payload[1] & 0x0f;
+      u8 k   = payload[2] & 0x7f;
+      u8 dst = payload[3] & 0x0f;
+      s32 r = SEQ_CORE_CaptureSpanReSim(src, dst, k);
+      u8 reply[3] = { src, dst, (u8)((r == 0) ? 0x01 : (0x10 | ((-r) & 0x0f))) };
+      send_reply(port, CMD_CAPTURE_SPAN, reply, sizeof(reply));
+    } break;
+
+    case 0x01: {
+      u8 reply[3];
+      reply[0] = SEQ_CORE_CaptureRingTrack() & 0x7f; // 0x7f if 0xff (none)
+      reply[1] = SEQ_CORE_CaptureRingDepth() & 0x7f;
+      reply[2] = SEQ_CORE_CaptureRingOverflow() & 0x01;
+      send_reply(port, CMD_CAPTURE_SPAN, reply, sizeof(reply));
+    } break;
+
+    default: {
+      u8 reply[2] = { 0x00, 0x02 }; // unknown sub-op
+      send_reply(port, CMD_CAPTURE_SPAN, reply, sizeof(reply));
+    } break;
+  }
+}
+
+
 static void cmd_phrase_morph(mios32_midi_port_t port, u8 *payload, u32 len)
 {
   if( len < 1 ) {
@@ -2445,6 +2535,12 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_RNG_SEED:
             cmd_rng_seed(port, payload_buf, payload_len);
+            break;
+          case CMD_CLOCK_STEP:
+            cmd_clock_step(port, payload_buf, payload_len);
+            break;
+          case CMD_CAPTURE_SPAN:
+            cmd_capture_span(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

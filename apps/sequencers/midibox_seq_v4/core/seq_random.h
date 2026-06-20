@@ -28,6 +28,13 @@ extern u32 SEQ_RANDOM_Gen_Range(u32 min, u32 max);
 extern u32 SEQ_RANDOM_GenXorshift(u32 *state);
 extern u32 SEQ_RANDOM_GenRangeXorshift(u32 *state, u32 min, u32 max);
 
+// Global-RNG (jsw MT + cached value) save/restore for retroactive CAPTURE
+// non-destructiveness. buf must hold SEQ_RANDOM_STATE_WORDS u32.
+#include <jsw_rand.h>
+#define SEQ_RANDOM_STATE_WORDS (1 + JSW_RAND_STATE_WORDS)
+extern void SEQ_RANDOM_StateGet(u32 *buf);
+extern void SEQ_RANDOM_StateSet(const u32 *buf);
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Export global variables

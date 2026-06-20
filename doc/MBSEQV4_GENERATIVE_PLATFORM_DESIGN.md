@@ -2560,6 +2560,27 @@ is cheap; capture mints a new clip.)
   capture-as-tape, deliberately deferred so they don't go dead-static). See the SHIPPED note in the
   pre-build recon entry below for the seed-vs-hash policy + per-slot decision.
 
+  **→ RING + RE-SIM FIRST CUT SHIPPED + by-ear/by-eye GO 2026-06-20** (HIL full suite green incl. 8
+  new pins; NOT yet committed at time of writing). The actual retroactive grab: an always-on per-bar
+  generative-frame **ring** (`seq_core_cap_ring[16]`, visible-track, main SRAM) + `CMD_CLOCK_STEP`
+  (synchronous stopped-transport tick driver, also closes the keystone's traversal-trajectory HIL
+  gap) + the **re-sim** (`SEQ_CORE_CaptureSpanReSim`: snapshot all live state → rewind to the
+  window-start frame → re-drive K bars **with generator wander on**, recording the EMITTED stream →
+  restore byte-identical) → quantized into a static dst track. **The materialize is the load-bearing
+  correction:** the design-ahead "output-record fallback" / an output-mirror snapshot is just BOUNCE
+  — it loses robotize (emission-time) AND traversal order (playback-order, stripped by
+  `ResetGenerativeForBounce`). CAPTURE must record the **emitted MIDI stream** (reusing the MIDI
+  exporter's hook+sink pattern), which carries both. **First-cut scope:** transport STOPPED
+  (play→stop→keep; while-playing is a follow-on), note-on-only materialize w/ default gate length
+  (pitch/rhythm/velocity/traversal-order/wander faithful; precise gate = refinement), melodic target
+  (a drum-layout source captures pitches on instr-0 but caps at K≤4 by its par buffer; a true 1-voice
+  Note-track init for K≤16 is a follow-on — Note par-layer typing isn't a simple field write). Full
+  build/decision detail + the 6 review-caught bugs (whole-measure guard, src-mirror, queue-flush,
+  step-phase, source-push, loopback) + the par/trg independent-instrument-count fix: plan
+  `doc/plans/2026-06-19-capture-ring.md` and REFERENCE "Retroactive CAPTURE". Still deferred:
+  while-playing capture, live-MIDI-in tape, emission coin-flips, ring persistence, the physical
+  gesture (harness-driven this cut).
+
 **Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
 A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six
 builds. Build-changing corrections are already folded into §9 / §10(a) / §10(c) above; the headlines:

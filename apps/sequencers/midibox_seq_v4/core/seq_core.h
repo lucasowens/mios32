@@ -526,6 +526,20 @@ extern s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track);
 // (two SD ops) — task context only. Returns >=0 on success, negative on error.
 extern s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_pattern);
 
+// Retroactive CAPTURE ring (2026-06-19) — query the always-on per-bar generative
+// frame ring (visible track only). Depth = valid measures recorded (0..16); Track =
+// the track the ring currently records (0xff = none); Overflow = a measure had more
+// generator slots than the ring caps (capture would be incomplete -> refused).
+extern u8 SEQ_CORE_CaptureRingDepth(void);
+extern u8 SEQ_CORE_CaptureRingTrack(void);
+extern u8 SEQ_CORE_CaptureRingOverflow(void);
+
+// Re-simulate the last `k` bars of `src` (the ring's recorded track) into the
+// static `dst` track, recording the emitted stream. Transport must be STOPPED.
+// Returns 0 on success; negative refusal status (see CMD_CAPTURE_SPAN in
+// seq_testctrl.c for the codes). Non-destructive to the live engine.
+extern s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k);
+
 // Fork pull verb (RECOMBINE) — load ONE stored track section
 // (src_bank, src_pattern, src_slot_track 0..3) into dst_track, RAM only, a
 // transfusion into the running organism: seq_pattern[] is never touched and

@@ -59,6 +59,51 @@ How a sequencer event reaches the wire, and where timing accuracy is won and los
 - Robotize bar anchors store one PRNG state per bar of the loop, so retroactive "freeze" works.
 - **Per-track-RNG keystone (first cut, 2026-06-19)** extended this beyond robotize: **generators** carry a per-pool-slot `u32 seed` ([seq_generator.h](../core/seq_generator.h), in `seq_generator_t`), minted fresh from the global RNG at ENGAGE then advanced by every reroll/perturb/rate-gate draw via `SEQ_RANDOM_GenRangeXorshift`; **random traversal** (Random_Dir/Step/D_S) draws from `seq_core_trk_t.random_traverse_state` ([seq_core.h](../core/seq_core.h)), minted at run-start in `SEQ_CORE_Reset`, save/restored around `SEQ_CORE_Scrub`'s out-of-band `NextStep`. Per-**slot** (not per-track) for generators so draw order is independent of pool alloc order. **Still on the global RNG (deliberately deferred to CAPTURE):** the emission-time coin-flips — step-probability ([seq_core.c](../core/seq_core.c) normal + drum + [seq_layer.c:411](../core/seq_layer.c#L411)), random-gate, humanize ([seq_humanize.c](../core/seq_humanize.c)), echo. Seeds are RAM-only (no bank-format bump yet); `SEQ_GENERATOR_SlotSet` re-mints a zero (file-loaded) seed to avoid `0xdeadbabe` aliasing. Determinism HIL: [tests/apps/seq_v4/test_rng_determinism.py](../../../../tests/apps/seq_v4/test_rng_determinism.py); seed get/set via testctrl `CMD_RNG_SEED` 0x4d.
 
+### Retroactive CAPTURE (first cut, 2026-06-20)
+
+The keystone's determinism made spans re-simulable; CAPTURE is the retroactive grab. All in
+[seq_core.c](../core/seq_core.c); verbs in [seq_testctrl.c](../core/seq_testctrl.c).
+
+- **The ring** — always-on, per-bar **generative frame** of the **visible** track:
+  `seq_core_cap_ring[16]` (main SRAM, ~12 KB), each frame = `random_traverse_state` + step/
+  progression counters + the engaged generator slots (`SEQ_GENERATOR_TrackSnapshot`). Robotize
+  already rings per-track (`robotize_seed_snapshots`), so the frame omits it and shares its index
+  (`robotize_measure_ctr & 0x0f`). Appended in `SEQ_CORE_CaptureRingTick()` at the `ref_step==0`
+  hook; reset on run-start (`SEQ_CORE_Reset`); **invalidated on visible-track switch** (bounds the
+  costly generator snapshot to one track). The frame is the **pre-advance** state at the boundary
+  prologue (before the body `NextStep` and before that measure's mutate, which fires the next tick).
+- **`CMD_CLOCK_STEP` 0x4b** — drives N bpm-ticks of `SEQ_CORE_Tick` synchronously **while the
+  transport is stopped** (`SEQ_CORE_Handler` no-ops Tick when stopped → no +4-task race; the
+  prefetch gate is in `SEQ_CORE_Handler`, not the direct drive path). `mute=1`. Closes the
+  keystone's traversal-trajectory HIL gap. `board.clock_step(n)`.
+- **`CMD_CAPTURE_SPAN` 0x4c** — sub-op 0 = capture `[src,K,dst]`, sub-op 1 = ring query. Calls
+  `SEQ_CORE_CaptureSpanReSim(src,dst,K)`: snapshot ALL live state → rewind src to the
+  window-start frame (restore gen slots + `SEQ_GENERATOR_ForceRewrite` to push the loop into source,
+  traverse, robotize seed from its ring, step/counters; `last_seen=frame->step` so the wander mutate
+  fires on the natural tick; **no FIRST_CLK** so the first driven tick does a real NextStep advance/
+  draw) → drive K bars **with wander on** at a measure-aligned base `B=(steps_per_measure+1)*96`,
+  recording the **emitted** stream via 4 installed `SEQ_MIDI_OUT` hooks (a quantizing sink + synthetic
+  BPM, reusing the MIDI-export pattern) → `SEQ_MIDI_OUT_FlushQueue()` before uninstalling → restore.
+  `SEQ_GENERATOR_ReSimOnlyTrackSet(src)` gates auto-mutate to src so round-0 loopback tracks can't
+  wander/corrupt their (un-snapshotted) pool slots. Refusal codes: −3 running, −4 wrong-track,
+  −6 history, −8 not-whole-measure (`spm != steps_per_measure+1`), −9/−12 par/trg overflow,
+  −11 arp. `board.capture_span(src,k,dst)` / `board.capture_ring_query()`.
+- **Materialize = record the EMITTED stream, NOT the output mirror.** An output-mirror snapshot
+  (`CaptureToTrack`) is just BOUNCE: it loses robotize (emission-time, perturbs the *event* not the
+  rendered buffer) AND traversal order (playback-order; `ResetGenerativeForBounce` forces
+  `dir_mode=Forward`). The sink quantizes each emitted NoteOn to `step = (tick−B)/step_length` and
+  writes the dst note/vel/gate (default gate length this cut). dst geometry inherits src (K-bar
+  length, generative axis stripped, groove cleared since it's baked into the emitted positions).
+- **Gotchas:** par and trg carry **independent instrument counts** (drum = par 16-instr / trg
+  1-instr) — use each axis's own count for TrackInit + overflow guard (a conflation bug refused all
+  drum-layout captures). A 16-instrument drum-layout source caps at **K≤4** (par buffer); a true
+  1-voice Note track (K≤16) needs Note par-layer typing, which is *not* a simple field write
+  (`par_assignment_drum[4]` is drum-only) — deferred. **Deferred:** while-playing capture
+  (this cut is stopped-only), precise gate length, live-MIDI-in tape, emission coin-flips, ring
+  persistence, the physical gesture (harness-driven this cut). HIL:
+  [test_capture_span.py](../../../../tests/apps/seq_v4/test_capture_span.py),
+  [test_clock_step.py](../../../../tests/apps/seq_v4/test_clock_step.py). By-ear/by-eye GO 2026-06-20.
+
 ### Persistence is versioned at the per-track level
 
 - Bank file (`MBSEQ_B*.V4`) uses per-track extension blocks tagged with a version byte (`SEQ_FILE_B_TRK_EXT_TAG_V1 = 0x01`, `_V2 = 0x02`) — see [seq_file_b.c:45](../core/seq_file_b.c#L45). New CCs ≥ 0x80 live in the v2 ext block; the base loop `for(cc=0; cc<128; ++cc)` deliberately excludes them (TK's `seq_cc.h:166` note "For future V4 Plus (currently not stored in bank files on SD Card)").

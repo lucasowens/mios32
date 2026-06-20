@@ -80,6 +80,8 @@ from .sysex import (
     CMD_PHRASE_MORPH,
     CMD_SWITCH_QUANTIZE,
     CMD_RNG_SEED,
+    CMD_CLOCK_STEP,
+    CMD_CAPTURE_SPAN,
     RNG_SEED_GEN_GET,
     RNG_SEED_GEN_SET,
     RNG_SEED_TRV_GET,
@@ -1373,6 +1375,57 @@ class Board:
         payload = self.wait_for_sysex(CMD_RNG_SEED, timeout=timeout, since=since)
         if len(payload) < 2 or payload[1] != CMD_STATUS_OK:
             raise RuntimeError(f"RNG_SEED trv-set reply: {payload!r}")
+
+    def clock_step(self, n_ticks: int, timeout: float = 4.0) -> dict:
+        """Drive N bpm-ticks of the engine synchronously (transport MUST be stopped).
+
+        Advances NextStep/traversal/generator-wander/the per-bar ref_step==0 hook
+        deterministically — the clock-step driver the per-track-RNG keystone flagged
+        as missing (no clock-START verb existed). Returns {bpm_tick, trk0_step}.
+        Raises if the transport is running (the firmware refuses, status 0x03)."""
+        if n_ticks < 0:
+            raise ValueError("n_ticks must be >= 0")
+        since = time.monotonic() - self._t0
+        req = bytes([n_ticks & 0x7f, (n_ticks >> 7) & 0x7f])
+        self.send_raw(frame(CMD_CLOCK_STEP, req))
+        payload = self.wait_for_sysex(CMD_CLOCK_STEP, timeout=timeout, since=since)
+        if len(payload) < 6:
+            raise RuntimeError(
+                f"CLOCK_STEP refused/short ({len(payload)}b, status="
+                f"{payload[0] if payload else '?'}): {payload!r} "
+                "(transport must be stopped)"
+            )
+        bpm_tick = (
+            payload[0]
+            | (payload[1] << 7)
+            | (payload[2] << 14)
+            | (payload[3] << 21)
+            | (payload[4] << 28)
+        )
+        return {"bpm_tick": bpm_tick, "trk0_step": payload[5]}
+
+    def capture_ring_query(self, timeout: float = 1.0) -> dict:
+        """Query the retroactive-CAPTURE ring: which track it records, how many
+        measures are buffered (0..16), and whether a measure overflowed the
+        per-bar generator-slot cap."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CAPTURE_SPAN, bytes([0x01])))
+        payload = self.wait_for_sysex(CMD_CAPTURE_SPAN, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short CAPTURE_SPAN ring-query reply: {payload!r}")
+        return {"track": payload[0], "depth": payload[1], "overflow": bool(payload[2])}
+
+    def capture_span(self, src: int, k: int, dst: int, timeout: float = 4.0) -> int:
+        """Retroactively capture the last `k` bars of the ring's track `src` into
+        the static `dst` track (re-sim + record emitted stream). Transport must be
+        STOPPED. Returns the firmware status byte (0x01 = ok; 0x10|code = refusal,
+        e.g. 0x13 transport-running, 0x14 wrong-track, 0x18 not-whole-measure)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CAPTURE_SPAN, bytes([0x00, src & 0x0f, k & 0x7f, dst & 0x0f])))
+        payload = self.wait_for_sysex(CMD_CAPTURE_SPAN, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short CAPTURE_SPAN reply: {payload!r}")
+        return payload[2]
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

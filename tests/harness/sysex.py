@@ -68,6 +68,8 @@ CMD_PHRASE_META = 0x7f  # sub-op: 0=drift query, 1=name get, 2=name set, 3=name 
 CMD_PHRASE_MORPH = 0x4f  # POSTURE-MORPH (Loop A) — sub-op: 0=arm, 1=set, 2=query
 CMD_SWITCH_QUANTIZE = 0x4e  # global switch-quantize grid + measured margin — sub-op: 0=get, 1=set
 CMD_RNG_SEED = 0x4d  # per-track-RNG keystone seeds — sub-op: 0=gen get,1=gen set,2=trv get,3=trv set
+CMD_CLOCK_STEP = 0x4b  # CAPTURE: drive N bpm-ticks while stopped (NextStep/traversal/wander)
+CMD_CAPTURE_SPAN = 0x4c  # CAPTURE: re-sim+record last K bars of visible track -> static dst
 
 # CMD_RNG_SEED sub-ops — keep in sync with seq_testctrl.c
 RNG_SEED_GEN_GET = 0x00

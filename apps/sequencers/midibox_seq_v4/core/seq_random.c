@@ -116,3 +116,29 @@ u32 SEQ_RANDOM_Gen_Range(u32 min, u32 max)
   // return result within the given range
   return min + (random_value % (max-min+1));
 }
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Global-RNG state save / restore (retroactive CAPTURE non-destructiveness).
+//
+// The "global RNG" is the jsw Mersenne-Twister (its real state, x[N]+next, lives
+// in jsw_rand.c) plus this module's cached last value `random_value`. CAPTURE
+// drives an offline re-simulation that may draw the global RNG (emission
+// coin-flips: probability / humanize / random-gate / echo) and must restore it so
+// live playback is byte-identical afterwards. Within the first-cut proof-span
+// scope (probability=100, none of those effects) the re-sim draws it zero times,
+// so this is belt-and-braces — but it makes the restore correct for ANY span.
+//
+// buf layout: [0] = random_value cache, [1..JSW_RAND_STATE_WORDS] = jsw state.
+/////////////////////////////////////////////////////////////////////////////
+void SEQ_RANDOM_StateGet(u32 *buf)
+{
+  buf[0] = random_value;
+  jsw_rand_state_save((unsigned long *)&buf[1]);
+}
+
+void SEQ_RANDOM_StateSet(const u32 *buf)
+{
+  random_value = buf[0];
+  jsw_rand_state_restore((const unsigned long *)&buf[1]);
+}

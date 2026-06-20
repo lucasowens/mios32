@@ -242,6 +242,18 @@ extern s32 SEQ_GENERATOR_IsEngaged(u8 track, u8 instrument);
 // these are live dials.
 extern seq_generator_t *SEQ_GENERATOR_Get(u8 track, u8 instrument);
 
+// Count a track's allocated generator slots (CAPTURE ring overflow guard).
+extern u8 SEQ_GENERATOR_TrackEngagedCount(u8 track);
+
+// last_seen_step (measure-wrap detector) accessors — CAPTURE re-sim uses these
+// to suppress the first-boundary re-mutate at the window-start rewind, and to
+// snapshot/restore the detector so the re-sim borrow is non-destructive.
+extern u8 SEQ_GENERATOR_LastSeenStepGet(u8 track);
+extern void SEQ_GENERATOR_LastSeenStepSet(u8 track, u8 step);
+
+// CAPTURE re-sim: restrict generator auto-mutate to one track (0xff = all/normal).
+extern void SEQ_GENERATOR_ReSimOnlyTrackSet(u8 track);
+
 // Force a one-shot reroll + rewrite for every engaged generator on `track`,
 // outside the normal measure-boundary cadence. Used at ENGAGE to make the
 // generator audible without waiting for the next wrap.

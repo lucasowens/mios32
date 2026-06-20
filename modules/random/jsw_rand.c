@@ -69,6 +69,26 @@ unsigned long jsw_rand ( void )
   return y;
 }
 
+/* Save / restore the full internal state (x[N] + next). */
+#if (N + 1) != JSW_RAND_STATE_WORDS
+# error "JSW_RAND_STATE_WORDS out of sync with N — update jsw_rand.h"
+#endif
+void jsw_rand_state_save ( unsigned long *buf )
+{
+  int i;
+  for ( i = 0; i < N; i++ )
+    buf[i] = x[i];
+  buf[N] = (unsigned long)next;
+}
+
+void jsw_rand_state_restore ( const unsigned long *buf )
+{
+  int i;
+  for ( i = 0; i < N; i++ )
+    x[i] = buf[i];
+  next = (int)buf[N];
+}
+
 /* Portable time seed */
 unsigned jsw_time_seed()
 {

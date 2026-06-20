@@ -317,6 +317,38 @@ s32 SEQ_GENERATOR_IsEngaged(u8 track, u8 instrument)
 }
 
 
+// Count this track's allocated (in_use) generator slots — matches what
+// SEQ_GENERATOR_TrackSnapshot will copy. Used by the CAPTURE ring to detect
+// when a track has more slots than the ring caps (incomplete capture -> refuse).
+u8 SEQ_GENERATOR_TrackEngagedCount(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
+  u8 n = 0, instr;
+  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS; ++instr)
+    if( SEQ_GENERATOR_Get(track, instr) != NULL )
+      ++n;
+  return n;
+}
+
+
+// last_seen_step accessors — the per-track measure-wrap detector SEQ_GENERATOR_Tick
+// uses (mutate fires when step wraps 0 with prev!=0). The CAPTURE re-sim sets this
+// to 0 at the window-start rewind so the FIRST driven boundary does NOT re-mutate
+// the restored (post-mutate) window-start loop, and snapshots/restores it so the
+// borrow is non-destructive.
+u8 SEQ_GENERATOR_LastSeenStepGet(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return 0xFF;
+  return last_seen_step[track];
+}
+
+void SEQ_GENERATOR_LastSeenStepSet(u8 track, u8 step)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return;
+  last_seen_step[track] = step;
+}
+
+
 seq_generator_t *SEQ_GENERATOR_Get(u8 track, u8 instrument)
 {
   if( track >= SEQ_CORE_NUM_TRACKS || instrument >= SEQ_GENERATOR_INSTRUMENTS )
@@ -640,10 +672,20 @@ s32 SEQ_GENERATOR_ForceMutate(u8 track, u8 instrument)
 /////////////////////////////////////////////////////////////////////////////
 // Tick prologue — called from SEQ_CORE_Tick BEFORE SEQ_CORE_RenderTracks.
 /////////////////////////////////////////////////////////////////////////////
+// CAPTURE re-sim: when set (!= 0xff), only this track's generators auto-mutate.
+// The re-sim drives the engine with export_track=src, but round-0 LOOPBACK tracks
+// still advance and would otherwise wander (corrupting their pool slots, which the
+// re-sim snapshot doesn't cover). Gating mutation to the captured track keeps the
+// borrow non-destructive for everything else.
+static u8 resim_only_track = 0xff;
+void SEQ_GENERATOR_ReSimOnlyTrackSet(u8 track) { resim_only_track = track; }
+
 void SEQ_GENERATOR_Tick(void)
 {
   u8 track;
   for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
+    if( resim_only_track != 0xff && track != resim_only_track )
+      continue; // re-sim: only the captured track wanders
     u8 cur = seq_core_trk[track].step;
     u8 prev = last_seen_step[track];
     last_seen_step[track] = cur;

@@ -163,6 +163,115 @@ seq_processor_slot_t CCM_SECTION seq_processor_stack[SEQ_CORE_NUM_TRACKS][SEQ_CO
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Retroactive CAPTURE — per-bar generative-frame ring (2026-06-19)
+//
+// The box is always listening: at each musical-measure boundary it snapshots the
+// VISIBLE track's generative FRAME (the deterministic state needed to re-simulate
+// that measure forward) into a depth-16 ring, sharing the robotize ring's clock
+// (robotize_measure_ctr & 0x0f). CAPTURE then rewinds to the window-start frame
+// and re-drives K bars forward WITH generator wander on — reproducing the lived
+// span exactly (the per-track-RNG keystone made every generative stream
+// deterministic from this frame). The source par buffer is NOT ringed: restoring
+// the generator loop[]+seed and re-driving regenerates it via write_loop_to_source.
+//
+// Single track (the visible one), invalidated on track-switch — bounds the
+// generator-slot snapshots (the costly part) to one track. Robotize already rings
+// per-track (robotize_seed_snapshots), so the frame carries only the streams that
+// don't: random traversal + the generator slots + the step/progression cursor.
+// All main SRAM (no CCM_SECTION = .bss in main SRAM, like the robotize ring).
+/////////////////////////////////////////////////////////////////////////////
+#define SEQ_CORE_CAP_RING_BARS  16   // depth; shares robotize_measure_ctr & 0x0f
+#define SEQ_CORE_CAP_RING_SLOTS 4    // max generator slots ringed per bar (melodic-first)
+
+typedef struct {
+  u32 traverse_state;      // random_traverse_state at this measure boundary
+  u8  step;                // t->step at the boundary (0 for a whole-measure track)
+  u8  step_saved;          // replay anchor
+  u8  step_replay_ctr;     // progression counters (forward/jmpbck/replay/repeat/skip)
+  u8  step_fwd_ctr;
+  u8  step_interval_ctr;
+  u8  step_repeat_ctr;
+  u8  step_skip_ctr;
+  u8  gen_count;           // generator slots captured this bar (<= SLOTS)
+  seq_generator_t gen[SEQ_CORE_CAP_RING_SLOTS]; // slot state at this measure's ref_step==0
+                                                // prologue (BEFORE the body NextStep advance
+                                                // and BEFORE the new measure's mutate, which
+                                                // fires the following tick). Re-sim restores it
+                                                // verbatim and reproduces the same advance+mutate
+                                                // cadence, so capture & replay share the convention.
+} seq_core_cap_frame_t;
+
+static seq_core_cap_frame_t seq_core_cap_ring[SEQ_CORE_CAP_RING_BARS]; // main SRAM
+static u8  seq_core_cap_ring_track    = 0xff; // track the ring records (0xff = invalid)
+static u8  seq_core_cap_ring_filled   = 0;    // valid measures recorded (<= BARS)
+static u8  seq_core_cap_ring_overflow = 0;    // a measure had > SLOTS gens (capture incomplete)
+static u8  seq_core_cap_resim_active  = 0;    // 1 while a CAPTURE re-sim drives the engine
+                                              // (suppresses ring writes so re-sim doesn't
+                                              //  overwrite the very history it reads)
+
+
+// Invalidate the ring (run-start / track-switch): the recorded history no longer
+// describes the live engine.
+static void SEQ_CORE_CaptureRingReset(void)
+{
+  seq_core_cap_ring_track = 0xff;
+  seq_core_cap_ring_filled = 0;
+  seq_core_cap_ring_overflow = 0;
+}
+
+// Append the VISIBLE track's generative frame at a measure boundary. Called once per
+// global measure boundary (ref_step==0) AFTER robotize_measure_ctr++ and the robotize
+// ring write, so it shares that index. This runs in the tick PROLOGUE — before the body
+// NextStep advances t->step, and before the new measure's generator mutate (which fires
+// the following tick). So the frame holds the pre-advance step + the loop going INTO the
+// boundary; the re-sim restores it verbatim and re-drives, reproducing the exact
+// advance+mutate cadence (capture & replay share the convention).
+static void SEQ_CORE_CaptureRingTick(void)
+{
+  if( seq_core_cap_resim_active ) return; // re-sim drive: don't pollute the ring
+  u8 vis = SEQ_UI_VisibleTrackGet();
+  if( vis >= SEQ_CORE_NUM_TRACKS ) return;
+  if( vis != seq_core_cap_ring_track ) {
+    seq_core_cap_ring_track = vis;     // follow the visible track; old history is void
+    seq_core_cap_ring_filled = 0;
+    seq_core_cap_ring_overflow = 0;
+  }
+  seq_core_trk_t *t = &seq_core_trk[vis];
+  seq_core_cap_frame_t *f = &seq_core_cap_ring[t->robotize_measure_ctr & 0x0f];
+  f->traverse_state    = t->random_traverse_state;
+  f->step              = t->step;
+  f->step_saved        = t->step_saved;
+  f->step_replay_ctr   = t->step_replay_ctr;
+  f->step_fwd_ctr      = t->step_fwd_ctr;
+  f->step_interval_ctr = t->step_interval_ctr;
+  f->step_repeat_ctr   = t->step_repeat_ctr;
+  f->step_skip_ctr     = t->step_skip_ctr;
+  f->gen_count = SEQ_GENERATOR_TrackSnapshot(vis, f->gen, SEQ_CORE_CAP_RING_SLOTS);
+  if( SEQ_GENERATOR_TrackEngagedCount(vis) > SEQ_CORE_CAP_RING_SLOTS )
+    seq_core_cap_ring_overflow = 1; // more gens than the ring holds -> capture refuses
+  if( seq_core_cap_ring_filled < SEQ_CORE_CAP_RING_BARS )
+    ++seq_core_cap_ring_filled;
+}
+
+// Frame K measures back from the current measure (K=1 -> the measure that just
+// completed). NULL if `track` is not the ring's track or there isn't enough
+// history. Re-sim window-start = K bars back; valid K is 1..filled-1 (the depth-16
+// ring keeps the current measure + 15 prior, so max K = 15).
+static const seq_core_cap_frame_t *SEQ_CORE_CaptureRingFrameBack(u8 track, u8 k)
+{
+  if( track != seq_core_cap_ring_track ) return NULL;
+  if( k < 1 || k >= seq_core_cap_ring_filled ) return NULL;
+  u32 ctr = seq_core_trk[seq_core_cap_ring_track].robotize_measure_ctr;
+  return &seq_core_cap_ring[(ctr - k) & 0x0f];
+}
+
+// HIL / capture-verb accessors.
+u8 SEQ_CORE_CaptureRingDepth(void) { return seq_core_cap_ring_filled; }
+u8 SEQ_CORE_CaptureRingTrack(void) { return seq_core_cap_ring_track; }
+u8 SEQ_CORE_CaptureRingOverflow(void) { return seq_core_cap_ring_overflow; }
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Local variables
 /////////////////////////////////////////////////////////////////////////////
 
@@ -1560,6 +1669,270 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 }
 
 
+/////////////////////////////////////////////////////////////////////////////
+// Retroactive CAPTURE — re-simulate the last K bars of the VISIBLE track into a
+// static dst track (2026-06-19). The keystone made every generative stream
+// deterministic from a per-bar frame; this rewinds the ring K bars and re-drives
+// the engine forward WITH wander on, recording the EMITTED stream (the real
+// "Capture MIDI" — traversal order + robotize live in the emitted notes, NOT in
+// the rendered mirror) and quantizing it into dst across K bars.
+//
+// FIRST CUT: transport must be STOPPED (the re-sim drives the one engine
+// exclusively — no +4 tick race, no live freeze, no BPM gap; the "while playing"
+// path is a follow-on). Materialize is incremental + note-on-only with a default
+// gate length (pitch/rhythm/velocity/traversal/wander captured; precise gate
+// length is a refinement). Melodic/normal tracks (drum note-0 fence deferred).
+/////////////////////////////////////////////////////////////////////////////
+
+// Full live-state snapshot so the re-sim borrow is non-destructive.
+typedef struct {
+  seq_core_trk_t   trk[SEQ_CORE_NUM_TRACKS]; // step/traversal/robotize/counters (all tracks)
+  seq_core_state_t state;                    // ref_step + FIRST_CLK/FREEZE/...
+  u32              bpm_tick;
+  u32              prefetched;               // bpm_tick_prefetched (the drive advances it)
+  u32              prefetch_req;             // bpm_tick_prefetch_req
+  u32              rng[SEQ_RANDOM_STATE_WORDS]; // global jsw MT + cache
+  u8               pattern_dirty;
+  u8               last_seen[SEQ_CORE_NUM_TRACKS]; // generator wrap detector
+  seq_generator_t  gen[SEQ_CORE_CAP_RING_SLOTS];   // src track's generator slots
+  u8               gen_count;
+  u8               par_src[SEQ_PAR_MAX_BYTES];  // src source par (wander rewrites it)
+  u8               trg_src[SEQ_TRG_MAX_BYTES];  // src source trg
+} seq_core_cap_snapshot_t;
+
+static seq_core_cap_snapshot_t seq_core_cap_snap; // main SRAM (~4.8 KB)
+
+// Materialize-sink params (the re-sim's MIDI-out hook quantizes into dst).
+static u8  capspan_src, capspan_dst;
+static u16 capspan_tps;          // ticks per step
+static u16 capspan_dst_steps;    // K * (length+1)
+static u32 capspan_cur_tick;     // current synthetic drive bpm-tick
+static u32 capspan_base;         // synthetic bpm-tick at the window start
+static s8  capspan_note_layer, capspan_vel_layer, capspan_len_layer;
+static u8  capspan_default_len;
+
+// MIDI-out hooks (run the scheduler against synthetic time + a quantizing sink).
+static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t package)
+{
+  if( package.evnt0 >= 0xf8 ) return 0;          // ignore realtime (clock etc.)
+  if( package.cable != capspan_src ) return 0;   // only the captured track
+  if( package.event != NoteOn ) return 0;        // first cut: note-ons only
+  if( package.evnt2 == 0 ) return 0;             // running-status note-off -> skip
+  if( capspan_cur_tick < capspan_base ) return 0;
+  u16 step = (u16)((capspan_cur_tick - capspan_base) / capspan_tps);
+  if( step >= capspan_dst_steps ) return 0;      // outside the K-bar window
+  if( capspan_note_layer >= 0 )
+    SEQ_PAR_Set(capspan_dst, step, (u8)capspan_note_layer, 0, package.evnt1);
+  if( capspan_vel_layer >= 0 )
+    SEQ_PAR_Set(capspan_dst, step, (u8)capspan_vel_layer, 0, package.evnt2);
+  if( capspan_len_layer >= 0 )
+    SEQ_PAR_Set(capspan_dst, step, (u8)capspan_len_layer, 0, capspan_default_len);
+  SEQ_TRG_GateSet(capspan_dst, step, 0, 1);
+  return 0;
+}
+static s32 SEQ_CORE_CapSpanBpmRunning(void) { return 1; }
+static u32 SEQ_CORE_CapSpanBpmTick(void) { return capspan_cur_tick; }
+static s32 SEQ_CORE_CapSpanBpmSet(float bpm) { (void)bpm; return 0; }
+
+static void SEQ_CORE_CaptureSpanSnapshot(u8 src)
+{
+  memcpy(seq_core_cap_snap.trk, seq_core_trk, sizeof(seq_core_trk));
+  seq_core_cap_snap.state = seq_core_state;
+  seq_core_cap_snap.bpm_tick = SEQ_BPM_TickGet();
+  seq_core_cap_snap.prefetched = bpm_tick_prefetched;
+  seq_core_cap_snap.prefetch_req = bpm_tick_prefetch_req;
+  SEQ_RANDOM_StateGet(seq_core_cap_snap.rng);
+  seq_core_cap_snap.pattern_dirty = seq_pattern_dirty;
+  u8 t;
+  for(t=0; t<SEQ_CORE_NUM_TRACKS; ++t)
+    seq_core_cap_snap.last_seen[t] = SEQ_GENERATOR_LastSeenStepGet(t);
+  seq_core_cap_snap.gen_count = SEQ_GENERATOR_TrackSnapshot(src, seq_core_cap_snap.gen, SEQ_CORE_CAP_RING_SLOTS);
+  memcpy(seq_core_cap_snap.par_src, seq_par_layer_value[src], SEQ_PAR_MAX_BYTES);
+  memcpy(seq_core_cap_snap.trg_src, seq_trg_layer_value[src], SEQ_TRG_MAX_BYTES);
+}
+
+static void SEQ_CORE_CaptureSpanRestore(u8 src)
+{
+  memcpy(seq_core_trk, seq_core_cap_snap.trk, sizeof(seq_core_trk));
+  seq_core_state = seq_core_cap_snap.state;
+  SEQ_BPM_TickSet(seq_core_cap_snap.bpm_tick);
+  bpm_tick_prefetched = seq_core_cap_snap.prefetched;
+  bpm_tick_prefetch_req = seq_core_cap_snap.prefetch_req;
+  SEQ_RANDOM_StateSet(seq_core_cap_snap.rng);
+  seq_pattern_dirty = seq_core_cap_snap.pattern_dirty; // clear src's spurious wander-dirty
+  u8 t;
+  for(t=0; t<SEQ_CORE_NUM_TRACKS; ++t)
+    SEQ_GENERATOR_LastSeenStepSet(t, seq_core_cap_snap.last_seen[t]);
+  SEQ_GENERATOR_TrackRestore(src, seq_core_cap_snap.gen, seq_core_cap_snap.gen_count);
+  memcpy(seq_par_layer_value[src], seq_core_cap_snap.par_src, SEQ_PAR_MAX_BYTES);
+  memcpy(seq_trg_layer_value[src], seq_core_cap_snap.trg_src, SEQ_TRG_MAX_BYTES);
+  SEQ_GENERATOR_ForceRewrite(src); // re-derive src source from the restored loops
+  // The drive left src's OUTPUT MIRROR holding the end-of-window line. Re-render so
+  // the restored SOURCE is copied back into the mirror (stopped-transport reads the
+  // mirror); otherwise live play / SEQ_PAR_Get(src) returns the wandered bytes.
+  seq_render_touched_ms[src] = 0;
+  seq_render_dirty[src] = 1;
+  SEQ_CORE_RenderTrack(src);
+}
+
+// Re-simulate the last `k` bars of `src` (the ring's track) into `dst`.
+// Returns 0 on success; negative status on refusal (see CMD_CAPTURE_SPAN).
+s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS || dst >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( src == dst ) return -2;
+  if( SEQ_BPM_IsRunning() ) return -3;                 // first cut: stopped only
+  if( src != SEQ_CORE_CaptureRingTrack() ) return -4;  // ring isn't recording src
+  if( SEQ_CORE_CaptureRingOverflow() ) return -5;      // more gens than ring holds
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[src];
+  // Arp playmode early-returns in the render-stack processors (A8 fence) — its emitted
+  // stream can't be faithfully quantized back; refuse it. Drum event_mode is by-ear
+  // out-of-scope (note-0=kit-preset on playback, per-instrument link layers) but the
+  // machinery (determinism / non-destructive / quantize of instrument-0 notes) is sound,
+  // so it is allowed and validated by the HIL pitch-gen-on-drum setup; melodic is the
+  // by-ear target.
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator ) return -11;
+
+  // The ring is indexed per GLOBAL measure (robotize_measure_ctr); a span only lines
+  // up when the src track is exactly one global measure long. seq_core_steps_per_measure
+  // is stored as (steps-1), so the true count is +1.
+  u8 spm  = (u8)(tcc->length + 1);
+  u8 gspm = (u8)(seq_core_steps_per_measure + 1);
+  if( spm != gspm ) return -8;                          // not a whole (global) measure
+  u16 dst_steps = (u16)k * spm;
+  if( dst_steps == 0 || dst_steps > 256 ) return -7;    // exceeds max track steps
+
+  const seq_core_cap_frame_t *frame = SEQ_CORE_CaptureRingFrameBack(src, k);
+  if( frame == NULL ) return -6;                        // not enough history / bad k
+
+  u16 tps = seq_core_trk[src].step_length;
+  if( tps == 0 ) tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
+  if( tps == 0 ) tps = 96;
+
+  // par and trg carry INDEPENDENT instrument counts (a drum track is par 1-layer ×
+  // 16-instr but trg 8-layer × 1-instr) — use each axis's own count for its TrackInit
+  // and overflow guard.
+  u8  par_layers = (u8)SEQ_PAR_NumLayersGet(src);
+  u8  par_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src);
+  u8  trg_layers = (u8)SEQ_TRG_NumLayersGet(src);
+  u8  trg_instr  = (u8)SEQ_TRG_NumInstrumentsGet(src);
+  if( (u32)dst_steps * par_layers * par_instr > SEQ_PAR_MAX_BYTES ) return -9;        // dst par overflow
+  if( (u32)((dst_steps + 7) / 8) * trg_layers * trg_instr > SEQ_TRG_MAX_BYTES ) return -12; // dst trg overflow
+
+  MUTEX_MIDIOUT_TAKE;
+
+  // (a) snapshot live state for a non-destructive borrow
+  SEQ_CORE_CaptureSpanSnapshot(src);
+
+  // (b) prepare dst: inherit src config/geometry, K-bar length, start empty
+  SEQ_CC_Set(dst, SEQ_CC_MIDI_EVENT_MODE, SEQ_CC_Get(src, SEQ_CC_MIDI_EVENT_MODE));
+  SEQ_CC_LinkUpdate(dst);
+  SEQ_PAR_TrackInit(dst, dst_steps, par_layers, par_instr);
+  SEQ_TRG_TrackInit(dst, dst_steps, trg_layers, trg_instr);
+  { int i; for(i=0; i<128; ++i) SEQ_CC_Set(dst, i, SEQ_CC_Get(src, i)); SEQ_CC_LinkUpdate(dst); }
+  SEQ_CC_ResetGenerativeForBounce(dst);                // forward playback, strip gen axis
+  // Groove is already BAKED into the emitted (and thus quantized) note positions, so
+  // dst must play STRAIGHT — otherwise its inherited groove double-applies.
+  SEQ_CC_Set(dst, SEQ_CC_GROOVE_VALUE, 0);
+  SEQ_CC_Set(dst, SEQ_CC_GROOVE_STYLE, 0);
+  SEQ_CC_Set(dst, SEQ_CC_LENGTH, dst_steps - 1);       // K-bar length
+  SEQ_CC_LinkUpdate(dst);
+  memset(seq_par_layer_value[dst], 0, SEQ_PAR_MAX_BYTES); // start as all-rest
+  memset(seq_trg_layer_value[dst], 0, SEQ_TRG_MAX_BYTES);
+
+  // sink params (read dst links AFTER the CC inherit above)
+  seq_cc_trk_t *dtcc = &seq_cc_trk[dst];
+  capspan_src = src; capspan_dst = dst;
+  capspan_tps = tps; capspan_dst_steps = dst_steps;
+  capspan_note_layer = dtcc->link_par_layer_note;
+  capspan_vel_layer  = dtcc->link_par_layer_velocity;
+  capspan_len_layer  = dtcc->link_par_layer_length;
+  capspan_default_len = 71;                             // ~3/4 gate (refinement: derive from off)
+
+  // (c) rewind src to the window-start frame. The frame is the state at that measure's
+  // ref_step==0 prologue (BEFORE the body's NextStep advance), so we restore it verbatim
+  // and drive WITHOUT FIRST_CLK: the first driven tick does a real NextStep (advance /
+  // random draw) exactly like LIVE did at that boundary, and last_seen==frame->step lets
+  // the generator auto-mutate fire on the natural tick (reproducing the wander).
+  // *** The exact first-step phase is the #1 hardware-validation item (HIL + by-ear). ***
+  seq_core_trk_t *t = &seq_core_trk[src];
+  u32 ctr = t->robotize_measure_ctr;
+  u8  widx = (u8)((ctr - k) & 0x0f);
+  t->random_traverse_state = frame->traverse_state;
+  t->robotize_seed_state   = t->robotize_seed_snapshots[widx]; // robotize rings per-track already
+  t->step           = frame->step;
+  t->step_saved     = frame->step_saved;
+  t->step_replay_ctr   = frame->step_replay_ctr;
+  t->step_fwd_ctr      = frame->step_fwd_ctr;
+  t->step_interval_ctr = frame->step_interval_ctr;
+  t->step_repeat_ctr   = frame->step_repeat_ctr;
+  t->step_skip_ctr     = frame->step_skip_ctr;
+  SEQ_GENERATOR_TrackRestore(src, frame->gen, frame->gen_count);
+  SEQ_GENERATOR_ForceRewrite(src); // push the window-start loop into the source par buffer
+  // wrap-detector = each track's current step: src matches the frame moment (mutate fires
+  // naturally), non-src tracks won't spuriously mutate. The resim guard below also stops
+  // round-0 loopback tracks from wandering.
+  { u8 tt; for(tt=0; tt<SEQ_CORE_NUM_TRACKS; ++tt) SEQ_GENERATOR_LastSeenStepSet(tt, seq_core_trk[tt].step); }
+  SEQ_GENERATOR_ReSimOnlyTrackSet(src);
+
+  // phase-align the drive to a global-measure boundary: B = one measure of 16th-ticks,
+  // so bpm_tick%96==0 (the ref_step/robotize clock) AND the step clock coincide as LIVE.
+  u32 B = (u32)gspm * 96;
+  seq_core_state.FIRST_CLK = 0;
+  seq_core_state.FORCE_REF_STEP_RESET = 0;
+  seq_core_state.reset_trkpos_req = 0;
+  seq_core_state.ref_step = seq_core_steps_per_measure; // ++ -> wraps to 0 at tick B
+  t->state.FIRST_CLK = 0;
+  t->timestamp_next_step = B;
+  t->timestamp_next_step_ref = B;
+  bpm_tick_prefetched = B - 1; // belt-and-braces: the prefetch gate lives in SEQ_CORE_Handler,
+                               // not the direct SEQ_CORE_Tick drive path, so this is a no-op for
+                               // the drive — but it's snapshotted/restored so the live engine is
+                               // left consistent regardless.
+
+  // (d) install hooks, drive exactly K bars, materialize via the sink
+  seq_core_cap_resim_active = 1;
+  capspan_base = B;
+  SEQ_MIDI_OUT_Callback_MIDI_SendPackage_Set(SEQ_CORE_CapSpanSink);
+  SEQ_MIDI_OUT_Callback_BPM_IsRunning_Set(SEQ_CORE_CapSpanBpmRunning);
+  SEQ_MIDI_OUT_Callback_BPM_TickGet_Set(SEQ_CORE_CapSpanBpmTick);
+  SEQ_MIDI_OUT_Callback_BPM_Set_Set(SEQ_CORE_CapSpanBpmSet);
+
+  u32 drive_ticks = (u32)dst_steps * tps;
+  u32 i;
+  for(i=0; i<drive_ticks; ++i) {
+    u32 bt = B + i;
+    capspan_cur_tick = bt;
+    SEQ_CORE_Tick(bt, (s8)src, 0);  // export_track=src, mute=0 -> emit to the sink
+    SEQ_MIDI_OUT_Handler();         // drain pool -> SEQ_CORE_CapSpanSink
+  }
+
+  // (e) flush residual queued items (note-offs scheduled past the window) through the
+  //     still-installed sink (it skips velocity-0) so they don't leak into live output,
+  //     then uninstall hooks.
+  SEQ_MIDI_OUT_FlushQueue();
+  SEQ_MIDI_OUT_Callback_MIDI_SendPackage_Set(NULL);
+  SEQ_MIDI_OUT_Callback_BPM_IsRunning_Set(NULL);
+  SEQ_MIDI_OUT_Callback_BPM_TickGet_Set(NULL);
+  SEQ_MIDI_OUT_Callback_BPM_Set_Set(NULL);
+  seq_core_cap_resim_active = 0;
+  SEQ_GENERATOR_ReSimOnlyTrackSet(0xff);
+
+  // (f) restore the live engine (byte-identical) and mark only dst dirty
+  SEQ_CORE_CaptureSpanRestore(src);
+  SEQ_PATTERN_DirtySetTrack(dst); // the capture IS a deliberate change to dst
+
+  MUTEX_MIDIOUT_GIVE;
+
+  // (g) force a dst render so SEQ_PAR_Get(dst) reads the written bytes immediately
+  seq_render_touched_ms[dst] = 0;
+  seq_render_dirty[dst] = 1;
+  SEQ_CORE_RenderTrack(dst);
+  return 0;
+}
+
+
 // Static snapshot of the destination group (4 tracks) for the capture-to-slot-
 // track verb: preserve the dst group's live RAM across the load-modify-save so
 // the operation doesn't disturb what's currently loaded/playing there. Plus a
@@ -2428,6 +2801,10 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
   ui_seq_pause = 0;
   seq_core_state.FIRST_CLK = 1;
 
+  // Retroactive CAPTURE: a run-start voids the ring's recorded history (seeds are
+  // re-minted below, step pointers reset — the old frames no longer re-simulate).
+  SEQ_CORE_CaptureRingReset();
+
   // reset latched PB/CC values
   SEQ_LAYER_ResetLatchedValues();
 
@@ -2643,6 +3020,10 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 	++t_m->robotize_measure_ctr;
 	SEQ_CORE_RobotizeLoopBarTick(t_m, tcc_m);
       }
+
+      // Retroactive CAPTURE: ring the visible track's generative frame for the
+      // measure now starting (shares the robotize index just advanced above).
+      SEQ_CORE_CaptureRingTick();
     }
   }
 
