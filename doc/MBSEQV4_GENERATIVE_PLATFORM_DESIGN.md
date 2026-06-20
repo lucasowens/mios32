@@ -2590,8 +2590,25 @@ is cheap; capture mints a new clip.)
   par-layer typing isn't a simple field write, and the HIL harness can only make drum-layout tracks).
   Full build/decision detail + the review-caught bugs (whole-measure guard, src-mirror, queue-flush,
   step-phase, source-push, loopback) + the par/trg independent-instrument-count fix: plan
-  `doc/plans/2026-06-19-capture-ring.md` and REFERENCE "Retroactive CAPTURE". Still deferred:
-  while-playing capture, live-MIDI-in tape, emission coin-flips, ring persistence.
+  `doc/plans/2026-06-19-capture-ring.md` and REFERENCE "Retroactive CAPTURE".
+
+  **→ WHILE-PLAYING = a LIVE TAPE SHIPPED + by-ear GO 2026-06-20** (HIL 190/190). The decisive
+  reframe: stopped CAPTURE must *regenerate* the unrecorded past (re-sim); while PLAYING the notes
+  are sounding now, so it just *records* them. The tape is the **smaller build AND strictly more
+  faithful** — it keeps the emission coin-flips / live keys / loopback-bus / real timing that the
+  seed-based re-sim structurally cannot reproduce. (Re-sim-while-playing was the alternative: it
+  would need context-ifying `SEQ_CORE_Tick` + a chunked drive to dodge clock-stall, for a *less*
+  faithful result — rejected.) This realizes §5's two faces under one gesture: a **passive tee** off
+  the MIDI-out drain (`callback_midi_tap`, called after the real send — not the redirect sink)
+  fills a flat per-bar note-on tape (`seq_core_cap_tape[768]`, ~6 KB main SRAM), bucketed by absolute
+  `item->timestamp` at grab time (NOT by the measure counter, which advances at prefetch → seam
+  skew); `SEQ_CORE_CaptureSpanTape` quantizes the window under `MUTEX_MIDIOUT`; the dispatcher
+  `SEQ_CORE_CaptureSpan` routes PLAYING→tape / STOPPED→re-sim so the UTILITY gesture is identical in
+  both states. Infra: `CMD_TRANSPORT` (the real play-button path) closes the long-flagged "no
+  clock-START verb" HIL gap. First cut = note-ons/default-gate (matches re-sim); **precise gate
+  (record the note-offs the tee already carries) is the queued follow-on.** Still deferred:
+  precise gate, live-MIDI-in tape, emission coin-flips, ring persistence, true 1-voice Note-init,
+  the window-seam groove/delay edge.
 
 **Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
 A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six

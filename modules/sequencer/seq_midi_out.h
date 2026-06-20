@@ -73,6 +73,7 @@ typedef enum {
 extern s32 SEQ_MIDI_OUT_Init(u32 mode);
 
 extern s32 SEQ_MIDI_OUT_Callback_MIDI_SendPackage_Set(void *_callback_midi_send_package);
+extern s32 SEQ_MIDI_OUT_Callback_MIDI_Tap_Set(void *_callback_midi_tap);
 extern s32 SEQ_MIDI_OUT_Callback_BPM_IsRunning_Set(void *_callback_bpm_is_running);
 extern s32 SEQ_MIDI_OUT_Callback_BPM_TickGet_Set(void *_callback_bpm_tick_get);
 extern s32 SEQ_MIDI_OUT_Callback_BPM_Set_Set(void *_callback_bpm_set);

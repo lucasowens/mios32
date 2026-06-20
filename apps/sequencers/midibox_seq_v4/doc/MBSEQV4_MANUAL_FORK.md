@@ -303,9 +303,16 @@ In every case the capture **merges** into the destination pattern: it replaces o
 
 ### Retroactive Capture — the UTILITY gesture
 
-The **play-then-keep** capture — "Capture MIDI" for the whole organism. The box is always listening: every bar a track plays is recorded into a ring. When you hear something you want to keep, **STOP**, hold **UTILITY**, and grab the last N bars onto a fresh track — no arming, no record-first. The grab is faithful (it replays exactly what the generators/traversal did, including the wander) and lands as static notes that play back the same every time.
+The **play-then-keep** capture — "Capture MIDI" for the whole organism. The box is always listening: every bar a track plays is recorded. When you hear something you want to keep, hold **UTILITY** and grab the last N bars onto a fresh track — no arming, no record-first. It lands as static notes that play back the same every time.
 
-**Transport must be STOPPED** (first cut; capturing while playing is a follow-on). The **source** is the track that was playing into the ring (the visible track). While **UTILITY is held** the UTILITY LED lights and the LCD overlays the grab state:
+**Works whether you're playing or stopped — the gesture is identical.** What differs is *how* the box reconstructs the span:
+
+* **While playing → a live tape.** The box keeps **exactly what you just heard** — including the things only a recording can hold: step-probability/humanize coin-flips as they actually rolled, notes you played in over the loop, the real timing. Grab without stopping; the captured track is instantly a loop you can solo/mute.
+* **While stopped → a re-simulation.** Nothing is sounding, so the box *regenerates* the span from the generators' state (faithful for autonomous wander/traversal — it re-runs the exact deterministic process). This is the original first cut.
+
+They produce the same result for a plain generator wander; the live tape pulls ahead the moment something other than the generator shaped the sound.
+
+The **source** is the track that was playing into the ring (the visible track). While **UTILITY is held** the UTILITY LED lights and the LCD overlays the grab state:
 
 ```
 CAPTURE T1 -> T2    max 12 bars

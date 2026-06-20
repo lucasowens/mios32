@@ -82,6 +82,7 @@ from .sysex import (
     CMD_RNG_SEED,
     CMD_CLOCK_STEP,
     CMD_CAPTURE_SPAN,
+    CMD_TRANSPORT,
     RNG_SEED_GEN_GET,
     RNG_SEED_GEN_SET,
     RNG_SEED_TRV_GET,
@@ -1403,6 +1404,19 @@ class Board:
             | (payload[4] << 28)
         )
         return {"bpm_tick": bpm_tick, "trk0_step": payload[5]}
+
+    def transport(self, start: bool, timeout: float = 1.0) -> bool:
+        """Genuinely start/stop the master transport (the real play-button path), so the
+        engine runs WHILE PLAYING — required for the while-playing CAPTURE tape (clock_step
+        only drives ticks with the transport stopped). The start request is consumed on the
+        next firmware MIDI-task tick, so IsRunning may lag one tick; poll tick_query()/
+        wait if you need to be sure. Returns the firmware's is_running flag at reply time."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRANSPORT, bytes([0x00 if start else 0x01])))
+        payload = self.wait_for_sysex(CMD_TRANSPORT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short TRANSPORT reply: {payload!r}")
+        return bool(payload[1])
 
     def capture_ring_query(self, timeout: float = 1.0) -> dict:
         """Query the retroactive-CAPTURE ring: which track it records, how many

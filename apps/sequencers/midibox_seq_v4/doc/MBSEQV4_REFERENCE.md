@@ -117,12 +117,49 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
   hold returns you where you were. LCD overlay "CAPTURE T<src> → T<dst>  max N bars" + result/refusal.
   `BTN_UTILITY=0x17` for testctrl button injection; the gesture path is **not** testctrl-gated (works
   in the gig `TESTCTRL=0` build).
-- **Deferred:** while-playing capture (this cut is stopped-only), precise gate length, live-MIDI-in
-  tape, emission coin-flips, ring persistence, the true 1-voice Note-track init. HIL:
+- **WHILE-PLAYING = a LIVE TAPE, not a re-sim (2026-06-20).** Stopped → *regenerate* the unrecorded
+  past (the ring + re-sim above). Playing → the notes are sounding now, so *record* them. The tape is
+  the smaller build AND strictly more faithful — it keeps the emission coin-flips / live keys /
+  loopback bus / real timing the seed-based re-sim structurally can't reproduce (§5's two faces;
+  they converge on autonomous wander). Pieces:
+  - **Passive tee** — `seq_midi_out.c`'s new `callback_midi_tap` (set via
+    `SEQ_MIDI_OUT_Callback_MIDI_Tap_Set`) is called in `SEQ_MIDI_OUT_Handler` *after* the real send
+    (a tee, NOT the send-package callback's redirect), with `item->timestamp`. Installed once at
+    `SEQ_CORE_Init`; always live (cheap guards).
+  - **`SEQ_CORE_CaptureTapeTap`** records the recording track's note-ons (`event==0x9 && vel>0`,
+    `p.cable==ring track` — cable carries the track in the live path too, `seq_layer.c:426`) into a
+    flat ring `seq_core_cap_tape[SEQ_CORE_CAP_TAPE_EVENTS=768]` `{u32 tick,u8 note,u8 vel}` (~6 KB
+    main SRAM), guarded by `!resim_active && IsRunning`. **First cut: note-ons only → default gate**
+    (matches re-sim; precise gate = record the offs the tee already carries — the queued follow-on).
+  - **Bar markers, bucketed at GRAB time.** `SEQ_CORE_CaptureRingTick(bpm_tick)` (sig +bpm_tick) stamps
+    `seq_core_cap_tape_bar_start[ctr % BARS]` at the `ref_step==0` hook. **The crux:** events are
+    bucketed by absolute `item->timestamp` at grab time, NOT by `robotize_measure_ctr` at tap time —
+    the counter advances at *prefetch* time (a few ticks early), so counter-bucketing would mis-tag
+    each bar's tail across the seam. The flat-ring + downbeat-tick-markers model sidesteps it.
+  - **`SEQ_CORE_CaptureSpanTape(src,dst,K)`** — under `MUTEX_MIDIOUT`: window `[win_start,win_end)` =
+    `bar_start[(ctr−K)%BARS] .. bar_start[ctr%BARS]` (the live bar's downbeat = end, so only COMPLETED
+    bars), eviction guard (**−10** if the span scrolled out of the 768 ring), shared dst prep, quantize
+    each window note-on `step=(tick−win_start)/tps`, render dst **under the mutex** (the engine renders
+    under the same mutex while playing → serialized; re-sim renders after-give because it's stopped).
+  - **Dispatcher `SEQ_CORE_CaptureSpan(src,dst,K)`** — `IsRunning() ? Tape : ReSim`. The UTILITY
+    gesture (`capture_span_msg`) and `CMD_CAPTURE_SPAN` both route through it; **same gesture, both
+    transport states.** The 15-line dst prep is factored to **`SEQ_CORE_CaptureSpanPrepDst`** shared by
+    both paths (byte-equivalent to the old inline block — re-sim unchanged). `CaptureMaxK` now blocks
+    the gen-frame overflow only when stopped (`!IsRunning && overflow`) — the tape ignores gen count.
+  - **`CMD_TRANSPORT` 0x4a** (`board.transport(start)`) — genuinely starts/stops the master transport
+    (real play-button path: `SEQ_BPM_CheckAutoMaster()`+`SEQ_BPM_Start()` / `SEQ_BPM_Stop()`), so HIL
+    can run the engine WHILE PLAYING (clock-step only drives ticks with `IsRunning()` false). Closes
+    the long-flagged "no clock-START verb" gap. Testctrl-gated (gone in the gig build).
+- **Deferred:** **precise gate length** (record the note-offs the tee already sees — the biggest
+  follow-on); window-seam groove/delay edge (a swung-early downbeat / late last-step dropped at the
+  exact seam; the clean melodic target has no offset); `CaptureMaxK` can over-promise a dense/poly
+  while-playing grab that then refuses −10 cleanly; live-MIDI-in tape; emission coin-flips; ring
+  persistence; the true 1-voice Note-track init. HIL:
   [test_capture_span.py](../../../../tests/apps/seq_v4/test_capture_span.py),
   [test_capture_span_gesture.py](../../../../tests/apps/seq_v4/test_capture_span_gesture.py),
-  [test_clock_step.py](../../../../tests/apps/seq_v4/test_clock_step.py). Full HIL 187/187 green;
-  by-hand/by-ear GO 2026-06-20.
+  [test_capture_while_playing.py](../../../../tests/apps/seq_v4/test_capture_while_playing.py),
+  [test_clock_step.py](../../../../tests/apps/seq_v4/test_clock_step.py). Full HIL **190/190** green;
+  by-hand/by-ear GO 2026-06-20 (stopped re-sim) + while-playing tape GO 2026-06-20.
 
 ### Persistence is versioned at the per-track level
 

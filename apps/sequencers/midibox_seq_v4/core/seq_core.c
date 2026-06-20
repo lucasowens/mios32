@@ -220,6 +220,49 @@ static u8  seq_core_cap_resim_active  = 0;    // 1 while a CAPTURE re-sim drives
                                               // (suppresses ring writes so re-sim doesn't
                                               //  overwrite the very history it reads)
 
+/////////////////////////////////////////////////////////////////////////////
+// Retroactive CAPTURE — while-PLAYING live tape (2026-06-20)
+//
+// When STOPPED the box must re-simulate the unrecorded past (the frame ring +
+// SEQ_CORE_CaptureSpanReSim, above). When PLAYING the notes are sounding RIGHT
+// NOW, so we just record the emitted stream — strictly MORE faithful (it keeps
+// emission coin-flips / live keys / real timing that re-sim can't reproduce) and
+// it never borrows the live engine. This is literally "Capture MIDI."
+//
+// A flat ring of emitted note-ons (absolute SCHEDULED tick) for the recording
+// track, tapped passively off the MIDI-out drain (SEQ_MIDI_OUT's tap tee). Bars
+// are NOT bucketed at tap time — the measure counter advances at PREFETCH time
+// (a few ticks ahead of the drain), so a bar's tail would mis-bucket. Instead
+// each event keeps its true musical tick (item->timestamp) and the per-bar
+// downbeat tick is stamped at the ref_step==0 hook; a grab maps tick->step from
+// those, immune to prefetch skew. The tape rides the SAME bars as the frame ring
+// (shares seq_core_cap_ring_track / _filled), so the thermometer + bar bookkeeping
+// are unified.
+/////////////////////////////////////////////////////////////////////////////
+typedef struct {
+  u32 tick;   // absolute scheduled bpm-tick (item->timestamp at the drain)
+  u8  note;
+  u8  vel;
+} seq_core_cap_tape_evt_t;
+#define SEQ_CORE_CAP_TAPE_EVENTS 768  // ~6 KB main SRAM; 16 bars of mono melodic ~256 notes,
+                                      // so ~3x headroom. Dense/poly overruns -> grab refuses (-10).
+static seq_core_cap_tape_evt_t seq_core_cap_tape[SEQ_CORE_CAP_TAPE_EVENTS]; // main SRAM
+static u16 seq_core_cap_tape_head;    // ring write cursor (next slot)
+static u16 seq_core_cap_tape_count;   // retained events (saturates at EVENTS once wrapped)
+static u32 seq_core_cap_tape_bar_start[SEQ_CORE_CAP_RING_BARS]; // downbeat abs tick per bar slot
+
+
+// Discard the live tape (run-start / track-switch): the recorded notes no longer
+// describe the recording track.
+static void SEQ_CORE_CaptureTapeReset(void)
+{
+  seq_core_cap_tape_head = 0;
+  seq_core_cap_tape_count = 0;
+  // Clear the bar markers too: a grab only reads bar_start[(ctr-k)%BARS] for k < filled,
+  // and filled counts only this-run boundaries, so stale ticks can't be reached today —
+  // but zeroing here removes the latent coupling (defense-in-depth, 68 B).
+  memset(seq_core_cap_tape_bar_start, 0, sizeof(seq_core_cap_tape_bar_start));
+}
 
 // Invalidate the ring (run-start / track-switch): the recorded history no longer
 // describes the live engine.
@@ -228,6 +271,31 @@ static void SEQ_CORE_CaptureRingReset(void)
   seq_core_cap_ring_track = 0xff;
   seq_core_cap_ring_filled = 0;
   seq_core_cap_ring_overflow = 0;
+  SEQ_CORE_CaptureTapeReset();
+}
+
+// Passive tee from the MIDI-out drain (SEQ_MIDI_OUT_Handler), installed once at init
+// and always live. Records the recording track's emitted NOTE-ONS into the live tape
+// while PLAYING. Cheap fast-path guards first; ignored during re-sim drives (those use
+// the redirect sink, not this tee) and when stopped (nothing to record). First cut:
+// note-ons only -> default gate on grab (matches re-sim); note-offs would give precise
+// gate (a fast follow), which is why the tap signature carries them but we filter here.
+static s32 SEQ_CORE_CaptureTapeTap(mios32_midi_port_t port, mios32_midi_package_t p, u32 timestamp)
+{
+  (void)port;
+  if( seq_core_cap_resim_active ) return 0;                 // re-sim uses the redirect sink, not the tee
+  if( seq_core_cap_ring_track >= SEQ_CORE_NUM_TRACKS ) return 0; // no recording track
+  if( !SEQ_BPM_IsRunning() ) return 0;                      // tape only while playing
+  if( p.cable != seq_core_cap_ring_track ) return 0;        // only the recording track (cable carries it)
+  if( p.event != 0x9 || p.velocity == 0 ) return 0;         // note-ons only (first cut)
+  seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[seq_core_cap_tape_head];
+  e->tick = timestamp;
+  e->note = p.evnt1;
+  e->vel  = p.evnt2;
+  seq_core_cap_tape_head = (u16)((seq_core_cap_tape_head + 1) % SEQ_CORE_CAP_TAPE_EVENTS);
+  if( seq_core_cap_tape_count < SEQ_CORE_CAP_TAPE_EVENTS )
+    ++seq_core_cap_tape_count;
+  return 0;
 }
 
 // Append the VISIBLE track's generative frame at a measure boundary. Called once per
@@ -237,7 +305,7 @@ static void SEQ_CORE_CaptureRingReset(void)
 // the following tick). So the frame holds the pre-advance step + the loop going INTO the
 // boundary; the re-sim restores it verbatim and re-drives, reproducing the exact
 // advance+mutate cadence (capture & replay share the convention).
-static void SEQ_CORE_CaptureRingTick(void)
+static void SEQ_CORE_CaptureRingTick(u32 bpm_tick)
 {
   if( seq_core_cap_resim_active ) return; // re-sim drive: don't pollute the ring
   u8 vis = SEQ_UI_VisibleTrackGet();
@@ -246,8 +314,13 @@ static void SEQ_CORE_CaptureRingTick(void)
     seq_core_cap_ring_track = vis;     // follow the visible track; old history is void
     seq_core_cap_ring_filled = 0;
     seq_core_cap_ring_overflow = 0;
+    SEQ_CORE_CaptureTapeReset();       // the recorded notes were the OLD track's
   }
   seq_core_trk_t *t = &seq_core_trk[vis];
+  // Stamp this measure's downbeat tick (the true musical tick passed in, NOT a counter,
+  // so the while-playing tape maps note ticks -> steps without prefetch skew). Shares the
+  // frame ring's per-measure index.
+  seq_core_cap_tape_bar_start[t->robotize_measure_ctr % SEQ_CORE_CAP_RING_BARS] = bpm_tick;
   seq_core_cap_frame_t *f = &seq_core_cap_ring[t->robotize_measure_ctr % SEQ_CORE_CAP_RING_BARS];
   f->traverse_state    = t->random_traverse_state;
   f->robotize_seed     = t->robotize_seed_state; // self-contained: re-sim restores from the frame
@@ -291,7 +364,11 @@ u8 SEQ_CORE_CaptureRingOverflow(void) { return seq_core_cap_ring_overflow; }
 u8 SEQ_CORE_CaptureMaxK(u8 src)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || src != seq_core_cap_ring_track ) return 0;
-  if( seq_core_cap_ring_overflow || seq_core_cap_ring_filled < 2 ) return 0;
+  if( seq_core_cap_ring_filled < 2 ) return 0;
+  // The generative-frame overflow (> SLOTS engaged gens) only blocks the STOPPED
+  // re-sim, which replays the frame. The while-PLAYING tape records the emitted
+  // notes directly and doesn't touch the frame, so it grabs regardless of gen count.
+  if( !SEQ_BPM_IsRunning() && seq_core_cap_ring_overflow ) return 0;
   u8 max_k = seq_core_cap_ring_filled - 1;                 // ring cap (depth-1)
 
   u16 spm = (u16)(seq_cc_trk[src].length + 1);
@@ -439,6 +516,11 @@ s32 SEQ_CORE_Init(u32 mode)
   SEQ_MIDPLY_Init(0);
   SEQ_MIDEXP_Init(0);
   SEQ_MIDIMP_Init(0);
+
+  // Retroactive CAPTURE: install the passive output tee that feeds the while-playing
+  // live tape. Always live (cheap fast-path guards); the re-sim redirect sink is a
+  // separate callback, so the two never conflict.
+  SEQ_MIDI_OUT_Callback_MIDI_Tap_Set(SEQ_CORE_CaptureTapeTap);
 
   // clear registers which are not reset by SEQ_CORE_Reset()
   u8 track;
@@ -1814,6 +1896,29 @@ static void SEQ_CORE_CaptureSpanRestore(u8 src)
   SEQ_CORE_RenderTrack(src);
 }
 
+// Shared destination preparation for BOTH CAPTURE paths (stopped re-sim + while-playing
+// tape): inherit src's full config/geometry, give dst the K-bar length, strip the
+// generative axis AND groove (note positions are already baked into the captured
+// stream, so an inherited groove would double-apply), start dst all-rest. Caller holds
+// MUTEX_MIDIOUT. Keep the two callers' prep identical by routing both through here.
+static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
+                                        u8 par_layers, u8 par_instr,
+                                        u8 trg_layers, u8 trg_instr)
+{
+  SEQ_CC_Set(dst, SEQ_CC_MIDI_EVENT_MODE, SEQ_CC_Get(src, SEQ_CC_MIDI_EVENT_MODE));
+  SEQ_CC_LinkUpdate(dst);
+  SEQ_PAR_TrackInit(dst, dst_steps, par_layers, par_instr);
+  SEQ_TRG_TrackInit(dst, dst_steps, trg_layers, trg_instr);
+  { int i; for(i=0; i<128; ++i) SEQ_CC_Set(dst, i, SEQ_CC_Get(src, i)); SEQ_CC_LinkUpdate(dst); }
+  SEQ_CC_ResetGenerativeForBounce(dst);                // forward playback, strip gen axis
+  SEQ_CC_Set(dst, SEQ_CC_GROOVE_VALUE, 0);
+  SEQ_CC_Set(dst, SEQ_CC_GROOVE_STYLE, 0);
+  SEQ_CC_Set(dst, SEQ_CC_LENGTH, dst_steps - 1);       // K-bar length
+  SEQ_CC_LinkUpdate(dst);
+  memset(seq_par_layer_value[dst], 0, SEQ_PAR_MAX_BYTES); // start as all-rest
+  memset(seq_trg_layer_value[dst], 0, SEQ_TRG_MAX_BYTES);
+}
+
 // Re-simulate the last `k` bars of `src` (the ring's track) into `dst`.
 // Returns 0 on success; negative status on refusal (see CMD_CAPTURE_SPAN).
 s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
@@ -1864,21 +1969,9 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // (a) snapshot live state for a non-destructive borrow
   SEQ_CORE_CaptureSpanSnapshot(src);
 
-  // (b) prepare dst: inherit src config/geometry, K-bar length, start empty
-  SEQ_CC_Set(dst, SEQ_CC_MIDI_EVENT_MODE, SEQ_CC_Get(src, SEQ_CC_MIDI_EVENT_MODE));
-  SEQ_CC_LinkUpdate(dst);
-  SEQ_PAR_TrackInit(dst, dst_steps, par_layers, par_instr);
-  SEQ_TRG_TrackInit(dst, dst_steps, trg_layers, trg_instr);
-  { int i; for(i=0; i<128; ++i) SEQ_CC_Set(dst, i, SEQ_CC_Get(src, i)); SEQ_CC_LinkUpdate(dst); }
-  SEQ_CC_ResetGenerativeForBounce(dst);                // forward playback, strip gen axis
-  // Groove is already BAKED into the emitted (and thus quantized) note positions, so
-  // dst must play STRAIGHT — otherwise its inherited groove double-applies.
-  SEQ_CC_Set(dst, SEQ_CC_GROOVE_VALUE, 0);
-  SEQ_CC_Set(dst, SEQ_CC_GROOVE_STYLE, 0);
-  SEQ_CC_Set(dst, SEQ_CC_LENGTH, dst_steps - 1);       // K-bar length
-  SEQ_CC_LinkUpdate(dst);
-  memset(seq_par_layer_value[dst], 0, SEQ_PAR_MAX_BYTES); // start as all-rest
-  memset(seq_trg_layer_value[dst], 0, SEQ_TRG_MAX_BYTES);
+  // (b) prepare dst: inherit src config/geometry, K-bar length, start empty (shared
+  //     with the while-playing tape path so both stay identical)
+  SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr);
 
   // sink params (read dst links AFTER the CC inherit above)
   seq_cc_trk_t *dtcc = &seq_cc_trk[dst];
@@ -1969,6 +2062,114 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   seq_render_dirty[dst] = 1;
   SEQ_CORE_RenderTrack(dst);
   return 0;
+}
+
+
+// Grab the last `k` bars of `src` (the ring's track) into `dst` from the WHILE-PLAYING
+// live tape — the recording of what actually sounded (not a re-simulation). No engine
+// borrow: we just quantize the taped note-ons in the window to dst's step grid. Same
+// refusal codes as the re-sim path (negative; see CMD_CAPTURE_SPAN), plus -10 = the
+// span scrolled out of the tape ring (too many notes buffered). Runs under
+// MUTEX_MIDIOUT so the tape read + dst write are serialized against the live engine.
+s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS || dst >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( src == dst ) return -2;
+  if( !SEQ_BPM_IsRunning() ) return -3;                // tape path is the running case
+  if( src != SEQ_CORE_CaptureRingTrack() ) return -4;  // ring isn't recording src
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[src];
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator ) return -11; // unquantizable emitted stream (A8 fence)
+
+  // Must be exactly one global measure long (the per-measure bar markers line up only
+  // then). seq_core_steps_per_measure is stored as (steps-1), so +1 for the true count.
+  u8 spm  = (u8)(tcc->length + 1);
+  u8 gspm = (u8)(seq_core_steps_per_measure + 1);
+  if( spm != gspm ) return -8;                          // not a whole (global) measure
+  u16 dst_steps = (u16)k * spm;
+  if( dst_steps == 0 || dst_steps > 256 ) return -7;    // exceeds max track steps
+  if( k < 1 || k >= seq_core_cap_ring_filled ) return -6; // not enough completed bars
+
+  u16 tps = seq_core_trk[src].step_length;
+  if( tps == 0 ) tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
+  if( tps == 0 ) tps = 96;
+
+  // par/trg carry INDEPENDENT instrument counts — guard each axis with its own.
+  u8  par_layers = (u8)SEQ_PAR_NumLayersGet(src);
+  u8  par_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src);
+  u8  trg_layers = (u8)SEQ_TRG_NumLayersGet(src);
+  u8  trg_instr  = (u8)SEQ_TRG_NumInstrumentsGet(src);
+  if( (u32)dst_steps * par_layers * par_instr > SEQ_PAR_MAX_BYTES ) return -9;
+  if( (u32)((dst_steps + 7) / 8) * trg_layers * trg_instr > SEQ_TRG_MAX_BYTES ) return -12;
+
+  MUTEX_MIDIOUT_TAKE;
+
+  // Window [win_start, win_end) in absolute ticks: win_end = the LIVE (in-progress)
+  // bar's downbeat (so we keep only COMPLETED bars), win_start = K bars before that.
+  u32 ctr = seq_core_trk[src].robotize_measure_ctr;
+  u32 win_start = seq_core_cap_tape_bar_start[(ctr - k) % SEQ_CORE_CAP_RING_BARS];
+  u32 win_end   = seq_core_cap_tape_bar_start[ctr % SEQ_CORE_CAP_RING_BARS];
+
+  // Eviction guard: when the tape ring is full, the head slot holds the OLDEST retained
+  // event. If even that is newer than the window start, the span's early notes scrolled
+  // out -> the capture would be incomplete. Refuse (dense/poly overran the tape).
+  if( seq_core_cap_tape_count >= SEQ_CORE_CAP_TAPE_EVENTS ) {
+    u32 oldest_tick = seq_core_cap_tape[seq_core_cap_tape_head].tick;
+    if( (s32)(oldest_tick - win_start) > 0 ) { MUTEX_MIDIOUT_GIVE; return -10; }
+  }
+
+  // prepare dst (shared with the re-sim path)
+  SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr);
+  seq_cc_trk_t *dtcc = &seq_cc_trk[dst];
+  s8 note_layer = dtcc->link_par_layer_note;
+  s8 vel_layer  = dtcc->link_par_layer_velocity;
+  s8 len_layer  = dtcc->link_par_layer_length;
+
+  // Quantize the window's note-ons -> steps. Iterate oldest..newest; collisions on a
+  // step are last-write-wins (melodic-mono target, same as the re-sim sink).
+  // EDGE (first cut, off the by-ear proof span): the taped tick has groove/step/port
+  // delay baked in, so a note swung EARLY past win_start (negative groove) is dropped as
+  // "before window", and one pushed LATE past win_end is dropped as "live bar". The
+  // clean melodic target has no such offset; precise edge handling rides with the
+  // precise-gate refinement (record note-offs).
+  u16 n = seq_core_cap_tape_count;
+  u16 idx = (u16)((seq_core_cap_tape_head + SEQ_CORE_CAP_TAPE_EVENTS - n) % SEQ_CORE_CAP_TAPE_EVENTS);
+  u16 i;
+  for(i=0; i<n; ++i) {
+    seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[idx];
+    idx = (u16)((idx + 1) % SEQ_CORE_CAP_TAPE_EVENTS);
+    if( (s32)(e->tick - win_start) < 0 ) continue;     // before the window
+    if( (s32)(e->tick - win_end) >= 0 ) continue;      // in the live bar (not completed)
+    u16 step = (u16)((e->tick - win_start) / tps);
+    if( step >= dst_steps ) continue;
+    if( note_layer >= 0 ) SEQ_PAR_Set(dst, step, (u8)note_layer, 0, e->note);
+    if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, step, (u8)vel_layer,  0, e->vel);
+    if( len_layer  >= 0 ) SEQ_PAR_Set(dst, step, (u8)len_layer,  0, 71); // ~3/4 gate (first cut)
+    SEQ_TRG_GateSet(dst, step, 0, 1);
+  }
+
+  SEQ_PATTERN_DirtySetTrack(dst); // the capture IS a deliberate change to dst
+
+  // Render dst now so SEQ_PAR_Get(dst) reads the written bytes immediately. Done UNDER
+  // the mutex (unlike re-sim's post-give render) because the live engine renders tracks
+  // under this same mutex — serializing avoids racing the engine's own render of dst.
+  seq_render_touched_ms[dst] = 0;
+  seq_render_dirty[dst] = 1;
+  SEQ_CORE_RenderTrack(dst);
+
+  MUTEX_MIDIOUT_GIVE;
+  return 0;
+}
+
+
+// Dispatcher: while PLAYING grab the live tape (the recorded performance); while STOPPED
+// re-simulate the generative frame (regenerate the unrecorded past). The gesture + the
+// testctrl verb call this so the same "grab last K bars" surface works in both states.
+s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k)
+{
+  if( SEQ_BPM_IsRunning() )
+    return SEQ_CORE_CaptureSpanTape(src, dst, k);
+  return SEQ_CORE_CaptureSpanReSim(src, dst, k);
 }
 
 
@@ -3062,7 +3263,8 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 
       // Retroactive CAPTURE: ring the visible track's generative frame for the
       // measure now starting (shares the robotize index just advanced above).
-      SEQ_CORE_CaptureRingTick();
+      // bpm_tick = this measure's downbeat, stamped for the while-playing tape.
+      SEQ_CORE_CaptureRingTick(bpm_tick);
     }
   }
 

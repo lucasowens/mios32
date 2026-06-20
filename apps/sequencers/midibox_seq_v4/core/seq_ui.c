@@ -669,13 +669,14 @@ static void pull_commit_msg(s32 status, u8 bank, u8 letter, u8 num, u8 section, 
 // Print the result of a retroactive CAPTURE span (ring track -> dst track, the
 // north-star play-then-keep grab). Validates the two UI-level preconditions a
 // terse engine code can't express (no ring / no destination picked) before
-// calling SEQ_CORE_CaptureSpanReSim, then formats the held-overlay status + a
-// transient track popup. Negative engine codes map per CMD_CAPTURE_SPAN.
+// calling SEQ_CORE_CaptureSpan (the dispatcher: PLAYING -> live tape of what
+// sounded, STOPPED -> re-sim of the generative frame), then formats the
+// held-overlay status + a transient track popup. Negative codes map per CMD_CAPTURE_SPAN.
 static void capture_span_msg(u8 src, u8 dst, u8 k)
 {
   if( src >= SEQ_CORE_NUM_TRACKS ) {           // ring empty or invalidated
     SEQ_UI_Msg_Track("no ring");
-    sprintf(capture_status, "no ring: play then STOP");
+    sprintf(capture_status, "no ring: play a track");
     return;
   }
   if( dst >= SEQ_CORE_NUM_TRACKS ) {           // no select-row pick yet
@@ -684,7 +685,7 @@ static void capture_span_msg(u8 src, u8 dst, u8 k)
     return;
   }
 
-  s32 r = SEQ_CORE_CaptureSpanReSim(src, dst, k);
+  s32 r = SEQ_CORE_CaptureSpan(src, dst, k);
   if( r == 0 ) {
     char msg[12];
     sprintf(msg, ">T%d %db", dst + 1, k);
@@ -698,6 +699,7 @@ static void capture_span_msg(u8 src, u8 dst, u8 k)
       case -4:  why = "ring not src";  break;
       case -5:  why = "ring overflow"; break;
       case -6:  why = "too many bars"; break;
+      case -10: why = "tape too dense";break; // span scrolled out of the live tape
       case -7:  why = ">256 steps";    break;
       case -8:  why = "not 1 measure"; break;
       case -9:  why = "dst par full";  break;

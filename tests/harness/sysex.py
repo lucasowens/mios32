@@ -69,7 +69,8 @@ CMD_PHRASE_MORPH = 0x4f  # POSTURE-MORPH (Loop A) — sub-op: 0=arm, 1=set, 2=qu
 CMD_SWITCH_QUANTIZE = 0x4e  # global switch-quantize grid + measured margin — sub-op: 0=get, 1=set
 CMD_RNG_SEED = 0x4d  # per-track-RNG keystone seeds — sub-op: 0=gen get,1=gen set,2=trv get,3=trv set
 CMD_CLOCK_STEP = 0x4b  # CAPTURE: drive N bpm-ticks while stopped (NextStep/traversal/wander)
-CMD_CAPTURE_SPAN = 0x4c  # CAPTURE: re-sim+record last K bars of visible track -> static dst
+CMD_CAPTURE_SPAN = 0x4c  # CAPTURE: grab last K bars of visible track -> static dst (re-sim stopped / tape playing)
+CMD_TRANSPORT = 0x4a  # genuinely start/stop the master transport (play-button path) — while-playing HIL
 
 # CMD_RNG_SEED sub-ops — keep in sync with seq_testctrl.c
 RNG_SEED_GEN_GET = 0x00

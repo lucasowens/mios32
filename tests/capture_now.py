@@ -7,9 +7,16 @@ CAPTURE gesture is built). Run from the tests/ dir with the venv active:
   python capture_now.py setup        # Test A: a fixed FORWARD reference melody on track 1
   python capture_now.py setup-gen    # Test B: a pitch-generator wander on track 1
   python capture_now.py ring         # show the always-on ring (track / depth / overflow)
+  python capture_now.py play         # start the transport (or press PLAY on the device)
+  python capture_now.py stop         # stop the transport
   python capture_now.py grab K DST   # capture the last K bars into track (DST+1)  [0-indexed DST]
 
-Flow: setup -> PLAY on the device a few bars -> STOP -> `grab` -> audition the dst track.
+Two flows now work:
+  STOPPED (re-sim):   setup -> PLAY -> a few bars -> STOP -> grab -> audition dst.
+  WHILE PLAYING (tape): setup -> PLAY -> a few bars -> grab WITHOUT stopping -> audition dst.
+The grab gesture is the same; the firmware records the live tape while playing and
+re-simulates the generative frame while stopped. The tape keeps exactly what sounded
+(emission coin-flips / live keys / real timing); re-sim regenerates the process.
 Track numbers in the commands are 0-indexed (track 1 on the panel = 0 here).
 """
 
@@ -84,6 +91,16 @@ def ring(b: Board) -> None:
           f"(0-idx {tr}) | depth {q['depth']} bars | overflow {q['overflow']}")
 
 
+def play(b: Board) -> None:
+    running = b.transport(start=True)
+    print(f"transport start requested (is_running={running}); let it run, then `grab`.")
+
+
+def stop(b: Board) -> None:
+    b.transport(start=False)
+    print("transport stopped.")
+
+
 def grab(b: Board, k: int, dst: int) -> None:
     q = b.capture_ring_query()
     src = q["track"]
@@ -92,18 +109,19 @@ def grab(b: Board, k: int, dst: int) -> None:
         print("  -> ring not recording any track (play a few bars on a visible track first).")
         return
     if q["depth"] <= k:
-        print(f"  -> only {q['depth']} bars buffered; need > K={k}. Play more bars before STOP.")
+        print(f"  -> only {q['depth']} bars buffered; need > K={k}. Play more bars first.")
     st = b.capture_span(src, k, dst)
     ok = (st == 0x01)
     print(f"capture_span(src={src}, K={k}, dst={dst}) -> {hex(st)}  {'OK' if ok else 'REFUSED'}")
     if ok:
         print(f"  captured into panel track {dst + 1}. Solo/audition it.")
     else:
-        codes = {0x12: "src==dst", 0x13: "transport RUNNING (stop first)",
-                 0x14: "ring not recording src", 0x15: "gen-slot overflow",
+        codes = {0x12: "src==dst", 0x13: "wrong transport state",
+                 0x14: "ring not recording src", 0x15: "gen-slot overflow (re-sim, stopped)",
                  0x16: "not enough history (K too big)", 0x17: "steps>256",
                  0x18: "not a whole measure (length must be 15)",
                  0x19: "dst par overflow (K too large for this track's layout; try K<=4)",
+                 0x1a: "tape too dense (span scrolled out; grab fewer bars)",
                  0x1b: "arp playmode",
                  0x1c: "dst trg overflow (K too large for this track's layout; try K<=4)"}
         print(f"  reason: {codes.get(st, 'unknown')}")
@@ -118,6 +136,10 @@ def main() -> None:
         setup_gen(b)
     elif cmd == "ring":
         ring(b)
+    elif cmd == "play":
+        play(b)
+    elif cmd == "stop":
+        stop(b)
     elif cmd == "grab":
         k = int(sys.argv[2]) if len(sys.argv) > 2 else 1
         dst = int(sys.argv[3]) if len(sys.argv) > 3 else 1

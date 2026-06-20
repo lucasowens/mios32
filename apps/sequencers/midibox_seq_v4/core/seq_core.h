@@ -544,6 +544,14 @@ extern u8 SEQ_CORE_CaptureMaxK(u8 src);
 // seq_testctrl.c for the codes). Non-destructive to the live engine.
 extern s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k);
 
+// While-PLAYING counterpart: quantize the last `k` bars of `src` from the live
+// tape (the recording of what actually sounded) into `dst`. Transport must be
+// RUNNING. Same refusal codes as re-sim, plus -10 = span scrolled out of the tape.
+extern s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k);
+
+// Dispatcher used by the gesture + testctrl: PLAYING -> tape, STOPPED -> re-sim.
+extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k);
+
 // Fork pull verb (RECOMBINE) — load ONE stored track section
 // (src_bank, src_pattern, src_slot_track 0..3) into dst_track, RAM only, a
 // transfusion into the running organism: seq_pattern[] is never touched and

@@ -79,6 +79,11 @@ u32 seq_midi_out_dropouts;
 /////////////////////////////////////////////////////////////////////////////
 
 static s32 (*callback_midi_send_package)(mios32_midi_port_t port, mios32_midi_package_t midi_package);
+// Passive TAP (tee): if installed, called for every drained package AFTER it is sent
+// (with the package's scheduled timestamp) so an observer can record the emitted stream
+// without disturbing live output. Used by retroactive CAPTURE's while-playing live tape.
+// NULL = no tap (default).
+static s32 (*callback_midi_tap)(mios32_midi_port_t port, mios32_midi_package_t midi_package, u32 timestamp);
 static s32 (*callback_bpm_is_running)(void);
 static u32 (*callback_bpm_tick_get)(void);
 static s32 (*callback_bpm_set)(float bpm);
@@ -127,6 +132,7 @@ s32 SEQ_MIDI_OUT_Init(u32 mode)
 {
   // install default callback functions (selected with NULL)
   SEQ_MIDI_OUT_Callback_MIDI_SendPackage_Set(NULL);
+  callback_midi_tap = NULL;
   SEQ_MIDI_OUT_Callback_BPM_IsRunning_Set(NULL);
   SEQ_MIDI_OUT_Callback_BPM_TickGet_Set(NULL);
   SEQ_MIDI_OUT_Callback_BPM_Set_Set(NULL);
@@ -186,6 +192,20 @@ s32 SEQ_MIDI_OUT_Callback_MIDI_SendPackage_Set(void *_callback_midi_send_package
     ? MIOS32_MIDI_SendPackage
     : _callback_midi_send_package;
 
+  return 0; // no error
+}
+
+/////////////////////////////////////////////////////////////////////////////
+//! Installs a passive TAP (tee) on the output drain. If non-NULL, the function
+//! is called for every drained package AFTER it has been sent to the real
+//! output, with the package's scheduled timestamp — so an observer can record
+//! the live emitted stream without redirecting it (unlike the send-package
+//! callback above, which REPLACES the output). NULL removes the tap.
+//! \return < 0 on errors
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_MIDI_OUT_Callback_MIDI_Tap_Set(void *_callback_midi_tap)
+{
+  callback_midi_tap = _callback_midi_tap; // NULL = no tap
   return 0; // no error
 }
 
@@ -627,6 +647,11 @@ s32 SEQ_MIDI_OUT_Handler(void)
       callback_bpm_set(item->package.ALL);
     } else {
       callback_midi_send_package(item->port, item->package);
+      // passive tee: let an observer record the emitted package + its scheduled
+      // tick (CAPTURE's while-playing live tape). After the real send, so it never
+      // gates output. item->timestamp is the true musical tick (groove/delay baked).
+      if( callback_midi_tap != NULL )
+        callback_midi_tap(item->port, item->package, item->timestamp);
     }
 
     // schedule Off event if requested

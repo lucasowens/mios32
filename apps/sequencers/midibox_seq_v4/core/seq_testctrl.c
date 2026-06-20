@@ -122,6 +122,11 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 // CAPTURE_SPAN: re-simulate + record the last K bars of the visible track into a static
 //   dst track. payload [src_track, K(1..16), dst_track] -> reply [src, dst, status].
 #define CMD_CAPTURE_SPAN         0x4c
+// TRANSPORT: genuinely start/stop the master transport (the real play button path) so
+//   HIL can drive the engine WHILE PLAYING — needed for the while-playing CAPTURE tape
+//   (CLOCK_STEP only drives ticks while stopped, IsRunning() stays false). Fills 0x4a.
+//   payload [action: 0=start, 1=stop] -> reply [action, is_running].
+#define CMD_TRANSPORT            0x4a
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1848,12 +1853,34 @@ static void cmd_clock_step(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// CMD_TRANSPORT — genuinely start/stop the master transport (the real play-button path),
+// so HIL can run the engine WHILE PLAYING (the while-playing CAPTURE tape needs an actually
+// running transport; CLOCK_STEP drives ticks with IsRunning() false). Start mirrors the UI
+// play button: SEQ_BPM_CheckAutoMaster() then SEQ_BPM_Start(). The request is consumed by
+// SEQ_CORE_Handler on the next TASK_MIDI service, so the harness should poll IsRunning /
+// wait real time for bars to elapse. payload [action: 0=start, 1=stop] -> [action, running].
+static void cmd_transport(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 action = (len >= 1) ? (payload[0] & 0x7f) : 0xff;
+  if( action == 0x00 ) {
+    SEQ_BPM_CheckAutoMaster();
+    SEQ_BPM_Start();
+  } else if( action == 0x01 ) {
+    SEQ_BPM_Stop();
+  }
+  u8 reply[2] = { action, (u8)(SEQ_BPM_IsRunning() ? 1 : 0) };
+  send_reply(port, CMD_TRANSPORT, reply, sizeof(reply));
+}
+
+
 // CMD_CAPTURE_SPAN — retroactive CAPTURE. sub-op:
 //   0 = CAPTURE  [0, src, k, dst]  -> [src, dst, status]
-//         status: 0x01 ok; else 0x10|(-r) for SEQ_CORE_CaptureSpanReSim refusal
-//         (-1 args, -2 src==dst, -3 running, -4 wrong-track, -5 overflow,
-//          -6 history, -7 steps>256, -8 not-whole-measure, -9 par-overflow).
-//   1 = RING QUERY [1]            -> [ring_track, ring_depth, ring_overflow]
+//         status: 0x01 ok; else 0x10|(-r) for the SEQ_CORE_CaptureSpan dispatcher's
+//         refusal — STOPPED re-sims the frame, PLAYING grabs the live tape:
+//         (-1 args, -2 src==dst, -3 wrong-state, -4 wrong-track, -5 frame-overflow,
+//          -6 history, -7 steps>256, -8 not-whole-measure, -9 par-overflow,
+//          -10 tape-scrolled-out, -11 arp, -12 trg-overflow).
+//   1 = RING QUERY [1]            -> [ring_track, ring_depth, ring_overflow, max_k]
 static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
 {
   u8 subop = (len >= 1) ? payload[0] : 0xff;
@@ -1863,7 +1890,7 @@ static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
       u8 src = payload[1] & 0x0f;
       u8 k   = payload[2] & 0x7f;
       u8 dst = payload[3] & 0x0f;
-      s32 r = SEQ_CORE_CaptureSpanReSim(src, dst, k);
+      s32 r = SEQ_CORE_CaptureSpan(src, dst, k);
       u8 reply[3] = { src, dst, (u8)((r == 0) ? 0x01 : (0x10 | ((-r) & 0x0f))) };
       send_reply(port, CMD_CAPTURE_SPAN, reply, sizeof(reply));
     } break;
@@ -2544,6 +2571,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_CAPTURE_SPAN:
             cmd_capture_span(port, payload_buf, payload_len);
+            break;
+          case CMD_TRANSPORT:
+            cmd_transport(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface
