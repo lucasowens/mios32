@@ -126,7 +126,17 @@ typedef struct {
   u8 par_layer;      // target Note par-layer this gen writes into. Drum track:
                      //   the shared link_par_layer_note. Normal track: the
                      //   cursor's Note layer at ENGAGE (cursor-aware target).
-  u8 reserved[1];    // pad — keep header 12B aligned to follow the loop
+  u8 reserved[1];    // pad — keep the header 4B-aligned ahead of the u32 seed
+  u32 seed;          // per-slot xorshift32 stream state (per-track-RNG keystone,
+                     //   2026-06-19). Minted fresh from the global RNG at ENGAGE
+                     //   (preserves today's fresh-line feel) and advanced by every
+                     //   reroll / perturb / rate-gate draw, so this slot's wander
+                     //   is a self-contained DETERMINISTIC, SEEKABLE stream:
+                     //   re-simulatable from a captured seed value, independent of
+                     //   pool iteration / alloc order (the per-slot grain is what
+                     //   makes that order-independence hold — see design §9). NOT
+                     //   yet persisted to the bank file (RAM-only this build; the
+                     //   K-bar snapshot ring + format bump are the CAPTURE bundle).
   u8 loop[SEQ_GENERATOR_LOOP_LEN];        // Turing loop array — pitch per step
   u8 locks[SEQ_GENERATOR_LOCKS_BYTES];    // bitmap; bit set => step locked
   u8 anchor[SEQ_GENERATOR_LOOP_LEN];      // phase H — frozen identity (SNAP target)

@@ -57,6 +57,7 @@ How a sequencer event reaches the wire, and where timing accuracy is won and los
 - Randomness used in playback must be **reproducible** given a recorded seed. Robotize uses a per-track xorshift32 with explicit `state` ([seq_random.c:70](../core/seq_random.c#L70)), not the shared `jsw_rand`.
 - State of 0 is reserved as "uninitialized"; the code substitutes `0xdeadbabe` ([seq_random.c:75](../core/seq_random.c#L75)) so an uninitialized track still produces a deterministic stream.
 - Robotize bar anchors store one PRNG state per bar of the loop, so retroactive "freeze" works.
+- **Per-track-RNG keystone (first cut, 2026-06-19)** extended this beyond robotize: **generators** carry a per-pool-slot `u32 seed` ([seq_generator.h](../core/seq_generator.h), in `seq_generator_t`), minted fresh from the global RNG at ENGAGE then advanced by every reroll/perturb/rate-gate draw via `SEQ_RANDOM_GenRangeXorshift`; **random traversal** (Random_Dir/Step/D_S) draws from `seq_core_trk_t.random_traverse_state` ([seq_core.h](../core/seq_core.h)), minted at run-start in `SEQ_CORE_Reset`, save/restored around `SEQ_CORE_Scrub`'s out-of-band `NextStep`. Per-**slot** (not per-track) for generators so draw order is independent of pool alloc order. **Still on the global RNG (deliberately deferred to CAPTURE):** the emission-time coin-flips — step-probability ([seq_core.c](../core/seq_core.c) normal + drum + [seq_layer.c:411](../core/seq_layer.c#L411)), random-gate, humanize ([seq_humanize.c](../core/seq_humanize.c)), echo. Seeds are RAM-only (no bank-format bump yet); `SEQ_GENERATOR_SlotSet` re-mints a zero (file-loaded) seed to avoid `0xdeadbabe` aliasing. Determinism HIL: [tests/apps/seq_v4/test_rng_determinism.py](../../../../tests/apps/seq_v4/test_rng_determinism.py); seed get/set via testctrl `CMD_RNG_SEED` 0x4d.
 
 ### Persistence is versioned at the per-track level
 
@@ -182,10 +183,13 @@ Render-stack harmony processor (design doc §8 second build, shipped 2026-06-10)
   `chord_mask_snap`. `SEQ_CORE_TensionBandMask(gravity, bus, *zone)` builds the ladder→
   zone band (public — HIL pins it). Dispatched in BOTH render switches + the per-tick
   implicit-dirty loop, beside chord-mask.
-- **Grip gate:** `tension_grip_hash(track, instr, step, zone)` — local xorshift32 mix,
-  `% 127`. Keyed on `zone` only when `gravity > 0` (push variety); pull collapses all
-  zones to class 0 (monotone — deeper pull only ADDS gripped voices). Threshold =
-  `(|gravity| × GRIP) >> 6`.
+- **Grip gate:** `grip_hash(track, instr, step, zone)` — local xorshift32 mix,
+  `% 127` (renamed from `tension_grip_hash` 2026-06-19; now **shared with CHORD_MASK**,
+  which uses zone `GRIP_ZONE_CHORD_MASK` 0x20, disjoint from TENSION's `{0,4,5,6}`).
+  Keyed on `zone` only when `gravity > 0` (push variety); pull collapses all zones to
+  class 0 (monotone — deeper pull only ADDS gripped voices). Threshold =
+  `(|gravity| × GRIP) >> 6`. **The TENSION HIL suite pins `grip_hash`'s determinism;
+  CHORD_MASK's determinism rides on the same code path** (a refactor here touches both).
 - **State:** `seq_core_tension_gravity` (s8 global, −64..+63; config-persisted, NOT
   pattern). `SEQ_CORE_TensionGravitySet` clamps + touches field tracks (live sweep).
   GRIP = `SEQ_CC_TENSION_GRIP` 0x9a per-track → `SEQ_CORE_TensionSlotSync` arms the

@@ -139,6 +139,7 @@ typedef struct seq_core_trk_t {
   u32                  robotize_measure_ctr; // monotonic per-track musical-measure counter; increments on each global measure boundary (ref_step==0). Independent of track length, so polymetric/polyrhythmic tracks share the same robotize clock.
   u8                   robotize_loop_phase;  // measures since last anchor restore; wraps to 0 when >= tcc->robotize_loop_cycles
   u8                   robotize_pending_resync; // 1 = on next measure boundary, restore state=bar_anchors[0] and zero phase (quantized freeze OR master-sync)
+  u32                  random_traverse_state; // per-track-RNG keystone (2026-06-19): xorshift32 stream for random traversal (Random_Dir / Random_Step / Random_D_S in SEQ_CORE_NextStep). One stream per track (t->step is the single accumulator). Minted fresh from the global RNG at run-start (SEQ_CORE_Reset) so the walk differs run-to-run yet is deterministic + seekable WITHIN a run (the re-sim window). Main SRAM (the struct has no CCM_SECTION).
 } seq_core_trk_t;
 
 

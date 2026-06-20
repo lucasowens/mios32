@@ -92,7 +92,12 @@ static void normalize_range(u8 *lo, u8 *hi)
 // Pick a fresh pitch in [lo..hi] biased by contour shape. UNIFORM is the
 // existing phase E behavior. Bias shapes draw two uniforms and combine them
 // to cheaply approximate the target distribution without trig or tables.
-static u8 reroll_pitch(u8 lo, u8 hi, u8 contour)
+// Per-track-RNG keystone (2026-06-19): draws from the caller-owned xorshift
+// stream `*seed` (the slot's own seed) instead of the global RNG, so the
+// wander is deterministic + seekable. GenRangeXorshift shares Gen_Range's
+// min==max zero-advance short-circuit, so the draw COUNT is identical to the
+// legacy code — a degenerate (span==1) range advances the stream zero times.
+static u8 reroll_pitch(u32 *seed, u8 lo, u8 hi, u8 contour)
 {
   normalize_range(&lo, &hi);
   u32 span = (u32)(hi - lo) + 1;  // ≥1
@@ -100,26 +105,26 @@ static u8 reroll_pitch(u8 lo, u8 hi, u8 contour)
   switch( contour ) {
     case SEQ_GENERATOR_CONTOUR_LOW_BIAS: {
       // min of two uniforms ⇒ density falls toward hi — concentrates near lo.
-      u32 a = SEQ_RANDOM_Gen_Range(0, span - 1);
-      u32 b = SEQ_RANDOM_Gen_Range(0, span - 1);
+      u32 a = SEQ_RANDOM_GenRangeXorshift(seed, 0, span - 1);
+      u32 b = SEQ_RANDOM_GenRangeXorshift(seed, 0, span - 1);
       return (u8)(lo + (a < b ? a : b));
     }
     case SEQ_GENERATOR_CONTOUR_HIGH_BIAS: {
-      u32 a = SEQ_RANDOM_Gen_Range(0, span - 1);
-      u32 b = SEQ_RANDOM_Gen_Range(0, span - 1);
+      u32 a = SEQ_RANDOM_GenRangeXorshift(seed, 0, span - 1);
+      u32 b = SEQ_RANDOM_GenRangeXorshift(seed, 0, span - 1);
       return (u8)(lo + (a > b ? a : b));
     }
     case SEQ_GENERATOR_CONTOUR_TRIANGLE: {
       // sum of two uniforms over half-span ⇒ triangular, peak at mid-range.
       u32 half = (span + 1) / 2;
-      u32 a = SEQ_RANDOM_Gen_Range(0, half - 1);
-      u32 b = SEQ_RANDOM_Gen_Range(0, half - 1);
+      u32 a = SEQ_RANDOM_GenRangeXorshift(seed, 0, half - 1);
+      u32 b = SEQ_RANDOM_GenRangeXorshift(seed, 0, half - 1);
       u32 v = a + b;
       if( v >= span ) v = span - 1;
       return (u8)(lo + v);
     }
     default: // SEQ_GENERATOR_CONTOUR_UNIFORM
-      return (u8)SEQ_RANDOM_Gen_Range(lo, hi);
+      return (u8)SEQ_RANDOM_GenRangeXorshift(seed, lo, hi);
   }
 }
 
@@ -127,15 +132,15 @@ static u8 reroll_pitch(u8 lo, u8 hi, u8 contour)
 // Perturb an existing value by ±depth semitones, clamped to [lo..hi].
 // depth==0 returns existing unchanged; the caller is responsible for not
 // calling perturb_pitch when depth==0 (early-out keeps the hot path clean).
-static u8 perturb_pitch(u8 existing, u8 lo, u8 hi, u8 depth)
+static u8 perturb_pitch(u32 *seed, u8 existing, u8 lo, u8 hi, u8 depth)
 {
   normalize_range(&lo, &hi);
   if( existing < lo ) existing = lo;
   if( existing > hi ) existing = hi;
 
-  // Symmetric ±depth window; SEQ_RANDOM_Gen_Range with 2*depth+1 buckets.
+  // Symmetric ±depth window; 2*depth+1 buckets from the slot's xorshift stream.
   u32 d = depth;
-  u32 bucket = SEQ_RANDOM_Gen_Range(0, 2*d);
+  u32 bucket = SEQ_RANDOM_GenRangeXorshift(seed, 0, 2*d);
   s32 delta = (s32)bucket - (s32)d;
   s32 v = (s32)existing + delta;
   if( v < (s32)lo ) v = lo;
@@ -181,20 +186,23 @@ static void mutate_loop(seq_generator_t *g)
     if( SEQ_GENERATOR_LockGet(g, i) )
       continue; // §G LOCK — preserved verbatim
 
-    // SEQ_RANDOM_Gen_Range(0, 254) gives a uniform u8 in [0,254]; the
-    // threshold is rate*2 scaled by the per-step MULT code (phase H).
+    // A uniform u8 in [0,254] from the slot's own xorshift stream; the
+    // threshold is rate*2 scaled by the per-step MULT code (phase H). The gate
+    // and the reroll/perturb value draw MUST share g->seed: the per-step
+    // interleave (gate-i → maybe value-i → gate-(i+1)) is one ordered stream,
+    // so splitting the gate onto a separate source would desync re-sim.
     u32 threshold = mult_threshold(g->mutation_rate, SEQ_GENERATOR_MultGet(g, i));
     if( threshold == 0 )
       continue; // MULT_MUTE — step frozen in the rate-gated path
 
-    u32 r = SEQ_RANDOM_Gen_Range(0, 254);
+    u32 r = SEQ_RANDOM_GenRangeXorshift(&g->seed, 0, 254);
     if( r >= threshold )
       continue;
 
     if( g->mutation_depth >= 127 ) {
-      g->loop[i] = reroll_pitch(g->range_min, g->range_max, g->contour_shape);
+      g->loop[i] = reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
     } else {
-      g->loop[i] = perturb_pitch(g->loop[i], g->range_min, g->range_max,
+      g->loop[i] = perturb_pitch(&g->seed, g->loop[i], g->range_min, g->range_max,
                                  g->mutation_depth);
     }
   }
@@ -211,7 +219,7 @@ static void roll_loop(seq_generator_t *g)
   for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i) {
     if( SEQ_GENERATOR_LockGet(g, i) )
       continue;
-    g->loop[i] = reroll_pitch(g->range_min, g->range_max, g->contour_shape);
+    g->loop[i] = reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
   }
 }
 
@@ -261,7 +269,7 @@ static void seed_loop(seq_generator_t *g)
 {
   u8 i;
   for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i)
-    g->loop[i] = reroll_pitch(g->range_min, g->range_max, g->contour_shape);
+    g->loop[i] = reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
 }
 
 
@@ -361,6 +369,13 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   g->contour_shape  = SEQ_GENERATOR_DEFAULT_CONTOUR;
   g->engaged        = 1;
   g->in_use         = 1;
+  // Per-track-RNG keystone (2026-06-19): mint this slot's xorshift seed fresh
+  // from the global RNG so each ENGAGE still produces a fresh Turing line (no
+  // feel regression vs the old global-RNG seed_loop), then let the slot's own
+  // stream carry the wander deterministically + seekably. |1 forces non-zero —
+  // a 0 state self-substitutes 0xdeadbabe and would alias every un-minted slot
+  // onto one identical stream (the load path guards the same way in SlotSet).
+  g->seed = SEQ_RANDOM_Gen(0) | 1;
   // alloc_slot returned a memset-clean slot, so locks[] is already 0; no
   // explicit clear needed (slots are also memset-cleared at free).
   seed_loop(g);
@@ -497,6 +512,13 @@ s32 SEQ_GENERATOR_SlotSet(u8 track, u8 instrument, const seq_generator_t *src)
   g->track      = track;
   g->instrument = instrument;
   g->par_layer  = par_layer;
+  // Per-track-RNG keystone: a slot loaded from a bank file carries seed==0 (the
+  // on-disk format predates the seed field), which would alias every loaded
+  // generator onto the single 0xdeadbabe stream. Mint a fresh non-zero seed in
+  // that case. A slot restored from a live RAM snapshot (track undo / capture
+  // trample) already carries a real non-zero seed, so its wander resumes exactly.
+  if( !g->seed )
+    g->seed = SEQ_RANDOM_Gen(0) | 1;
   return 0;
 }
 

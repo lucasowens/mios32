@@ -409,6 +409,14 @@ void SEQ_CORE_RenderDirtySetAll(void)
   }
 }
 
+// Shared deterministic decision hash (defined further down beside TENSION).
+// chord_mask sits above it in the file, so forward-declare it here.
+static u8 grip_hash(u8 track, u8 instr, u16 step, u8 zone);
+// grip_hash zone for CHORD_MASK — distinct from TENSION's zones (0..6, with
+// pull collapsing to 0) so the two processors' gates decorrelate when both
+// run on the same (track, instr, step).
+#define GRIP_ZONE_CHORD_MASK  0x20
+
 // Snap `note` to the nearest semitone whose pitch-class is set in `pc_mask`,
 // searching outward from d=0; on a tie (down and up both in mask at the same
 // distance) the lower side wins because it is checked first. Returns `note`
@@ -467,7 +475,7 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
         u8 note = base[step];
         if( !note )
           continue;
-        if( (u32)SEQ_RANDOM_Gen_Range(0, 126) < p->strength )
+        if( grip_hash(track, drum, step, GRIP_ZONE_CHORD_MASK) < p->strength )
           base[step] = chord_mask_snap(note, pc_mask);
       }
     }
@@ -482,7 +490,7 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
         u8 note = base[step];
         if( !note )
           continue;
-        if( (u32)SEQ_RANDOM_Gen_Range(0, 126) < p->strength )
+        if( grip_hash(track, par_layer, step, GRIP_ZONE_CHORD_MASK) < p->strength )
           base[step] = chord_mask_snap(note, pc_mask);
       }
     }
@@ -734,12 +742,19 @@ static inline u16 tension_rot12_dn(u16 m, u8 n) {
   n %= 12; return (u16)(((m >> n) | (m << (12 - n))) & 0x0FFF);
 }
 
-// Deterministic per-note grip decision source (§2.3): a pure function of
+// Deterministic per-note decision source (§2.3): a pure function of
 // (track, instrument, step, zone) — same knob position ⇒ same gripped set on
 // every render, so states are returnable and bounce is faithful with no bake.
 // Integer key-mix + one xorshift32 step (the seq_random.c GenXorshift body);
-// returns 0..126 to match chord_mask's SEQ_RANDOM_Gen_Range(0,126) bucketing.
-static u8 tension_grip_hash(u8 track, u8 instr, u16 step, u8 zone) {
+// returns 0..126 to match the legacy SEQ_RANDOM_Gen_Range(0,126) bucketing.
+// SHARED by TENSION (grip) and CHORD_MASK — the per-track-RNG keystone moved
+// chord_mask off the global RNG onto this same hash so its gripped subset is
+// stable per (track,step) instead of re-rolled (and flickering) every render,
+// and so a captured span re-renders byte-identically (no global-RNG state).
+// The `zone` axis decorrelates the two processors' gates on a shared
+// (track,instr,step): TENSION uses 0..6 (pull collapses to 0), CHORD_MASK uses
+// GRIP_ZONE_CHORD_MASK below.
+static u8 grip_hash(u8 track, u8 instr, u16 step, u8 zone) {
   u32 h = (u32)track * 2654435761u
         + (u32)instr * 40503u
         + (u32)step  * 2246822519u
@@ -872,7 +887,7 @@ static void tension_render_range(u8 track, const seq_processor_slot_t *p,
         u8 note = base[step];
         if( !note )
           continue;
-        if( tension_grip_hash(track, drum, step, hash_zone) < thr )
+        if( grip_hash(track, drum, step, hash_zone) < thr )
           base[step] = chord_mask_snap(note, band);
       }
     }
@@ -887,7 +902,7 @@ static void tension_render_range(u8 track, const seq_processor_slot_t *p,
         u8 note = base[step];
         if( !note )
           continue;
-        if( tension_grip_hash(track, par_layer, step, hash_zone) < thr )
+        if( grip_hash(track, par_layer, step, hash_zone) < thr )
           base[step] = chord_mask_snap(note, band);
       }
     }
@@ -2445,6 +2460,11 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
     }
     t->robotize_seed_snapshots[0] = t->robotize_seed_state; // seed measure-0 snapshot
 
+    // per-track-RNG keystone: mint the random-traversal stream fresh from the
+    // global RNG at run-start (|1 forces non-zero). Differs run-to-run (today's
+    // feel) yet is deterministic + seekable within the run — the re-sim window.
+    t->random_traverse_state = SEQ_RANDOM_Gen(0) | 1;
+
     // add track offset depending on start position
     if( bpm_start ) {
 #if 0
@@ -3750,13 +3770,24 @@ static s32 SEQ_CORE_NextStep(seq_core_trk_t *t, seq_cc_trk_t *tcc, u8 no_progres
 	// nothing else to do...
 	break;
 
+      // Per-track-RNG keystone (2026-06-19): the random traversal modes draw
+      // from the track's OWN xorshift stream (t->random_traverse_state) instead
+      // of the global RNG, so a span's step trajectory is deterministic +
+      // seekable (re-simulatable from a captured seed) and decoupled from every
+      // other track's generative draws. This is a behaviour-preserving swap:
+      // the same decision masks read raw GenXorshift bits in the same order, and
+      // GenRangeXorshift keeps Gen_Range's loop==length zero-advance short-circuit
+      // so the draw count is unchanged. (NB the Random_D_S inner `rnd < 0x40`
+      // dir-flip test compares the FULL word, not `rnd & 0xff` — a pre-existing
+      // quirk that makes the dir-flip branch rarely fire; preserved verbatim, the
+      // commented 50/25/25 split is the original's intent, not its real behaviour.)
       case SEQ_CORE_TRKDIR_Random_Dir:
 	// set forward/backward direction with 1:1 probability
-	t->state.BACKWARD = SEQ_RANDOM_Gen(0) & 1;
+	t->state.BACKWARD = SEQ_RANDOM_GenXorshift(&t->random_traverse_state) & 1;
         break;
 
       case SEQ_CORE_TRKDIR_Random_Step:
-	t->step = SEQ_RANDOM_Gen_Range(tcc->loop, tcc->length);
+	t->step = SEQ_RANDOM_GenRangeXorshift(&t->random_traverse_state, tcc->loop, tcc->length);
 	new_step = 0; // no new step calculation required anymore
         break;
 
@@ -3766,12 +3797,12 @@ static s32 SEQ_CORE_NextStep(seq_core_trk_t *t, seq_cc_trk_t *tcc, u8 no_progres
 	  // we change the direction with a probability of 25%
 	  // we jump to a new step with a probability of 25%
 	  u32 rnd;
-	  if( ((rnd=SEQ_RANDOM_Gen(0)) & 0xff) < 0x80 ) {
+	  if( ((rnd=SEQ_RANDOM_GenXorshift(&t->random_traverse_state)) & 0xff) < 0x80 ) {
 	    if( rnd < 0x40 ) {
 	      // set forward/backward direction with 1:1 probability
-	      t->state.BACKWARD = SEQ_RANDOM_Gen(0) & 1;
+	      t->state.BACKWARD = SEQ_RANDOM_GenXorshift(&t->random_traverse_state) & 1;
 	    } else {
-	      t->step = SEQ_RANDOM_Gen_Range(tcc->loop, tcc->length);
+	      t->step = SEQ_RANDOM_GenRangeXorshift(&t->random_traverse_state, tcc->loop, tcc->length);
 	      new_step = 0; // no new step calculation required anymore
 	    }
 	  }
@@ -4526,7 +4557,13 @@ s32 SEQ_CORE_Scrub(s32 incrementer)
   seq_core_trk_t *t = &seq_core_trk[0];
   seq_cc_trk_t *tcc = &seq_cc_trk[0];
   for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track, ++t, ++tcc) {
+    // SCRUB is a manual nudge, NOT part of the deterministic playback timeline.
+    // For a random-traversal track, NextStep draws from random_traverse_state;
+    // save/restore it around the scrub so the manual gesture cannot advance (and
+    // thus desync) the re-simulatable playback stream (per-track-RNG keystone).
+    u32 saved_traverse = t->random_traverse_state;
     SEQ_CORE_NextStep(t, tcc, 0, incrementer >= 0 ? 0 : 1);
+    t->random_traverse_state = saved_traverse;
   }
 
 #if 0

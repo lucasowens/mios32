@@ -21,8 +21,7 @@ musical instrument. One-man project, no timelines, iterative.
 
 - POC code is disposable; nothing must stay backward-compatible.
 - Prove musical ideas **live, by ear, before** building the infrastructure that makes
-  them performant. The §8 build order is music-first on purpose — do not reorder it
-  to put infrastructure (the render-cache) first.
+  them performant. To the degree it makes sense to the user for the particular feature set.
 - Constraints are *materials*, not guardrails: every processor dial must sweep 0→max
   including a true pass-through at 0 (bipolar dials: pass-through at the center
   detent).

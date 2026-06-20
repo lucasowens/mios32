@@ -104,6 +104,15 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 // SWITCH-QUANTIZE — global switch-quantize grid + measured I/O margin (feature B).
 // sub-op: 0=GET [grid, measured_ms, status], 1=SET grid (also drives SYNCHED).
 #define CMD_SWITCH_QUANTIZE      0x4e
+// PER-TRACK-RNG keystone — get/set the per-stream xorshift seeds for determinism
+// pins (same-seed -> same-output; re-sim reproducibility). sub-op:
+//   0=GEN GET  [track,instr]            -> [track,instr,status, s0..s4]
+//   1=GEN SET  [track,instr, s0..s4]    -> [track,instr,status]
+//   2=TRV GET  [track]                  -> [track,status, s0..s4]
+//   3=TRV SET  [track, s0..s4]          -> [track,status]
+// Seed u32 is little-endian 5x7-bit (s0=bits0..6 .. s4=bits28..31). Fills the
+// low gap at 0x4d (below the 0x4e/0x4f morph/quantize pair).
+#define CMD_RNG_SEED             0x4d
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1717,6 +1726,72 @@ static void cmd_switch_quantize(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// PER-TRACK-RNG keystone determinism hook: read/write the per-stream xorshift
+// seeds so HIL can prove same-seed -> same-output and re-sim reproducibility.
+// Generator seeds live per pool slot (SEQ_GENERATOR_Get); the traversal seed
+// lives per track (seq_core_trk[].random_traverse_state).
+static void cmd_rng_seed(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  if( len < 1 ) {
+    u8 reply[2] = { 0x00, 0x02 }; // malformed
+    send_reply(port, CMD_RNG_SEED, reply, sizeof(reply));
+    return;
+  }
+
+  switch( payload[0] ) {
+    case 0x00: { // GEN GET [track, instr]
+      if( len < 3 ) { u8 r[3] = {0,0,0x02}; send_reply(port, CMD_RNG_SEED, r, 3); return; }
+      u8 track = payload[1], instr = payload[2];
+      seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+      if( g == NULL ) { u8 r[3] = {track, instr, 0x03}; send_reply(port, CMD_RNG_SEED, r, 3); return; }
+      u32 s = g->seed;
+      u8 r[8] = { track, instr, 0x01,
+                  (u8)(s & 0x7f), (u8)((s>>7) & 0x7f), (u8)((s>>14) & 0x7f),
+                  (u8)((s>>21) & 0x7f), (u8)((s>>28) & 0x0f) };
+      send_reply(port, CMD_RNG_SEED, r, sizeof(r));
+    } break;
+
+    case 0x01: { // GEN SET [track, instr, s0..s4]
+      if( len < 8 ) { u8 r[3] = {0,0,0x02}; send_reply(port, CMD_RNG_SEED, r, 3); return; }
+      u8 track = payload[1], instr = payload[2];
+      seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+      if( g == NULL ) { u8 r[3] = {track, instr, 0x03}; send_reply(port, CMD_RNG_SEED, r, 3); return; }
+      g->seed = (u32)payload[3] | ((u32)payload[4]<<7) | ((u32)payload[5]<<14)
+              | ((u32)payload[6]<<21) | ((u32)payload[7]<<28);
+      u8 r[3] = { track, instr, 0x01 };
+      send_reply(port, CMD_RNG_SEED, r, sizeof(r));
+    } break;
+
+    case 0x02: { // TRV GET [track]
+      if( len < 2 ) { u8 r[2] = {0,0x02}; send_reply(port, CMD_RNG_SEED, r, 2); return; }
+      u8 track = payload[1];
+      if( track >= SEQ_CORE_NUM_TRACKS ) { u8 r[2] = {track, 0x02}; send_reply(port, CMD_RNG_SEED, r, 2); return; }
+      u32 s = seq_core_trk[track].random_traverse_state;
+      u8 r[7] = { track, 0x01,
+                  (u8)(s & 0x7f), (u8)((s>>7) & 0x7f), (u8)((s>>14) & 0x7f),
+                  (u8)((s>>21) & 0x7f), (u8)((s>>28) & 0x0f) };
+      send_reply(port, CMD_RNG_SEED, r, sizeof(r));
+    } break;
+
+    case 0x03: { // TRV SET [track, s0..s4]
+      if( len < 7 ) { u8 r[2] = {0,0x02}; send_reply(port, CMD_RNG_SEED, r, 2); return; }
+      u8 track = payload[1];
+      if( track >= SEQ_CORE_NUM_TRACKS ) { u8 r[2] = {track, 0x02}; send_reply(port, CMD_RNG_SEED, r, 2); return; }
+      seq_core_trk[track].random_traverse_state =
+          (u32)payload[2] | ((u32)payload[3]<<7) | ((u32)payload[4]<<14)
+        | ((u32)payload[5]<<21) | ((u32)payload[6]<<28);
+      u8 r[2] = { track, 0x01 };
+      send_reply(port, CMD_RNG_SEED, r, sizeof(r));
+    } break;
+
+    default: {
+      u8 reply[2] = { 0x00, 0x02 }; // unknown sub-op
+      send_reply(port, CMD_RNG_SEED, reply, sizeof(reply));
+    } break;
+  }
+}
+
+
 static void cmd_phrase_morph(mios32_midi_port_t port, u8 *payload, u32 len)
 {
   if( len < 1 ) {
@@ -2367,6 +2442,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_SWITCH_QUANTIZE:
             cmd_switch_quantize(port, payload_buf, payload_len);
+            break;
+          case CMD_RNG_SEED:
+            cmd_rng_seed(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

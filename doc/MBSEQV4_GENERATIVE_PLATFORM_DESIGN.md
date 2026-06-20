@@ -2552,7 +2552,13 @@ is cheap; capture mints a new clip.)
   seeding, generator firing order, polymetric bar alignment — flagged unknowns); the live-MIDI-in
   tap point + event timing/quantize-or-loose; RAM (seed-ring cheap ~bytes/bar; recorded-input
   thin; output-record only as a bounded fallback). **This is the keystone build** — it unlocks
-  self-mod bounce, robotize freeze-to-static, and live capture in one stroke.
+  self-mod bounce, robotize freeze-to-static, and live capture in one stroke. **→ FIRST CUT SHIPPED
+  2026-06-19** (generators + chord_mask + random traversal moved to per-stream seeds/hash; streams
+  now seekable + forward-deterministic). **Still owed by CAPTURE:** the per-bar seed-snapshot RING +
+  bank-format persistence (the actual K-bar retroactive grab + cross-reload re-sim), the live-MIDI-in
+  tap, and the emission-time coin-flips (probability/humanize/random-gate/echo — measure-axis-hash vs
+  capture-as-tape, deliberately deferred so they don't go dead-static). See the SHIPPED note in the
+  pre-build recon entry below for the seed-vs-hash policy + per-slot decision.
 
 **Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
 A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six
@@ -2587,6 +2593,57 @@ gestures, editing pages); the CV/AOUT path; song-mode / transport edge cases vs 
 closure; concurrency beyond the named mutexes (MIDI-hooks vs core-tick task preemption for a shared ring);
 worst-case timing under load (not measured on device); and — per discipline — **no by-ear validation** of
 any of it.
+
+**PER-TRACK-RNG keystone — FIRST CUT SHIPPED (code + HIL, by-ear PENDING flash), 2026-06-19.**
+The user picked the keystone (the CLAUDE.md §2 "music-first" rule was edited the same day to
+license infrastructure "to the degree it makes sense for the particular feature set"). A 2nd
+multi-agent pass (4 mappers → design synthesis → 3 adversarial verifiers) caught a real design
+bug in the first synthesis — it would have hashed the **emission-time** coin-flips on a
+stateless `(track,step)` key, which goes **dead-static** (a 50% step plays always/never; humanize
+becomes a fixed detune) because those draws have no measure axis (robotize stays alive precisely
+*because* it folds `robotize_measure_ctr`). That killed the synthesis's "all-or-nothing else it's
+untestable" rationale (false — robotize is reproducible by *capturing* its global-minted value, not
+by determinism). The corrected, tighter first cut shipped:
+- **Seed-vs-hash policy (decided).** Interleaved/stateful streams → caller-owned **xorshift seed**
+  (`SEQ_RANDOM_GenRangeXorshift`); standalone per-step render-stack gates → **stateless `grip_hash`**.
+- **Generators (A1).** A per-**pool-slot** `u32 seed` on `seq_generator_t` (NOT per-track — pool
+  iteration/alloc order would otherwise leak into the draw order; per-slot makes each stream
+  order-independent). **Minted fresh from the global RNG at ENGAGE** (preserves the old fresh-line-
+  per-engage feel — *not* salt-from-content, which would have made every engage identical) and
+  advanced by every reroll/perturb/rate-gate draw on the one shared stream. RAM-only (no bank-format
+  bump); `SlotSet` re-mints on a zero (file-loaded) seed so loaded slots don't alias onto the
+  `0xdeadbabe` stream; a RAM-snapshot restore (track-undo / capture-trample) keeps its real seed.
+- **chord_mask (A2).** Both probability gates → the shared `grip_hash(track,instr,step,zone)`
+  (`tension_grip_hash` renamed; chord_mask zone `0x20`, disjoint from TENSION's `{0,4,5,6}`). Now a
+  **stable per-(track,step) gripped subset** instead of a per-render-fresh (flickering) one — likely
+  a small audible improvement, by-ear GO flagged. **Its determinism rides on the shared `grip_hash`,
+  which the TENSION HIL suite already pins** — a future `grip_hash` refactor touches both processors.
+- **Random traversal.** Per-track `random_traverse_state` (main SRAM, beside `robotize_seed_state`)
+  for Random_Dir/Step/D_S; minted fresh at run-start (`SEQ_CORE_Reset`); **SCRUB save/restores it**
+  so the manual nudge can't desync the playback stream (the lone out-of-band `NextStep` consumer —
+  the in-tick jump-back/skip recursion correctly stays on the stream). The original Random_D_S
+  `rnd < 0x40` dir-flip quirk (compares the full word, so dir-flip rarely fires) is preserved verbatim.
+- **Deferred (the CAPTURE bundle's calls, not bugs):** the **emission-time coin-flips** — step-prob
+  (`seq_core.c` normal + drum + `seq_layer.c:411`), random-gate, humanize, echo — stay on the global
+  RNG until their measure-axis-hash-vs-capture-as-tape question is decided; and the **per-bar seed
+  snapshot ring + bank-format persistence** (the actual K-bar retroactive grab + cross-reload re-sim).
+  This build makes the streams **seekable/restorable + forward-deterministic** (the prerequisite),
+  not the ring.
+- **Verification.** 3 adversarial lenses re-read the shipped source → **sound, zero fatal/zero
+  must-fix.** Confirmed: shared gate+value stream, `min==max` zero-advance parity (draw count
+  unchanged), pure hash + disjoint zone, lossless 5×7-bit `u32` seed codec, SCRUB correctness.
+- **Cost.** +4 B/slot ⇒ **+256 B CCM** (pool is CCM-resident; ~8.6 KB CCM free remains), +64 B main
+  SRAM (traversal), negligible flash. Builds clean TESTCTRL=1 (test) and =0 (gig, −9.8 KB).
+- **HIL.** `tests/apps/seq_v4/test_rng_determinism.py` (6 pins): fresh-engage non-zero seed,
+  ROLL seed-determinism, different-seed→different-output, **wander re-simulates from a seed**
+  (the keystone proof), two-instruments-distinct-seeds, traversal seed round-trip. Known limits
+  (acknowledged, not gaps to fix now): **no behavioral pin for the traversal trajectory or the SCRUB
+  save/restore** (the harness has no clock-START verb to drive `NextStep`; structurally covered by
+  the generator wander pin's end-to-end proof of the same GenXorshift conversion) — a follow-up
+  needs a clock-step verb. New testctrl `CMD_RNG_SEED` 0x4d (gen/trv seed get/set).
+- **Next:** by-ear GO on flash (chord_mask texture + generator/traversal feel still musical — bar is
+  "reproducible AND musical", NOT bit-identical to the old global-RNG output, since draw order
+  changed). Then the deferred follow-ons feed the CAPTURE bundle (the north-star).
 
 **Phrase morphing (Loop A) — SHIPPED + by-ear GO 2026-06-16** (candidate 2026-06-13).
 Surfaced by the user right after the PHRASES Stage A by-ear GO ("does this open up

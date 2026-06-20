@@ -79,6 +79,13 @@ from .sysex import (
     CMD_PHRASE_META,
     CMD_PHRASE_MORPH,
     CMD_SWITCH_QUANTIZE,
+    CMD_RNG_SEED,
+    RNG_SEED_GEN_GET,
+    RNG_SEED_GEN_SET,
+    RNG_SEED_TRV_GET,
+    RNG_SEED_TRV_SET,
+    seed_to_5x7,
+    seed_from_5x7,
     PHRASE_META_DRIFT,
     PHRASE_META_NAME_GET,
     PHRASE_META_NAME_SET,
@@ -1318,6 +1325,54 @@ class Board:
         if len(payload) < 3 or payload[2] != CMD_STATUS_OK:
             raise RuntimeError(f"SWITCH_QUANTIZE set reply: {payload!r}")
         return payload[0]
+
+    # --- per-track-RNG keystone: seed get/set for determinism pins ---
+    def gen_seed_get(self, track: int, instrument: int, timeout: float = 1.0) -> int | None:
+        """Read a generator pool slot's xorshift seed (u32), or None if no slot
+        is allocated for (track, instrument)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_RNG_SEED, bytes([RNG_SEED_GEN_GET, track & 0x7f, instrument & 0x7f])))
+        payload = self.wait_for_sysex(CMD_RNG_SEED, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"RNG_SEED gen-get reply: {payload!r}")
+        if payload[2] == 0x03:
+            return None
+        if payload[2] != CMD_STATUS_OK or len(payload) < 8:
+            raise RuntimeError(f"RNG_SEED gen-get reply: {payload!r}")
+        return seed_from_5x7(payload[3:8])
+
+    def gen_seed_set(self, track: int, instrument: int, seed: int, timeout: float = 1.0) -> bool:
+        """Force a generator slot's xorshift seed to a known value (determinism
+        pins). Returns True on success, False if no slot is allocated."""
+        since = time.monotonic() - self._t0
+        req = bytes([RNG_SEED_GEN_SET, track & 0x7f, instrument & 0x7f]) + seed_to_5x7(seed)
+        self.send_raw(frame(CMD_RNG_SEED, req))
+        payload = self.wait_for_sysex(CMD_RNG_SEED, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"RNG_SEED gen-set reply: {payload!r}")
+        if payload[2] == 0x03:
+            return False
+        if payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"RNG_SEED gen-set reply: {payload!r}")
+        return True
+
+    def traverse_seed_get(self, track: int, timeout: float = 1.0) -> int:
+        """Read a track's random-traversal xorshift seed (u32)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_RNG_SEED, bytes([RNG_SEED_TRV_GET, track & 0x7f])))
+        payload = self.wait_for_sysex(CMD_RNG_SEED, timeout=timeout, since=since)
+        if len(payload) < 7 or payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"RNG_SEED trv-get reply: {payload!r}")
+        return seed_from_5x7(payload[2:7])
+
+    def traverse_seed_set(self, track: int, seed: int, timeout: float = 1.0) -> None:
+        """Force a track's random-traversal xorshift seed to a known value."""
+        since = time.monotonic() - self._t0
+        req = bytes([RNG_SEED_TRV_SET, track & 0x7f]) + seed_to_5x7(seed)
+        self.send_raw(frame(CMD_RNG_SEED, req))
+        payload = self.wait_for_sysex(CMD_RNG_SEED, timeout=timeout, since=since)
+        if len(payload) < 2 or payload[1] != CMD_STATUS_OK:
+            raise RuntimeError(f"RNG_SEED trv-set reply: {payload!r}")
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

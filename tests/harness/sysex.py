@@ -67,6 +67,28 @@ CMD_FREEZE_SET = 0x7e
 CMD_PHRASE_META = 0x7f  # sub-op: 0=drift query, 1=name get, 2=name set, 3=name commit
 CMD_PHRASE_MORPH = 0x4f  # POSTURE-MORPH (Loop A) — sub-op: 0=arm, 1=set, 2=query
 CMD_SWITCH_QUANTIZE = 0x4e  # global switch-quantize grid + measured margin — sub-op: 0=get, 1=set
+CMD_RNG_SEED = 0x4d  # per-track-RNG keystone seeds — sub-op: 0=gen get,1=gen set,2=trv get,3=trv set
+
+# CMD_RNG_SEED sub-ops — keep in sync with seq_testctrl.c
+RNG_SEED_GEN_GET = 0x00
+RNG_SEED_GEN_SET = 0x01
+RNG_SEED_TRV_GET = 0x02
+RNG_SEED_TRV_SET = 0x03
+
+
+def seed_to_5x7(seed: int) -> bytes:
+    """Encode a u32 seed as 5 little-endian 7-bit bytes (s0=bits0..6 .. s4=bits28..31).
+    Matches the inline codec in seq_testctrl.c cmd_rng_seed."""
+    seed &= 0xFFFFFFFF
+    return bytes([
+        seed & 0x7F, (seed >> 7) & 0x7F, (seed >> 14) & 0x7F,
+        (seed >> 21) & 0x7F, (seed >> 28) & 0x0F,
+    ])
+
+
+def seed_from_5x7(b: bytes) -> int:
+    """Inverse of seed_to_5x7: reassemble a u32 from 5 little-endian 7-bit bytes."""
+    return (b[0] | (b[1] << 7) | (b[2] << 14) | (b[3] << 21) | (b[4] << 28)) & 0xFFFFFFFF
 
 # CMD_PHRASE_META sub-ops — keep in sync with seq_testctrl.c
 PHRASE_META_DRIFT = 0x00
