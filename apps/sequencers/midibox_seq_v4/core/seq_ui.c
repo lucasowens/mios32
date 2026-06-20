@@ -203,6 +203,24 @@ static u8 pull_src_column = 0xff;   // chosen source column, 0xff = held track's
 static u8 pull_letter = 0xff;       // chosen source letter, 0xff = column group's current
 static char pull_status[24] = "";   // last commit result, shown in the held overlay
 
+// Retroactive CAPTURE gesture state (UTILITY held). The north-star "play, then
+// keep": after a generative take, STOP and grab the last K bars off the always-on
+// ring into a fresh track. SOURCE = the ring's recording track (the visible track
+// while it played; the ring invalidates on a track switch, so it's whatever was
+// last recorded — SEQ_CORE_CaptureRingTrack()). While UTILITY is held:
+//   select row (DirectTrack) -> DESTINATION track (stash; must differ from src).
+//                               Swallowed, so the visible track does NOT change
+//                               (a switch would invalidate the ring).
+//   GP-n (1..16)             -> K = grab the last n bars + COMMIT
+//                               (SEQ_CORE_CaptureSpanReSim; transport STOPPED).
+// The GP LED row is a thermometer of the ring depth (max grabbable K = depth-1).
+// A bare UTILITY tap (no sub-gesture) still navigates to the Utility page.
+static u8 capture_util_held;          // 1 while UTILITY held (capture armed)
+static u8 capture_consumed;           // 1 if a sub-gesture fired during the hold (suppress bare-tap nav)
+static u8 capture_dst_track = 0xff;   // destination track (select row), 0xff = none picked yet
+static char capture_status[32] = ""; // last commit result, shown in the held overlay
+static u32 capture_util_t0;           // UTILITY press timestamp (tap-vs-hold discrimination)
+
 
 // PHRASES name editor (Stage B) state — declared here (ahead of its uses) so the
 // gesture reset below can close a stuck editor. See the block above SEQ_UI_Button_GP.
@@ -233,6 +251,10 @@ void SEQ_UI_GestureStateReset(void)
   pattern_held_gp_consumed = 0;
   pattern_capture_group = 0xff;
   pattern_capture_dst_track = 0xff;
+  capture_util_held = 0;
+  capture_consumed = 0;
+  capture_dst_track = 0xff;
+  capture_status[0] = 0;
   seq_ui_sel_view = SEQ_UI_SEL_VIEW_NONE;
   phrase_name_edit = 0; // close a stuck name editor (no own reset path)
   SEQ_PATTERN_PhraseMorphCancel(); // disarm any armed posture-morph (same hardening)
@@ -644,6 +666,50 @@ static void pull_commit_msg(s32 status, u8 bank, u8 letter, u8 num, u8 section, 
   }
 }
 
+// Print the result of a retroactive CAPTURE span (ring track -> dst track, the
+// north-star play-then-keep grab). Validates the two UI-level preconditions a
+// terse engine code can't express (no ring / no destination picked) before
+// calling SEQ_CORE_CaptureSpanReSim, then formats the held-overlay status + a
+// transient track popup. Negative engine codes map per CMD_CAPTURE_SPAN.
+static void capture_span_msg(u8 src, u8 dst, u8 k)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS ) {           // ring empty or invalidated
+    SEQ_UI_Msg_Track("no ring");
+    sprintf(capture_status, "no ring: play then STOP");
+    return;
+  }
+  if( dst >= SEQ_CORE_NUM_TRACKS ) {           // no select-row pick yet
+    SEQ_UI_Msg_Track("pick dest");
+    sprintf(capture_status, "pick dest trk (sel row)");
+    return;
+  }
+
+  s32 r = SEQ_CORE_CaptureSpanReSim(src, dst, k);
+  if( r == 0 ) {
+    char msg[12];
+    sprintf(msg, ">T%d %db", dst + 1, k);
+    SEQ_UI_Msg_Track(msg);
+    sprintf(capture_status, "T%d last %db -> T%d", src + 1, k, dst + 1);
+  } else {
+    const char *why;
+    switch( r ) {
+      case -2:  why = "src==dst";      break;
+      case -3:  why = "STOP first";    break;
+      case -4:  why = "ring not src";  break;
+      case -5:  why = "ring overflow"; break;
+      case -6:  why = "too many bars"; break;
+      case -7:  why = ">256 steps";    break;
+      case -8:  why = "not 1 measure"; break;
+      case -9:  why = "dst par full";  break;
+      case -11: why = "arp track";     break;
+      case -12: why = "dst trg full";  break;
+      default:  why = "refused";       break;
+    }
+    SEQ_UI_Msg_Track("capture refused");
+    sprintf(capture_status, "refused: %s", why);
+  }
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // PHRASES name editor (Stage B): a global keypad sub-mode layered over the
 // PHRASE select-view. The waypoint row lives on the SELECT row; the keypad
@@ -779,6 +845,22 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     }
     pattern_capture_slottrack_msg(cap_r, dst, dst_track);
     // group + dst track stay set so the user can rapid-fire to more patterns.
+    return 0;
+  }
+
+  // Retroactive CAPTURE gesture (UTILITY held): GP-n grabs the last n bars (n =
+  // GP index, GP1=1 .. GP16=16) of the ring's track into the chosen destination
+  // track and COMMITs (transport must be STOPPED). The GP LED row shows the
+  // grabbable max = min(ring depth-1, what the dst par/trg buffer holds for src's
+  // layout) — a heavy layout (e.g. a 16-instr drum track) caps it below the ring;
+  // source = SEQ_CORE_CaptureRingTrack(),
+  // destination = the select-row pick. Consumes the press (suppresses the bare-
+  // tap navigation to the Utility page on release). dst/src stay so the user can
+  // rapid-fire other bar counts.
+  if( !depressed && capture_util_held && gp < 16 ) {
+    capture_consumed = 1;
+    capture_span_msg(SEQ_CORE_CaptureRingTrack(), capture_dst_track, (u8)(gp + 1));
+    seq_ui_display_update_req = 1;
     return 0;
   }
 
@@ -1231,12 +1313,40 @@ static s32 SEQ_UI_Button_Live(s32 depressed)
   return 0; // no error
 }
 
+// A quick UTILITY TAP (no sub-gesture, < this) opens the Utility page (stock); a
+// HOLD arms CAPTURE and returns you to where you were on release — so reaching for
+// CAPTURE never strands you on the Utility page.
+#define CAPTURE_UTIL_TAP_MS 500
+
 static s32 SEQ_UI_Button_Utility(s32 depressed)
 {
-  if( depressed ) return -1; // ignore when button depressed
+  if( !depressed ) {
+    // UTILITY pressed: arm the retroactive-CAPTURE modifier; don't navigate yet.
+    // While held, the select row picks a destination track and a GP-n press grabs
+    // the last n bars of the ring's track into it (see SEQ_UI_Button_GP /
+    // SEQ_UI_Button_DirectTrack). The release below opens the Utility page only on
+    // a quick tap. Disarm a pull hold (same hardening as the PATTERN gesture).
+    capture_util_held = 1;
+    capture_consumed = 0;
+    capture_dst_track = 0xff;
+    capture_status[0] = 0;
+    capture_util_t0 = MIOS32_TIMESTAMP_Get();
+    pull_held_track = 0xff;
+    seq_ui_display_update_req = 1;
+    return 0;
+  }
 
-  // change to utility page
-  SEQ_UI_PageSet(SEQ_UI_PAGE_UTIL);
+  // UTILITY released. A quick TAP with no sub-gesture opens the Utility page
+  // (stock). A HOLD — whether you committed a capture or just held to read the
+  // ring depth and let go — returns you to where you were (no page jump).
+  capture_util_held = 0;
+  u8 consumed = capture_consumed;
+  capture_consumed = 0;
+  capture_dst_track = 0xff;
+  seq_ui_display_update_req = 1;
+
+  if( !consumed && (u32)MIOS32_TIMESTAMP_GetDelay(capture_util_t0) < CAPTURE_UTIL_TAP_MS )
+    SEQ_UI_PageSet(SEQ_UI_PAGE_UTIL); // quick tap -> stock behavior: utility page
 
   return 0; // no error
 }
@@ -2273,6 +2383,24 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
       seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
       pattern_capture_dst_track = (u8)sel_button;
       pattern_held_gp_consumed = 1;
+    }
+    return 0;
+  }
+
+  // Retroactive CAPTURE gesture (UTILITY held): the select row picks the
+  // DESTINATION track for the grab (stash; a GP-n press commits). Swallow the
+  // press so the normal track-select doesn't fire — the visible track must NOT
+  // change (a switch invalidates the ring). Maintain button_state exactly as the
+  // normal handler (stuck-bit hardening, same as the PATTERN intercept above).
+  if( capture_util_held ) {
+    if( depressed ) {
+      button_state |= (1 << sel_button);
+    } else {
+      button_state &= ~(1 << sel_button);
+      seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
+      capture_dst_track = (u8)sel_button;
+      capture_consumed = 1;
+      seq_ui_display_update_req = 1;
     }
     return 0;
   }
@@ -3723,6 +3851,34 @@ s32 SEQ_UI_LCD_Handler(void)
         SEQ_LCD_PrintFormattedString("%c%d   ", prefix, i + 1);
       }
     }
+  } else if( capture_util_held ) {
+    // Retroactive CAPTURE overlay (north-star play-then-keep). Source = the ring's
+    // recording track; the select row picks the destination; GP-n grabs the last n
+    // bars (n = GP index) and commits. The GP LED row is a depth thermometer.
+    u8 cap_src = SEQ_CORE_CaptureRingTrack();
+    u8 cap_max_k = SEQ_CORE_CaptureMaxK(cap_src); // par/trg-aware: lit LEDs == grabbable
+    char cap_buf[41];
+
+    if( cap_src >= SEQ_CORE_NUM_TRACKS )
+      sprintf(cap_buf, "CAPTURE: no ring (play, then STOP)");
+    else if( capture_dst_track != 0xff )
+      sprintf(cap_buf, "CAPTURE T%d -> T%d   max %d bars", cap_src + 1, capture_dst_track + 1, cap_max_k);
+    else
+      sprintf(cap_buf, "CAPTURE T%d -> ?   max %d bars", cap_src + 1, cap_max_k);
+    SEQ_LCD_CursorSet(0, 0);
+    SEQ_LCD_PrintFormattedString("%-40s", cap_buf);
+
+    SEQ_LCD_CursorSet(0, 1);
+    SEQ_LCD_PrintFormattedString("%-40s", "sel=dest trk    GP-n=grab last n bars");
+
+    SEQ_LCD_CursorSet(40, 0);
+    if( capture_status[0] )
+      SEQ_LCD_PrintFormattedString("%-40s", capture_status);
+    else
+      SEQ_LCD_PrintFormattedString("%-40s", "STOP first. GP-n=last n bars (max 16)");
+
+    SEQ_LCD_CursorSet(40, 1);
+    SEQ_LCD_PrintSpaces(40);
   } else if( pull_held_track != 0xff &&
              (pull_src_column != 0xff || pull_letter != 0xff || pull_status[0]) ) {
     // Pull gesture overlay (mirror of the capture overlay above). Destination =
@@ -4089,7 +4245,7 @@ s32 SEQ_UI_LED_Handler(void)
   SEQ_LED_PinSet(seq_hwcfg_led.jam_live, ui_page == SEQ_UI_PAGE_TRKJAM && !seq_record_options.STEP_RECORD);
   SEQ_LED_PinSet(seq_hwcfg_led.jam_step, ui_page == SEQ_UI_PAGE_TRKJAM && seq_record_options.STEP_RECORD);
 
-  SEQ_LED_PinSet(seq_hwcfg_led.utility, ui_page == SEQ_UI_PAGE_UTIL);
+  SEQ_LED_PinSet(seq_hwcfg_led.utility, capture_util_held || ui_page == SEQ_UI_PAGE_UTIL);
   SEQ_LED_PinSet(seq_hwcfg_led.copy, seq_ui_button_state.COPY);
   SEQ_LED_PinSet(seq_hwcfg_led.paste, seq_ui_button_state.PASTE);
   SEQ_LED_PinSet(seq_hwcfg_led.undo, seq_ui_button_state.UNDO);
@@ -4152,6 +4308,14 @@ s32 SEQ_UI_LED_Handler(void)
 	SEQ_PATTERN_PhraseMorphTarget() >= 0 ) {
       u8 k = (SEQ_PATTERN_PhraseMorphValue() * 16) / PHRASE_MORPH_MAX;
       ui_gp_leds = k ? (u16)((1 << k) - 1) : 0x0000;
+    }
+
+    // Retroactive CAPTURE (UTILITY held): the GP row is a thermometer of the ring
+    // depth — the max grabbable K (= depth-1) lit from GP1. Tap GP-n to grab n.
+    if( capture_util_held ) {
+      u8 cap_k = SEQ_CORE_CaptureMaxK(SEQ_CORE_CaptureRingTrack()); // par/trg-aware grabbable max
+      if( cap_k > 16 ) cap_k = 16;
+      ui_gp_leds = cap_k ? (u16)((1 << cap_k) - 1) : 0x0000;
     }
   }
 

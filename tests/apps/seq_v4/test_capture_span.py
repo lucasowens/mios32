@@ -68,14 +68,71 @@ def _setup_wander_track(board: Board) -> None:
 
 @pytest.mark.hardware
 def test_capture_ring_fills_and_caps(board):
-    """Driving the stopped engine fills the ring; depth caps at 16 (discard-
-    oldest) and the ring records the visible track."""
+    """Driving the stopped engine fills the ring; depth caps at 17 (the live bar +
+    16 grabbable prior, discard-oldest) and the ring records the visible track."""
     board.reset()
     board.ui_track_set(TRACK)
-    _drive_measures(board, 20)  # > 16 -> capped
+    _drive_measures(board, 20)  # > 17 -> capped
     q = board.capture_ring_query()
-    assert q["depth"] == 16, f"ring depth should cap at 16, got {q['depth']}"
+    assert q["depth"] == 17, f"ring depth should cap at 17, got {q['depth']}"
     assert q["track"] == TRACK, f"ring should record visible track {TRACK}, got {q['track']}"
+
+
+@pytest.mark.hardware
+def test_capture_ring_reaches_16_bars_back(board):
+    """Ring-17 extends the frame-back from 15 to a full 16 bars. This pins the RING
+    extension itself: at K=16 the capture now PASSES the ring/history guard and
+    reaches the dst par-buffer guard, whereas the old depth-16 ring returned -6
+    (0x16, 'not enough history') at K=16.
+
+    An actual 16-bar SUCCESS needs a true 1-voice melodic track (par_instr=1):
+    256 steps * 1 instr = 256 <= SEQ_PAR_MAX_BYTES(1024). This HIL track is a
+    16-instrument drum layout (track_drum_init; the harness has no melodic init —
+    the parked 'true Note-track init' follow-on), so 256 * 16 = 4096 overflows the
+    par buffer and the grab refuses -9 (0x19). That refusal is the proof: it got
+    PAST the ring guard. The success path is validated by ear on a melodic track."""
+    board.reset()
+    _setup_wander_track(board)
+    _drive_measures(board, 18)  # >= 17 -> depth caps at 17 -> frame-back valid through K=16
+    q = board.capture_ring_query()
+    assert q["depth"] == 17, f"ring should cap at 17 before a full grab, got {q['depth']}"
+
+    # 0x19 = dst par overflow: the grab passed the ring/history guard (the old
+    # depth-16 ring returned 0x16 at K=16) and only stopped at this drum-layout
+    # track's par-buffer cap. 0x16 here would mean the ring still caps below 16.
+    status = board.capture_span(TRACK, 16, DST)
+    assert status == 0x19, (
+        f"expected par-cap refusal 0x19 at K=16 (ring-17 reached, par capped); got "
+        f"{hex(status)} — 0x16 would mean the ring still caps below 16 bars"
+    )
+
+
+@pytest.mark.hardware
+def test_capture_max_k_matches_refusal_boundary(board):
+    """CaptureMaxK (the par/trg-aware grabbable max the UI thermometer lights, now
+    exposed in the ring query) must equal the real success/refuse boundary: a grab
+    at max_k succeeds, a grab at max_k+1 refuses with a dst buffer overflow. Guards
+    against the UI cap drifting from the engine's own guards. On this 16-instrument
+    drum-layout track the par buffer caps max_k well below the ring depth — exactly
+    the over-promise the par-aware thermometer fixes (raw depth would light to 16)."""
+    board.reset()
+    _setup_wander_track(board)
+    _drive_measures(board, 18)  # deep ring -> the binding cap is the par buffer, not the ring
+    q = board.capture_ring_query()
+    assert q["depth"] == 17, f"ring should be full (17) before the boundary check, got {q['depth']}"
+    mk = q["max_k"]
+    assert 1 <= mk < 16, (
+        f"a 16-instrument drum-layout track must cap max_k below the ring depth "
+        f"(the over-promise case); got max_k={mk}"
+    )
+
+    # at the cap -> succeeds; one past the cap -> dst buffer overflow (par 0x19 / trg 0x1c).
+    assert board.capture_span(TRACK, mk, DST) == 0x01, f"grab at max_k={mk} should succeed"
+    over = board.capture_span(TRACK, mk + 1, DST)
+    assert over in (0x19, 0x1c), (
+        f"grab at max_k+1={mk + 1} should refuse with a buffer overflow (0x19/0x1c); "
+        f"got {hex(over)} — UI cap (max_k) has drifted from the engine guard"
+    )
 
 
 @pytest.mark.hardware
@@ -129,7 +186,10 @@ def test_capture_produces_notes_and_is_deterministic(board):
 @pytest.mark.hardware
 def test_capture_is_nondestructive(board):
     """The capture borrow restores the live engine: the source generator seed and
-    traversal seed are unchanged after a capture."""
+    traversal seed are unchanged after a capture. (The robotize seed — also written
+    during the drive, now sourced from the frame — is restored by the whole-track
+    memcpy in SEQ_CORE_CaptureSpanSnapshot/Restore, so it's covered here without a
+    dedicated accessor.)"""
     board.reset()
     _setup_wander_track(board)
     _drive_measures(board, 4)

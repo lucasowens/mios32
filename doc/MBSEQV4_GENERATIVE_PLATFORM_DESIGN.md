@@ -2560,26 +2560,38 @@ is cheap; capture mints a new clip.)
   capture-as-tape, deliberately deferred so they don't go dead-static). See the SHIPPED note in the
   pre-build recon entry below for the seed-vs-hash policy + per-slot decision.
 
-  **→ RING + RE-SIM FIRST CUT SHIPPED + by-ear/by-eye GO 2026-06-20** (HIL full suite green incl. 8
-  new pins; NOT yet committed at time of writing). The actual retroactive grab: an always-on per-bar
-  generative-frame **ring** (`seq_core_cap_ring[16]`, visible-track, main SRAM) + `CMD_CLOCK_STEP`
-  (synchronous stopped-transport tick driver, also closes the keystone's traversal-trajectory HIL
-  gap) + the **re-sim** (`SEQ_CORE_CaptureSpanReSim`: snapshot all live state → rewind to the
-  window-start frame → re-drive K bars **with generator wander on**, recording the EMITTED stream →
-  restore byte-identical) → quantized into a static dst track. **The materialize is the load-bearing
-  correction:** the design-ahead "output-record fallback" / an output-mirror snapshot is just BOUNCE
-  — it loses robotize (emission-time) AND traversal order (playback-order, stripped by
-  `ResetGenerativeForBounce`). CAPTURE must record the **emitted MIDI stream** (reusing the MIDI
-  exporter's hook+sink pattern), which carries both. **First-cut scope:** transport STOPPED
-  (play→stop→keep; while-playing is a follow-on), note-on-only materialize w/ default gate length
-  (pitch/rhythm/velocity/traversal-order/wander faithful; precise gate = refinement), melodic target
-  (a drum-layout source captures pitches on instr-0 but caps at K≤4 by its par buffer; a true 1-voice
-  Note-track init for K≤16 is a follow-on — Note par-layer typing isn't a simple field write). Full
-  build/decision detail + the 6 review-caught bugs (whole-measure guard, src-mirror, queue-flush,
+  **→ RING + RE-SIM + PHYSICAL GESTURE SHIPPED + by-hand/by-ear GO 2026-06-20** (HIL 187/187). The
+  retroactive grab: an always-on per-bar generative-frame **ring** (`seq_core_cap_ring`,
+  `SEQ_CORE_CAP_RING_BARS=17` = the live in-progress bar + **16 grabbable** completed bars,
+  visible-track, main SRAM; explicit-modulo index) + `CMD_CLOCK_STEP` (synchronous stopped-transport
+  tick driver, also closes the keystone's traversal-trajectory HIL gap) + the **re-sim**
+  (`SEQ_CORE_CaptureSpanReSim`: snapshot all live state → rewind to the window-start frame → re-drive
+  K bars **with generator wander on**, recording the EMITTED stream → restore byte-identical) →
+  quantized into a static dst track. **The materialize is the load-bearing correction:** an
+  output-mirror snapshot is just BOUNCE — it loses robotize (emission-time) AND traversal order
+  (stripped by `ResetGenerativeForBounce`). CAPTURE records the **emitted MIDI stream** (reusing the
+  MIDI exporter's hook+sink), which carries both.
+  **Physical gesture (the first user gesture; host = UTILITY on the midiphy panel, `seq_ui.c`):**
+  transport STOPPED; **hold UTILITY** to arm (GP-LED thermometer of the grabbable count, UTILITY LED
+  lit) → **tap a select-row** for the dst track → **tap GP-n** to grab the last n bars + commit. A
+  quick UTILITY *tap* (<`CAPTURE_UTIL_TAP_MS`=500ms) = the stock Utility page; a *hold* returns you
+  where you were.
+  **Ring 16→17 + seed-in-frame:** the bar's robotize seed moved INTO the capture frame
+  (`seq_core_cap_frame_t.robotize_seed`) so the frame is self-contained and FREEZE's shared 16-deep
+  `robotize_seed_snapshots` ring is untouched — and a *full 16-bar* grab now works (was 15; the 17th
+  slot is the live bar).
+  **Par-aware thermometer (`SEQ_CORE_CaptureMaxK`):** the lit GP LEDs + the "max N bars" readout + the
+  ring query all show min(ring depth−1, what the dst par/trg buffer holds for **the source's layout**),
+  so the LEDs equal exactly what a grab accepts. Consequence of `SEQ_PAR_MAX_BYTES=1024`: a 16-instr
+  drum-layout source caps at ~4 bars; a lean 1-voice melodic source grabs the full 16.
+  **First-cut scope:** stopped-only (play→stop→keep; while-playing is a follow-on), note-on materialize
+  w/ default gate (pitch/rhythm/velocity/traversal-order/wander faithful; precise gate = refinement),
+  melodic target (a true 1-voice Note-track init for clean drum-source grabs is still parked — Note
+  par-layer typing isn't a simple field write, and the HIL harness can only make drum-layout tracks).
+  Full build/decision detail + the review-caught bugs (whole-measure guard, src-mirror, queue-flush,
   step-phase, source-push, loopback) + the par/trg independent-instrument-count fix: plan
   `doc/plans/2026-06-19-capture-ring.md` and REFERENCE "Retroactive CAPTURE". Still deferred:
-  while-playing capture, live-MIDI-in tape, emission coin-flips, ring persistence, the physical
-  gesture (harness-driven this cut).
+  while-playing capture, live-MIDI-in tape, emission coin-flips, ring persistence.
 
 **Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
 A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six

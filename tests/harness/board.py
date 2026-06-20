@@ -1413,7 +1413,15 @@ class Board:
         payload = self.wait_for_sysex(CMD_CAPTURE_SPAN, timeout=timeout, since=since)
         if len(payload) < 3:
             raise RuntimeError(f"short CAPTURE_SPAN ring-query reply: {payload!r}")
-        return {"track": payload[0], "depth": payload[1], "overflow": bool(payload[2])}
+        # max_k (par/trg-aware grabbable max) is a 4th reply byte; older firmware
+        # omits it, so fall back to depth-1 (the raw ring cap) for compatibility.
+        max_k = payload[3] if len(payload) >= 4 else max(0, payload[1] - 1)
+        return {
+            "track": payload[0],
+            "depth": payload[1],
+            "overflow": bool(payload[2]),
+            "max_k": max_k,
+        }
 
     def capture_span(self, src: int, k: int, dst: int, timeout: float = 4.0) -> int:
         """Retroactively capture the last `k` bars of the ring's track `src` into

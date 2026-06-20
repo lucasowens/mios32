@@ -153,6 +153,7 @@ typedef enum {
   BTN_UNDO      = 0x14,
   BTN_COPY      = 0x15,
   BTN_PASTE     = 0x16,
+  BTN_UTILITY   = 0x17,   // hosts the retroactive-CAPTURE span gesture (UTILITY held)
   // DIRECT_TRACK (the midiphy select row) 1..16: BTN_DIRECT_TRACK_BASE + (n - 1).
   BTN_DIRECT_TRACK_BASE = 0x20,
   // GP1..GP16 are contiguous: BTN_GP_BASE + (n - 1).
@@ -283,6 +284,7 @@ static u16 lookup_button_pin(u8 id)
     case BTN_UNDO:     return seq_hwcfg_button.undo;
     case BTN_COPY:     return seq_hwcfg_button.copy;
     case BTN_PASTE:    return seq_hwcfg_button.paste;
+    case BTN_UTILITY:  return seq_hwcfg_button.utility;
     default:           return 0xFFFF;
   }
 }
@@ -1867,10 +1869,11 @@ static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
     } break;
 
     case 0x01: {
-      u8 reply[3];
+      u8 reply[4];
       reply[0] = SEQ_CORE_CaptureRingTrack() & 0x7f; // 0x7f if 0xff (none)
       reply[1] = SEQ_CORE_CaptureRingDepth() & 0x7f;
       reply[2] = SEQ_CORE_CaptureRingOverflow() & 0x01;
+      reply[3] = SEQ_CORE_CaptureMaxK(SEQ_CORE_CaptureRingTrack()) & 0x7f; // par/trg-aware grabbable max
       send_reply(port, CMD_CAPTURE_SPAN, reply, sizeof(reply));
     } break;
 

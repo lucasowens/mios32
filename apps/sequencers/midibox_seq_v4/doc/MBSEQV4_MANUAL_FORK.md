@@ -6,7 +6,7 @@ Seven features are documented here:
 
 1. **Robotize Loop** — bar-anchor PRNG control over the Robotizer Fx (sculpt randomness one measure at a time)
 2. **GENERATE Page** — the former EUCLID page expanded into five generator types (Euclidean, Cellular, Polyrhythm, Subdivide, L-System)
-3. **Capture / Bounce** — freeze a track's computed output (lossless) into a pattern via the PATTERN-hold gesture; build variation libraries and multitimbral canvases
+3. **Capture / Bounce** — freeze a track's computed output (lossless): the PATTERN-hold gesture (into a pattern slot) or the retroactive **UTILITY-hold** gesture (grab the last N bars onto a track); build variation libraries and multitimbral canvases
 4. **The Pull** — load one stored track into any live track, on the bar, while everything keeps playing (the mirror of Capture); SELECT+CLEAR is the one-gesture undo
 5. **Fearless Switching** — your work always saves itself; CHECKPOINT blesses a safe point and REVERT snaps the whole living rig back to it in one gesture
 6. **FREEZE** — a global master switch (the repurposed METRONOME button) that stops the generators mutating, so a recalled phrase plays as static tape instead of drifting
@@ -300,6 +300,42 @@ What the commit does is decided by **one rule**, steered purely by which destina
 * **Destination in a DIFFERENT group:** the capture is written into the **destination group's own bank**, and that group is **auto-loaded on the next bar** (locked to the master), so the take drops in immediately and plays — for auditioning a variation in a spare group, or building a canvas. Your source group is never the one loaded, so it never jumps.
 
 In every case the capture **merges** into the destination pattern: it replaces only the one track-position you aimed at and keeps the pattern's other three tracks. So you can bounce different takes into T1, T2, T3, T4 of the *same* pattern and build it up over several bounces.
+
+### Retroactive Capture — the UTILITY gesture
+
+The **play-then-keep** capture — "Capture MIDI" for the whole organism. The box is always listening: every bar a track plays is recorded into a ring. When you hear something you want to keep, **STOP**, hold **UTILITY**, and grab the last N bars onto a fresh track — no arming, no record-first. The grab is faithful (it replays exactly what the generators/traversal did, including the wander) and lands as static notes that play back the same every time.
+
+**Transport must be STOPPED** (first cut; capturing while playing is a follow-on). The **source** is the track that was playing into the ring (the visible track). While **UTILITY is held** the UTILITY LED lights and the LCD overlays the grab state:
+
+```
+CAPTURE T1 -> T2    max 12 bars
+sel=dest trk    GP-n=grab last n bars
+```
+
+(Before you pick a destination it reads `CAPTURE T1 -> ?    max 12 bars`.)
+
+The gesture:
+
+1. **Hold UTILITY.** The GP LED row becomes a **thermometer** — the lit LEDs are the bars you can grab (it is not always the full row; see below).
+2. **Tap a select-row button** to pick the **destination track** (the grab lands here). Tap a different one to re-aim.
+3. **Tap GP-n** (still holding UTILITY) — grabs the **last n bars** (n = the GP number) and **commits** immediately. A confirmation flashes (`T1 last 8b -> T2`); the span lands on the destination track on the bar, with generators stripped so it plays as static tape.
+
+A **quick UTILITY tap** (no select/GP, under half a second) opens the **Utility page** as before — reaching for CAPTURE never strands you there, and releasing a hold returns you exactly where you were.
+
+#### The thermometer — how many bars you can grab
+
+The ring keeps the last **16** completed bars, but how many you can actually grab depends on the **source track's layout** — how much note/trigger data one bar costs. The lit LEDs always tell the truth: **only the lit GP buttons will grab**; tapping past them refuses with `dst par full` (or `dst trg full`), and the `max N bars` readout is the exact ceiling.
+
+* A **lean melodic track** (one voice) grabs the **full 16 bars**.
+* A **dense drum-layout track** (many instruments) costs far more per bar and caps at **~4 bars** — the per-bar storage fills up.
+
+The cap is set by the **source** you recorded, not the destination you pick. So for the deepest grabs, run your generative line on a **normal melodic track**, not a drum-init'd one.
+
+#### Tips
+
+* **Watch the LEDs, not the clock:** the thermometer is the real limit — if only GP1–GP4 are lit, 4 bars is all this source can hold, however long you played.
+* **Audition first:** with the transport stopped you can hold UTILITY and read `max N bars` *before* picking a destination, so you know the ceiling up front.
+* **Re-grab freely:** the ring is preserved across a grab, so a second grab from the same source (e.g. into a leaner track) reproduces the same span.
 
 ### In-place freeze (GP8 on the PITCHGEN page)
 

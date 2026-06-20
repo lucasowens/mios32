@@ -167,24 +167,35 @@ seq_processor_slot_t CCM_SECTION seq_processor_stack[SEQ_CORE_NUM_TRACKS][SEQ_CO
 //
 // The box is always listening: at each musical-measure boundary it snapshots the
 // VISIBLE track's generative FRAME (the deterministic state needed to re-simulate
-// that measure forward) into a depth-16 ring, sharing the robotize ring's clock
-// (robotize_measure_ctr & 0x0f). CAPTURE then rewinds to the window-start frame
-// and re-drives K bars forward WITH generator wander on — reproducing the lived
-// span exactly (the per-track-RNG keystone made every generative stream
-// deterministic from this frame). The source par buffer is NOT ringed: restoring
-// the generator loop[]+seed and re-driving regenerates it via write_loop_to_source.
+// that measure forward) into a depth-17 ring (the live in-progress bar + 16
+// grabbable completed bars), indexed robotize_measure_ctr % SEQ_CORE_CAP_RING_BARS.
+// CAPTURE then rewinds to the window-start frame and re-drives K bars forward WITH
+// generator wander on — reproducing the lived span exactly (the per-track-RNG
+// keystone made every generative stream deterministic from this frame). The source
+// par buffer is NOT ringed: restoring the generator loop[]+seed and re-driving
+// regenerates it via write_loop_to_source.
 //
 // Single track (the visible one), invalidated on track-switch — bounds the
-// generator-slot snapshots (the costly part) to one track. Robotize already rings
-// per-track (robotize_seed_snapshots), so the frame carries only the streams that
-// don't: random traversal + the generator slots + the step/progression cursor.
+// generator-slot snapshots (the costly part) to one track. The frame is
+// SELF-CONTAINED: it carries its OWN robotize seed (so re-sim no longer reads the
+// 16-deep robotize_seed_snapshots ring, which only reaches 15 bars back and is
+// shared with FREEZE) plus random traversal + the generator slots + the
+// step/progression cursor.
 // All main SRAM (no CCM_SECTION = .bss in main SRAM, like the robotize ring).
 /////////////////////////////////////////////////////////////////////////////
-#define SEQ_CORE_CAP_RING_BARS  16   // depth; shares robotize_measure_ctr & 0x0f
+#define SEQ_CORE_CAP_RING_BARS  17   // depth = the live (in-progress) bar + 16 grabbable
+                                     // completed bars. Indexed robotize_measure_ctr % BARS
+                                     // (17 isn't a power of 2, so the modulo is explicit).
+                                     // The frame carries its OWN robotize seed (below), so this
+                                     // ring is self-contained and does NOT touch the 16-deep
+                                     // robotize_seed_snapshots ring that FREEZE shares.
 #define SEQ_CORE_CAP_RING_SLOTS 4    // max generator slots ringed per bar (melodic-first)
 
 typedef struct {
   u32 traverse_state;      // random_traverse_state at this measure boundary
+  u32 robotize_seed;       // robotize_seed_state at this boundary — self-contained so the re-sim
+                           // doesn't read the 16-deep robotize_seed_snapshots ring (which only
+                           // reaches 15 bars back and is shared with FREEZE)
   u8  step;                // t->step at the boundary (0 for a whole-measure track)
   u8  step_saved;          // replay anchor
   u8  step_replay_ctr;     // progression counters (forward/jmpbck/replay/repeat/skip)
@@ -237,8 +248,9 @@ static void SEQ_CORE_CaptureRingTick(void)
     seq_core_cap_ring_overflow = 0;
   }
   seq_core_trk_t *t = &seq_core_trk[vis];
-  seq_core_cap_frame_t *f = &seq_core_cap_ring[t->robotize_measure_ctr & 0x0f];
+  seq_core_cap_frame_t *f = &seq_core_cap_ring[t->robotize_measure_ctr % SEQ_CORE_CAP_RING_BARS];
   f->traverse_state    = t->random_traverse_state;
+  f->robotize_seed     = t->robotize_seed_state; // self-contained: re-sim restores from the frame
   f->step              = t->step;
   f->step_saved        = t->step_saved;
   f->step_replay_ctr   = t->step_replay_ctr;
@@ -255,20 +267,47 @@ static void SEQ_CORE_CaptureRingTick(void)
 
 // Frame K measures back from the current measure (K=1 -> the measure that just
 // completed). NULL if `track` is not the ring's track or there isn't enough
-// history. Re-sim window-start = K bars back; valid K is 1..filled-1 (the depth-16
-// ring keeps the current measure + 15 prior, so max K = 15).
+// history. Re-sim window-start = K bars back; valid K is 1..filled-1 (the depth-17
+// ring keeps the live bar + 16 completed prior, so max K = 16).
 static const seq_core_cap_frame_t *SEQ_CORE_CaptureRingFrameBack(u8 track, u8 k)
 {
   if( track != seq_core_cap_ring_track ) return NULL;
   if( k < 1 || k >= seq_core_cap_ring_filled ) return NULL;
   u32 ctr = seq_core_trk[seq_core_cap_ring_track].robotize_measure_ctr;
-  return &seq_core_cap_ring[(ctr - k) & 0x0f];
+  return &seq_core_cap_ring[(ctr - k) % SEQ_CORE_CAP_RING_BARS];
 }
 
 // HIL / capture-verb accessors.
 u8 SEQ_CORE_CaptureRingDepth(void) { return seq_core_cap_ring_filled; }
 u8 SEQ_CORE_CaptureRingTrack(void) { return seq_core_cap_ring_track; }
 u8 SEQ_CORE_CaptureRingOverflow(void) { return seq_core_cap_ring_overflow; }
+
+// Max grabbable K (bars) for `src` right now: the SMALLER of the ring depth and
+// what the destination buffers can hold (the dst inherits src's layout, so a heavy
+// src — e.g. a 16-instrument drum track — caps the par buffer well below the ring).
+// The UI thermometer + "max N bars" use this so the lit GP LEDs == what a grab
+// actually accepts (raw ring depth would over-promise). 0 = nothing grabbable.
+// Mirrors the steps>256 / par / trg guards in SEQ_CORE_CaptureSpanReSim exactly.
+u8 SEQ_CORE_CaptureMaxK(u8 src)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS || src != seq_core_cap_ring_track ) return 0;
+  if( seq_core_cap_ring_overflow || seq_core_cap_ring_filled < 2 ) return 0;
+  u8 max_k = seq_core_cap_ring_filled - 1;                 // ring cap (depth-1)
+
+  u16 spm = (u16)(seq_cc_trk[src].length + 1);
+  if( spm == 0 ) return 0;
+  if( max_k > 256 / spm ) max_k = (u8)(256 / spm);         // dst_steps = K*spm <= 256
+
+  u32 par_unit = (u32)spm * SEQ_PAR_NumLayersGet(src) * SEQ_PAR_NumInstrumentsGet(src);
+  if( par_unit && max_k > SEQ_PAR_MAX_BYTES / par_unit )
+    max_k = (u8)(SEQ_PAR_MAX_BYTES / par_unit);            // dst par buffer
+
+  u32 trg_unit = (u32)SEQ_TRG_NumLayersGet(src) * SEQ_TRG_NumInstrumentsGet(src);
+  while( max_k > 0 && (u32)(((u16)max_k * spm + 7) / 8) * trg_unit > SEQ_TRG_MAX_BYTES )
+    --max_k;                                               // dst trg buffer (exact ceil)
+
+  return max_k;
+}
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -1857,10 +1896,10 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // the generator auto-mutate fire on the natural tick (reproducing the wander).
   // *** The exact first-step phase is the #1 hardware-validation item (HIL + by-ear). ***
   seq_core_trk_t *t = &seq_core_trk[src];
-  u32 ctr = t->robotize_measure_ctr;
-  u8  widx = (u8)((ctr - k) & 0x0f);
   t->random_traverse_state = frame->traverse_state;
-  t->robotize_seed_state   = t->robotize_seed_snapshots[widx]; // robotize rings per-track already
+  t->robotize_seed_state   = frame->robotize_seed; // self-contained in the frame (was the 16-deep
+                                                   // robotize_seed_snapshots ring, which couldn't
+                                                   // reach 16 bars back and is shared with FREEZE)
   t->step           = frame->step;
   t->step_saved     = frame->step_saved;
   t->step_replay_ctr   = frame->step_replay_ctr;

@@ -65,10 +65,13 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
 [seq_core.c](../core/seq_core.c); verbs in [seq_testctrl.c](../core/seq_testctrl.c).
 
 - **The ring** — always-on, per-bar **generative frame** of the **visible** track:
-  `seq_core_cap_ring[16]` (main SRAM, ~12 KB), each frame = `random_traverse_state` + step/
-  progression counters + the engaged generator slots (`SEQ_GENERATOR_TrackSnapshot`). Robotize
-  already rings per-track (`robotize_seed_snapshots`), so the frame omits it and shares its index
-  (`robotize_measure_ctr & 0x0f`). Appended in `SEQ_CORE_CaptureRingTick()` at the `ref_step==0`
+  `seq_core_cap_ring[SEQ_CORE_CAP_RING_BARS]`, **`SEQ_CORE_CAP_RING_BARS=17`** (the live in-progress
+  bar + **16 grabbable** completed bars; **explicit-modulo** index `% SEQ_CORE_CAP_RING_BARS`, not a
+  power-of-2 mask) (main SRAM, ~12 KB), each frame = `random_traverse_state` + step/progression
+  counters + the engaged generator slots (`SEQ_GENERATOR_TrackSnapshot`) + **`u32 robotize_seed`**.
+  The frame is **self-contained** (carries its own robotize seed), so the re-sim no longer reads the
+  16-deep `robotize_seed_snapshots` ring — that ring stays 16-deep, `& 0x0f`-indexed, and is shared
+  with FREEZE (untouched). Appended in `SEQ_CORE_CaptureRingTick()` at the `ref_step==0`
   hook; reset on run-start (`SEQ_CORE_Reset`); **invalidated on visible-track switch** (bounds the
   costly generator snapshot to one track). The frame is the **pre-advance** state at the boundary
   prologue (before the body `NextStep` and before that measure's mutate, which fires the next tick).
@@ -79,7 +82,7 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
 - **`CMD_CAPTURE_SPAN` 0x4c** — sub-op 0 = capture `[src,K,dst]`, sub-op 1 = ring query. Calls
   `SEQ_CORE_CaptureSpanReSim(src,dst,K)`: snapshot ALL live state → rewind src to the
   window-start frame (restore gen slots + `SEQ_GENERATOR_ForceRewrite` to push the loop into source,
-  traverse, robotize seed from its ring, step/counters; `last_seen=frame->step` so the wander mutate
+  traverse, robotize seed **from the frame**, step/counters; `last_seen=frame->step` so the wander mutate
   fires on the natural tick; **no FIRST_CLK** so the first driven tick does a real NextStep advance/
   draw) → drive K bars **with wander on** at a measure-aligned base `B=(steps_per_measure+1)*96`,
   recording the **emitted** stream via 4 installed `SEQ_MIDI_OUT` hooks (a quantizing sink + synthetic
@@ -87,22 +90,39 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
   `SEQ_GENERATOR_ReSimOnlyTrackSet(src)` gates auto-mutate to src so round-0 loopback tracks can't
   wander/corrupt their (un-snapshotted) pool slots. Refusal codes: −3 running, −4 wrong-track,
   −6 history, −8 not-whole-measure (`spm != steps_per_measure+1`), −9/−12 par/trg overflow,
-  −11 arp. `board.capture_span(src,k,dst)` / `board.capture_ring_query()`.
+  −11 arp. `board.capture_span(src,k,dst)` / `board.capture_ring_query()` (the ring-query reply
+  gained a 4th byte: `max_k` = the par/trg-aware grabbable max, so the UI shows exactly what a grab
+  will accept).
 - **Materialize = record the EMITTED stream, NOT the output mirror.** An output-mirror snapshot
   (`CaptureToTrack`) is just BOUNCE: it loses robotize (emission-time, perturbs the *event* not the
   rendered buffer) AND traversal order (playback-order; `ResetGenerativeForBounce` forces
   `dir_mode=Forward`). The sink quantizes each emitted NoteOn to `step = (tick−B)/step_length` and
   writes the dst note/vel/gate (default gate length this cut). dst geometry inherits src (K-bar
   length, generative axis stripped, groove cleared since it's baked into the emitted positions).
-- **Gotchas:** par and trg carry **independent instrument counts** (drum = par 16-instr / trg
-  1-instr) — use each axis's own count for TrackInit + overflow guard (a conflation bug refused all
-  drum-layout captures). A 16-instrument drum-layout source caps at **K≤4** (par buffer); a true
-  1-voice Note track (K≤16) needs Note par-layer typing, which is *not* a simple field write
-  (`par_assignment_drum[4]` is drum-only) — deferred. **Deferred:** while-playing capture
-  (this cut is stopped-only), precise gate length, live-MIDI-in tape, emission coin-flips, ring
-  persistence, the physical gesture (harness-driven this cut). HIL:
+- **Par-aware grabbable cap** — `SEQ_CORE_CaptureMaxK(src)` = min(ring depth−1, what the dst par/trg/
+  256-step buffers hold for **src's layout** — the dst inherits it). The GP-LED thermometer, the
+  "max N bars" LCD readout, and the ring-query reply (4th byte) all use it, so the lit LEDs equal
+  exactly what a grab accepts (raw ring depth would over-promise). par and trg carry **independent
+  instrument counts** (drum = par 16-instr / trg 1-instr) — each axis uses its own count for TrackInit
+  + the overflow guard (a conflation bug once refused all drum captures). With `SEQ_PAR_MAX_BYTES=1024`
+  / `SEQ_TRG_MAX_BYTES=256`, a 16-instrument drum-layout source caps at **K≤4**; a lean 1-voice melodic
+  source grabs the full **16**. A true 1-voice Note-track init (clean drum-source grabs) needs Note
+  par-layer typing — *not* a simple field write (`par_assignment_drum[4]` is drum-only) — still parked.
+- **Physical gesture** (the first user gesture; host = **UTILITY** on the midiphy panel, all in
+  `seq_ui.c`): transport STOPPED. **Hold UTILITY** → `capture_util_held` arms (GP LED row becomes the
+  `CaptureMaxK` thermometer, UTILITY LED lit; `SEQ_UI_Button_Utility`). **Tap a select-row**
+  (`SEQ_UI_Button_DirectTrack`) → stashes `capture_dst_track`, swallowed so the visible track / ring is
+  unchanged. **Tap GP-n** (`SEQ_UI_Button_GP`) → `SEQ_CORE_CaptureSpanReSim(ring-track, dst, n)` +
+  commit. Quick UTILITY tap (<`CAPTURE_UTIL_TAP_MS`=500ms, no sub-gesture) = the stock Utility page; a
+  hold returns you where you were. LCD overlay "CAPTURE T<src> → T<dst>  max N bars" + result/refusal.
+  `BTN_UTILITY=0x17` for testctrl button injection; the gesture path is **not** testctrl-gated (works
+  in the gig `TESTCTRL=0` build).
+- **Deferred:** while-playing capture (this cut is stopped-only), precise gate length, live-MIDI-in
+  tape, emission coin-flips, ring persistence, the true 1-voice Note-track init. HIL:
   [test_capture_span.py](../../../../tests/apps/seq_v4/test_capture_span.py),
-  [test_clock_step.py](../../../../tests/apps/seq_v4/test_clock_step.py). By-ear/by-eye GO 2026-06-20.
+  [test_capture_span_gesture.py](../../../../tests/apps/seq_v4/test_capture_span_gesture.py),
+  [test_clock_step.py](../../../../tests/apps/seq_v4/test_clock_step.py). Full HIL 187/187 green;
+  by-hand/by-ear GO 2026-06-20.
 
 ### Persistence is versioned at the per-track level
 

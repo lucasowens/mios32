@@ -199,6 +199,7 @@ class Button:
     UNDO = 0x14
     COPY = 0x15
     PASTE = 0x16
+    UTILITY = 0x17  # hosts the retroactive-CAPTURE span gesture (UTILITY held)
 
     @staticmethod
     def GP(n: int) -> int:

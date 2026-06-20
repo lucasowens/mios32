@@ -533,6 +533,10 @@ extern s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, 
 extern u8 SEQ_CORE_CaptureRingDepth(void);
 extern u8 SEQ_CORE_CaptureRingTrack(void);
 extern u8 SEQ_CORE_CaptureRingOverflow(void);
+// Max grabbable bars right now = min(ring depth-1, what the dst par/trg/256-step
+// buffers hold for src's layout). The UI lights this many GP LEDs so they match
+// exactly what a grab accepts (raw ring depth over-promises on heavy layouts).
+extern u8 SEQ_CORE_CaptureMaxK(u8 src);
 
 // Re-simulate the last `k` bars of `src` (the ring's recorded track) into the
 // static `dst` track, recording the emitted stream. Transport must be STOPPED.
