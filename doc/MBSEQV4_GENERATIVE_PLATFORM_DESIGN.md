@@ -489,7 +489,15 @@ never speculatively).
    gated on the still-open morph keep/cut (§10).
 4. **Robotize is the lone emission-time special-case** (resets on bounce, §3). Migrating it
    to a render-stack processor completes the §3 closure and drops the exception. *Its own
-   session (already queued in §10).*
+   session (already queued in §10).* — *This is also the engine that drives overlap #5: each
+   emission effect migrated here moves from CAPTURE's note-only residue into BOUNCE's lossless path.*
+5. **CAPTURE and BOUNCE are one verb (NAMED 2026-06-20, see §9).** Both freeze the organism's
+   output to static material; they're split only by the render/emission boundary (bounce sees the
+   rendered layers losslessly; the ring/tape catches the emission residue as notes). The unified
+   model is **one retroactive `FREEZE → [track, pattern]`** — bounce as the lossless core, made
+   retroactive by the ring, with the emission residue shrinking to zero via overlap #4's migration.
+   *First slice shipped (precise gate + multi-step, 2026-06-20); next = bounce-off-the-ring with a
+   pattern destination.*
 
 **Verdict:** no core restructuring needed. The spine earns its keep; these are surface
 consolidations to take one at a time, each proven by ear. The fragility locus is the one
@@ -2099,6 +2107,53 @@ crystallized here; build order is a later GO.
   = poor ROI; find savings via CCM placement / slot-count instead). **CV/AOUT is
   actively used (full midiphy CV/Gate/Trigger rig) — never a cut candidate.**
 
+**2026-06-20 — CAPTURE and BOUNCE are one verb: the unified retroactive FREEZE → anywhere (model decided; build slicing).**
+The user's framing, after the precise-gate/multi-step work landed: CAPTURE (the retroactive grab off
+the ring) and BOUNCE (the lossless freeze of the computed output) are *two means to one end* — freeze
+whatever the organism is doing (**playing / generated / programmed**) into static material, in
+**whatever track/pattern** you choose. They should be **one feature**. The reason they're separate
+today is not philosophical — it's a single engine boundary:
+
+- **Render stage** — programmed layers, the generator's *current loop*, and the render-stack
+  transforms (FTS / limit / tension / transpose / chord-mask / the pitch chain). The full result
+  lives in the rendered mirror **as par/trg layers** → losslessly copyable. **BOUNCE already grabs
+  this** — all params + trigs + CC + config (`SEQ_CORE_CaptureTrackOutput`).
+- **Emission stage** — random traversal *order*, robotize, roll-as-played, echo, probability/humanize
+  coin-flips, **live MIDI keys**. These fire per-tick *after* render and **flatten into the played
+  notes** — they are no longer layers, so the only faithful record is the note stream. **The ring /
+  tape grabs this** (note/vel/length; a roll *collapses* to one quantized note — lossy by nature).
+
+**Decided model — one verb: `FREEZE [last K bars of the ring] → [track, pattern], all params,
+generators off`:**
+- **Bounce is the lossless foundation, not capture.** Correction to the earlier "two tools, division
+  of labor" framing (the §10 CAPTURE entry's "BOUNCE freezes transforms / CAPTURE freezes the
+  timeline"): the note-stream is the *weaker* base — it collapses rolls/chords to single notes; bounce
+  keeps every layer editable. The unified verb is **bounce, made retroactive by the ring, targetable
+  to any track + pattern** (slot-bounce — `SEQ_CORE_CaptureToSlotTrack` — already writes to a pattern).
+- **The emission residue is the only thing that still needs the note-stream — and it is not
+  permanent.** Every emission effect that migrates into the render stack (robotize→render-processor is
+  the named piece — §5.6 #4) moves from the note-only residue into the lossless bounce path. **When the
+  migration completes, FREEZE = BOUNCE = one verb;** the note-stream survives only for the irreducible
+  real-time input (live MIDI keys, true emission coin-flips) that cannot be expressed as layers at all.
+  **Convergence, not duplication.**
+- **Memory is not the obstacle.** The static layers (roll/chord/CC) don't vary per bar → captured
+  once; only the per-bar notes vary, which the ring already holds.
+
+This **reconciles** two prior decisions that look contradictory: 2026-05-30 ("delete the emission tape,
+unify on bounce") concluded bounce *alone* suffices; the 2026-06-20 ring/tape proved an emission
+residue bounce genuinely can't see (traversal order / robotize / live keys), so a tape came back. Both
+are right — bounce is the lossless core; the tape is the **temporary** catch for not-yet-migrated
+emission, shrinking to zero by render-stack migration.
+
+**Shipped toward it (2026-06-20):** precise gate length + **multi-step length reconstruction** — a
+hand-drawn >1-step note isn't one big length value, it's a length *chain* across steps (max a step's
+length, carry it on the next), so the tape now rebuilds it: gated Gld start + carried Gld steps (note +
+velocity repeated, gate off) + a fractional tail that terminates the sustain. The note-stream capture
+is now faithful for melodic articulation including long notes (by-ear GO; HIL
+`test_capture_precise_gate.py`). **Tape path only; the stopped re-sim sink is the same-helper
+follow-on.** **Next slice = bounce-off-the-ring with dest = track + pattern** (lossless retroactive
+freeze to any slot). Slice plan: `doc/plans/2026-06-20-unified-freeze.md`.
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -2605,10 +2660,25 @@ is cheap; capture mints a new clip.)
   skew); `SEQ_CORE_CaptureSpanTape` quantizes the window under `MUTEX_MIDIOUT`; the dispatcher
   `SEQ_CORE_CaptureSpan` routes PLAYING→tape / STOPPED→re-sim so the UTILITY gesture is identical in
   both states. Infra: `CMD_TRANSPORT` (the real play-button path) closes the long-flagged "no
-  clock-START verb" HIL gap. First cut = note-ons/default-gate (matches re-sim); **precise gate
-  (record the note-offs the tee already carries) is the queued follow-on.** Still deferred:
-  precise gate, live-MIDI-in tape, emission coin-flips, ring persistence, true 1-voice Note-init,
-  the window-seam groove/delay edge.
+  clock-START verb" HIL gap. First cut = note-ons/default-gate (matches re-sim).
+
+  **→ PRECISE GATE + MULTI-STEP LENGTH SHIPPED (tape path) + by-ear GO 2026-06-20.** The tap records
+  the note-offs the tee already carries (running-status vel-0); `SEQ_CORE_CaptureGateToParLen` inverts
+  the playback formula (gate = tps·len/96) back to a stored length. The load-bearing fix: a hand-drawn
+  note longer than one step is a length **chain** across steps (the player maxes a step's length, then
+  carries it on the next), so a lone Gld start step would lose the duration (it just ties to the next
+  note). `SEQ_CORE_CaptureMaterializeNote` rebuilds the chain — gated Gld start, carried Gld steps
+  (note + velocity repeated, gate off), fractional tail that terminates the sustain — exactly SEQ's
+  hand-drawn long-note encoding. The stopped re-sim sink got the simpler glide-tail fix (still-open
+  note at window end → Gld) but **not yet** the full multi-step helper (same-helper follow-on). HIL
+  `test_capture_precise_gate.py` (gate-gradient + glide + multi-step pins). This closes the
+  precise-gate refinement and is the **first shipped slice of the unified FREEZE → anywhere model (§9
+  2026-06-20)** — CAPTURE and BOUNCE are one verb, bounce the lossless core, the tape the temporary
+  catch for the not-yet-migrated emission residue.
+
+  Still deferred: re-sim multi-step (same helper), bounce-off-the-ring with dest = pattern (the next
+  slice), live-MIDI-in tape, emission coin-flips, ring persistence, true 1-voice Note-init, the
+  window-seam groove/delay edge.
 
 **Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
 A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six
