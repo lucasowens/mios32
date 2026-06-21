@@ -36,6 +36,7 @@ from .sysex import (
     CMD_FREEZE_SET,
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
+    CMD_TRACK_NOTE_INIT,
     CMD_GENERATOR_QUERY,
     CMD_GENERATOR_TICK_FORCE,
     CMD_GENERATOR_DIAL_SET,
@@ -617,6 +618,27 @@ class Board:
             raise RuntimeError(f"short TRACK_DRUM_INIT reply: {payload!r}")
         if payload[1] != CMD_STATUS_OK:
             raise ValueError(f"TRACK_DRUM_INIT status {payload[1]:#04x}")
+
+    def track_note_init(self, track: int, timeout: float = 1.0) -> None:
+        """Build a melodic Note track with Note/Velocity/Length/Roll par layers
+        (16 par steps × 4 layers × 1 instr, 16 trg × 8 layers × 1 instr).
+
+        track_drum_init gives only a single Note layer (no velocity or length),
+        so use this when a test must exercise the velocity or length layers —
+        e.g. precise-gate capture, which reads the length layer back. Layer
+        indices after this call: 0=Note, 1=Velocity, 2=Length, 3=Roll.
+
+        Destructive: par + trg layers are cleared.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_NOTE_INIT, bytes([track])))
+        payload = self.wait_for_sysex(CMD_TRACK_NOTE_INIT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short TRACK_NOTE_INIT reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_NOTE_INIT status {payload[1]:#04x}")
 
     def ui_instrument_set(self, instr: int, timeout: float = 1.0) -> None:
         """Park the UI's drum-slot cursor (ui_selected_instrument).

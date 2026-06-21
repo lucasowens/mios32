@@ -127,6 +127,11 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 //   (CLOCK_STEP only drives ticks while stopped, IsRunning() stays false). Fills 0x4a.
 //   payload [action: 0=start, 1=stop] -> reply [action, is_running].
 #define CMD_TRANSPORT            0x4a
+// TRACK_NOTE_INIT: build a melodic Note track with Note/Velocity/Length/Roll par layers
+//   (16 steps x 4 layers x 1 instr) so tests can exercise velocity + precise-gate capture.
+//   track_drum_init gives only a single Note layer (no length). payload [track] ->
+//   reply [track, status]. Fills 0x49 (CAPTURE-bundle low gap).
+#define CMD_TRACK_NOTE_INIT      0x49
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -523,6 +528,37 @@ static void cmd_track_drum_init(mios32_midi_port_t port, const u8 *payload, u8 p
   reply[0] = track;
   reply[1] = 0x01;
   send_reply(port, CMD_TRACK_DRUM_INIT, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_NOTE_INIT payload: [track]
+// Build a melodic Note track with the standard Note/Velocity/Length/Roll par layers so
+// HIL can exercise velocity + precise-gate capture (track_drum_init gives a single Note
+// layer, which carries no length). 16 par steps x 4 layers x 1 instr; 16 trg x 8 x 1.
+static void cmd_track_note_init(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_TRACK_NOTE_INIT, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+
+  SEQ_PAR_TrackInit(track, 16, 4, 1);   // 16 steps x 4 par layers x 1 instr
+  SEQ_TRG_TrackInit(track, 16, 8, 1);
+
+  // event_mode = Note first (so LAY_CONST writes land in lay_const[]), then the standard
+  // melodic layer assignment, then refresh the link cache (link_par_layer_note/vel/length).
+  SEQ_CC_Set(track, SEQ_CC_MIDI_EVENT_MODE, SEQ_EVENT_MODE_Note);
+  SEQ_CC_Set(track, SEQ_CC_LAY_CONST_A1+0, SEQ_PAR_Type_Note);
+  SEQ_CC_Set(track, SEQ_CC_LAY_CONST_A1+1, SEQ_PAR_Type_Velocity);
+  SEQ_CC_Set(track, SEQ_CC_LAY_CONST_A1+2, SEQ_PAR_Type_Length);
+  SEQ_CC_Set(track, SEQ_CC_LAY_CONST_A1+3, SEQ_PAR_Type_Roll);
+  SEQ_CC_LinkUpdate(track);
+
+  reply[0] = track;
+  reply[1] = 0x01;
+  send_reply(port, CMD_TRACK_NOTE_INIT, reply, sizeof(reply));
 }
 
 
@@ -2451,6 +2487,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_UI_INSTR_SET:
             cmd_ui_instr_set(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_NOTE_INIT:
+            cmd_track_note_init(port, payload_buf, payload_len);
             break;
           case CMD_TRACK_DRUM_INIT:
             cmd_track_drum_init(port, payload_buf, payload_len);

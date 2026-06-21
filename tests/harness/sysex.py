@@ -71,6 +71,7 @@ CMD_RNG_SEED = 0x4d  # per-track-RNG keystone seeds — sub-op: 0=gen get,1=gen 
 CMD_CLOCK_STEP = 0x4b  # CAPTURE: drive N bpm-ticks while stopped (NextStep/traversal/wander)
 CMD_CAPTURE_SPAN = 0x4c  # CAPTURE: grab last K bars of visible track -> static dst (re-sim stopped / tape playing)
 CMD_TRANSPORT = 0x4a  # genuinely start/stop the master transport (play-button path) — while-playing HIL
+CMD_TRACK_NOTE_INIT = 0x49  # build a melodic Note track w/ Note/Vel/Length/Roll layers (precise-gate HIL)
 
 # CMD_RNG_SEED sub-ops — keep in sync with seq_testctrl.c
 RNG_SEED_GEN_GET = 0x00

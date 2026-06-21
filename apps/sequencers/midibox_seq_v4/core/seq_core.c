@@ -241,9 +241,10 @@ static u8  seq_core_cap_resim_active  = 0;    // 1 while a CAPTURE re-sim drives
 /////////////////////////////////////////////////////////////////////////////
 typedef struct {
   u32 tick;   // absolute scheduled bpm-tick (item->timestamp at the drain)
+  u16 gate;   // gate length in bpm-ticks (off.tick - on.tick); 0 = no off seen yet -> default
   u8  note;
   u8  vel;
-} seq_core_cap_tape_evt_t;
+} seq_core_cap_tape_evt_t; // 8 bytes (the old {u32,u8,u8} was already padded to 8 -> gate is free)
 #define SEQ_CORE_CAP_TAPE_EVENTS 768  // ~6 KB main SRAM; 16 bars of mono melodic ~256 notes,
                                       // so ~3x headroom. Dense/poly overruns -> grab refuses (-10).
 static seq_core_cap_tape_evt_t seq_core_cap_tape[SEQ_CORE_CAP_TAPE_EVENTS]; // main SRAM
@@ -251,6 +252,75 @@ static u16 seq_core_cap_tape_head;    // ring write cursor (next slot)
 static u16 seq_core_cap_tape_count;   // retained events (saturates at EVENTS once wrapped)
 static u32 seq_core_cap_tape_bar_start[SEQ_CORE_CAP_RING_BARS]; // downbeat abs tick per bar slot
 
+
+// Convert a measured gate length (bpm-ticks) into a stored length-layer par value.
+// Playback re-derives the gate as tps*(v+1)/96 (the step scheduler at line ~4162 /
+// SEQ_PAR_LengthGet), so invert: v = round(gate*96/tps) - 1, clamped to a single step's
+// range [0..95] (95 -> len 96 = glide/tie, the longest a single step expresses). A 0 gate
+// (no note-off recorded: still ringing at grab, or it scrolled out) falls back to the
+// ~3/4 default both capture paths used before precise gate.
+#define SEQ_CORE_CAP_DEFAULT_LEN 71   // ~3/4 gate (v=71 -> len 72 -> 72/96)
+static u8 SEQ_CORE_CaptureGateToParLen(u32 gate_ticks, u16 tps)
+{
+  if( gate_ticks == 0 || tps == 0 ) return SEQ_CORE_CAP_DEFAULT_LEN;
+  u32 len = (gate_ticks * 96 + (tps / 2)) / tps;  // nearest len (= v+1)
+  if( len < 1 ) len = 1;
+  if( len > 96 ) len = 96;
+  return (u8)(len - 1);
+}
+
+// Materialize a captured note that sounded for `gate` bpm-ticks starting at dst step
+// `step0`, reproducing SEQ's MULTI-STEP length encoding. A hand-drawn note longer than one
+// step isn't a single high length value (a step's length maxes at Gld = one step + tie) —
+// it's a CHAIN: the player maxes a step's length, then carries it on the next step's length,
+// and so on. So a captured note within one step keeps its fractional gate (unchanged), but a
+// longer note must be written across the steps it covers: gated Gld start, each fully-covered
+// step carried at Gld (note repeated, gate OFF so it doesn't re-trigger -> sustains/ties), and
+// a final partial step (note, gate OFF, length < Gld) whose sub-step length terminates the
+// sustain at the right tick. Without this the lone Gld start step just ties to the NEXT note,
+// losing the real duration. (Needs a length layer to carry the tie; without one a >1-step note
+// degrades to a single gated step.)
+static void SEQ_CORE_CaptureMaterializeNote(u8 dst, u16 step0, u16 dst_steps, u32 gate, u16 tps,
+                                            u8 note, u8 vel,
+                                            s8 note_layer, s8 vel_layer, s8 len_layer)
+{
+  if( tps == 0 ) tps = 96;
+  u16 full = (u16)(gate / tps);   // fully-covered steps (0 if the note fits within one step)
+  u16 rem  = (u16)(gate % tps);   // partial tail ticks into the next step
+
+  // start step (always gated)
+  if( note_layer >= 0 ) SEQ_PAR_Set(dst, step0, (u8)note_layer, 0, note);
+  if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, step0, (u8)vel_layer,  0, vel);
+  if( len_layer  >= 0 )
+    SEQ_PAR_Set(dst, step0, (u8)len_layer, 0,
+                (full >= 1) ? 95 : SEQ_CORE_CaptureGateToParLen(gate, tps));
+  SEQ_TRG_GateSet(dst, step0, 0, 1);
+  if( full < 1 || len_layer < 0 )
+    return;                       // single-step note, or no length layer to carry the tie
+
+  // carried full steps: Gld + note/vel repeated, gate stays OFF (PrepDst cleared the trg
+  // buffer). Carry the velocity too so the captured track matches the source's data — the
+  // carried steps are gate-off ties so it doesn't sound, but an edit that gates one later
+  // must find the note's velocity there, not 0.
+  u16 i;
+  for(i=1; i<full; ++i) {
+    u16 st = (u16)(step0 + i);
+    if( st >= dst_steps ) return;
+    if( note_layer >= 0 ) SEQ_PAR_Set(dst, st, (u8)note_layer, 0, note);
+    if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, st, (u8)vel_layer,  0, vel);
+    SEQ_PAR_Set(dst, st, (u8)len_layer, 0, 95);
+  }
+  // partial tail: a gate-off note event whose <Gld length ends the sustain mid-step
+  if( rem > 0 ) {
+    u16 st = (u16)(step0 + full);
+    if( st >= dst_steps ) return;
+    u8 tail = SEQ_CORE_CaptureGateToParLen(rem, tps);
+    if( tail > 94 ) tail = 94;    // keep < 96 (Gld) so it terminates rather than tying onward
+    if( note_layer >= 0 ) SEQ_PAR_Set(dst, st, (u8)note_layer, 0, note);
+    if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, st, (u8)vel_layer,  0, vel);
+    SEQ_PAR_Set(dst, st, (u8)len_layer, 0, tail);
+  }
+}
 
 // Discard the live tape (run-start / track-switch): the recorded notes no longer
 // describe the recording track.
@@ -275,11 +345,11 @@ static void SEQ_CORE_CaptureRingReset(void)
 }
 
 // Passive tee from the MIDI-out drain (SEQ_MIDI_OUT_Handler), installed once at init
-// and always live. Records the recording track's emitted NOTE-ONS into the live tape
-// while PLAYING. Cheap fast-path guards first; ignored during re-sim drives (those use
-// the redirect sink, not this tee) and when stopped (nothing to record). First cut:
-// note-ons only -> default gate on grab (matches re-sim); note-offs would give precise
-// gate (a fast follow), which is why the tap signature carries them but we filter here.
+// and always live. Records the recording track's emitted notes into the live tape while
+// PLAYING. Cheap fast-path guards first; ignored during re-sim drives (those use the
+// redirect sink, not this tee) and when stopped (nothing to record). Note-ons append to
+// the ring; note-offs (running-status, vel 0) back-fill the matching on's gate so a grab
+// reproduces the precise articulation, not a fixed default.
 static s32 SEQ_CORE_CaptureTapeTap(mios32_midi_port_t port, mios32_midi_package_t p, u32 timestamp)
 {
   (void)port;
@@ -287,9 +357,34 @@ static s32 SEQ_CORE_CaptureTapeTap(mios32_midi_port_t port, mios32_midi_package_
   if( seq_core_cap_ring_track >= SEQ_CORE_NUM_TRACKS ) return 0; // no recording track
   if( !SEQ_BPM_IsRunning() ) return 0;                      // tape only while playing
   if( p.cable != seq_core_cap_ring_track ) return 0;        // only the recording track (cable carries it)
-  if( p.event != 0x9 || p.velocity == 0 ) return 0;         // note-ons only (first cut)
+  if( p.event != 0x9 ) return 0;                            // note events only
+
+  if( p.velocity == 0 ) {
+    // Note-off (running-status: every engine note-off is the same package with vel 0,
+    // seq_midi_out.c:672 / seq_core.c:2699). Back-fill the gate of the most recent still-
+    // open note-on of the same number (LIFO match — correct for re-triggers). The off's
+    // scheduled tick is on_tick+gatelength, so gate = timestamp - on.tick. A note whose off
+    // never arrives (held past grab / scrolled out of the ring) keeps gate 0 -> default.
+    u16 n = seq_core_cap_tape_count;
+    u16 idx = seq_core_cap_tape_head;                       // one past the newest; walk back
+    u16 j;
+    for(j=0; j<n; ++j) {
+      idx = (u16)((idx + SEQ_CORE_CAP_TAPE_EVENTS - 1) % SEQ_CORE_CAP_TAPE_EVENTS);
+      seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[idx];
+      if( e->note == p.evnt1 && e->gate == 0 ) {
+        s32 g = (s32)(timestamp - e->tick);
+        if( g < 1 ) g = 1;                                  // guard same-tick / reorder
+        e->gate = (g > 0xffff) ? 0xffff : (u16)g;
+        break;
+      }
+    }
+    return 0;
+  }
+
+  // Note-on: append (gate filled in by the matching off above).
   seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[seq_core_cap_tape_head];
   e->tick = timestamp;
+  e->gate = 0;
   e->note = p.evnt1;
   e->vel  = p.evnt2;
   seq_core_cap_tape_head = (u16)((seq_core_cap_tape_head + 1) % SEQ_CORE_CAP_TAPE_EVENTS);
@@ -1798,11 +1893,12 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 // "Capture MIDI" — traversal order + robotize live in the emitted notes, NOT in
 // the rendered mirror) and quantizing it into dst across K bars.
 //
-// FIRST CUT: transport must be STOPPED (the re-sim drives the one engine
-// exclusively — no +4 tick race, no live freeze, no BPM gap; the "while playing"
-// path is a follow-on). Materialize is incremental + note-on-only with a default
-// gate length (pitch/rhythm/velocity/traversal/wander captured; precise gate
-// length is a refinement). Melodic/normal tracks (drum note-0 fence deferred).
+// STOPPED transport (the re-sim drives the one engine exclusively — no +4 tick race,
+// no live freeze, no BPM gap; the while-playing tape is the running case). Materialize
+// quantizes the emitted note-ons (pitch/rhythm/velocity/traversal/wander) and now also
+// the precise gate: the sink pairs each note-off with its open note-on and writes the
+// measured length. Notes still ringing past the window keep the default gate.
+// Melodic/normal tracks (drum note-0 fence deferred).
 /////////////////////////////////////////////////////////////////////////////
 
 // Full live-state snapshot so the re-sim borrow is non-destructive.
@@ -1832,13 +1928,42 @@ static u32 capspan_base;         // synthetic bpm-tick at the window start
 static s8  capspan_note_layer, capspan_vel_layer, capspan_len_layer;
 static u8  capspan_default_len;
 
+// Open-note tracking for precise gate (re-sim path): the drive drains a note-on (vel>0)
+// then its off (vel==0) at on_tick+gatelength. Remember each open note's dst step + on
+// tick; when its off drains, gate = off_tick - on_tick -> the step's length. Small bounded
+// array (a melodic line holds few at once); overflow or a missed off -> default gate. The
+// invariant is "at most one open entry per dst step": a new on at a step evicts the prior
+// occupant there, matching the sink's last-write-wins quantize.
+#define CAPSPAN_OPEN_MAX 24
+static struct { u8 note; u16 step; u32 on_tick; } capspan_open[CAPSPAN_OPEN_MAX];
+static u8 capspan_open_count;
+static u8 capspan_in_flush;      // 1 during the post-drive flush: those offs are past-window, skip gate
+
 // MIDI-out hooks (run the scheduler against synthetic time + a quantizing sink).
 static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t package)
 {
   if( package.evnt0 >= 0xf8 ) return 0;          // ignore realtime (clock etc.)
   if( package.cable != capspan_src ) return 0;   // only the captured track
-  if( package.event != NoteOn ) return 0;        // first cut: note-ons only
-  if( package.evnt2 == 0 ) return 0;             // running-status note-off -> skip
+  if( package.event != NoteOn ) return 0;        // note events only
+
+  if( package.evnt2 == 0 ) {                      // running-status note-off
+    if( capspan_in_flush || capspan_len_layer < 0 ) return 0; // flush offs are past-window
+    u8 ki;                                        // newest-first match -> back-fill its step's length
+    for(ki=capspan_open_count; ki>0; --ki) {
+      if( capspan_open[ki-1].note == package.evnt1 ) {
+        u32 gate = capspan_cur_tick - capspan_open[ki-1].on_tick;
+        SEQ_PAR_Set(capspan_dst, capspan_open[ki-1].step, (u8)capspan_len_layer, 0,
+                    SEQ_CORE_CaptureGateToParLen(gate, capspan_tps));
+        u8 m;                                     // remove entry, preserve LIFO order of the rest
+        for(m=ki-1; m+1<capspan_open_count; ++m)
+          capspan_open[m] = capspan_open[m+1];
+        --capspan_open_count;
+        break;
+      }
+    }
+    return 0;
+  }
+
   if( capspan_cur_tick < capspan_base ) return 0;
   u16 step = (u16)((capspan_cur_tick - capspan_base) / capspan_tps);
   if( step >= capspan_dst_steps ) return 0;      // outside the K-bar window
@@ -1846,8 +1971,21 @@ static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t p
     SEQ_PAR_Set(capspan_dst, step, (u8)capspan_note_layer, 0, package.evnt1);
   if( capspan_vel_layer >= 0 )
     SEQ_PAR_Set(capspan_dst, step, (u8)capspan_vel_layer, 0, package.evnt2);
-  if( capspan_len_layer >= 0 )
-    SEQ_PAR_Set(capspan_dst, step, (u8)capspan_len_layer, 0, capspan_default_len);
+  if( capspan_len_layer >= 0 ) {
+    SEQ_PAR_Set(capspan_dst, step, (u8)capspan_len_layer, 0, capspan_default_len); // default until off
+    // keep one open entry per step: evict a prior note still open at this step (superseded
+    // by last-write-wins), then record this on so its off back-fills the precise length.
+    u8 w = 0, r;
+    for(r=0; r<capspan_open_count; ++r)
+      if( capspan_open[r].step != step ) capspan_open[w++] = capspan_open[r];
+    capspan_open_count = w;
+    if( capspan_open_count < CAPSPAN_OPEN_MAX ) {
+      capspan_open[capspan_open_count].note    = package.evnt1;
+      capspan_open[capspan_open_count].step    = step;
+      capspan_open[capspan_open_count].on_tick = capspan_cur_tick;
+      ++capspan_open_count;
+    }
+  }
   SEQ_TRG_GateSet(capspan_dst, step, 0, 1);
   return 0;
 }
@@ -1980,7 +2118,9 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   capspan_note_layer = dtcc->link_par_layer_note;
   capspan_vel_layer  = dtcc->link_par_layer_velocity;
   capspan_len_layer  = dtcc->link_par_layer_length;
-  capspan_default_len = 71;                             // ~3/4 gate (refinement: derive from off)
+  capspan_default_len = SEQ_CORE_CAP_DEFAULT_LEN;       // fallback for notes whose off is past-window
+  capspan_open_count = 0;                               // precise-gate open-note tracking starts empty
+  capspan_in_flush = 0;
 
   // (c) rewind src to the window-start frame. The frame is the state at that measure's
   // ref_step==0 prologue (BEFORE the body's NextStep advance), so we restore it verbatim
@@ -2041,8 +2181,12 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   }
 
   // (e) flush residual queued items (note-offs scheduled past the window) through the
-  //     still-installed sink (it skips velocity-0) so they don't leak into live output,
-  //     then uninstall hooks.
+  //     still-installed sink so they don't leak into live output, then uninstall hooks.
+  //     capspan_in_flush makes the sink skip gate back-fill here: a glide/sustained note's
+  //     off is deferred (scheduled at 0xffffffff and only rescheduled when the tie breaks),
+  //     so a note still sustaining at the window end drains its off in this flush at a stale
+  //     tick — handled below as a glide, not via this gate math.
+  capspan_in_flush = 1;
   SEQ_MIDI_OUT_FlushQueue();
   SEQ_MIDI_OUT_Callback_MIDI_SendPackage_Set(NULL);
   SEQ_MIDI_OUT_Callback_BPM_IsRunning_Set(NULL);
@@ -2050,6 +2194,18 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   SEQ_MIDI_OUT_Callback_BPM_Set_Set(NULL);
   seq_core_cap_resim_active = 0;
   SEQ_GENERATOR_ReSimOnlyTrackSet(0xff);
+
+  // Notes still OPEN after the drive never saw an in-window note-off: they sustained PAST
+  // the captured window — a glide/tie into the next (uncaptured) note, or a sustain-mode
+  // tail. A note only stays open if its off was deferred past window end (its gatelength
+  // exceeded the room left), i.e. it genuinely ties; a normal note's off drains in the
+  // loop. Mark them as glide (95 -> len 96, the longest a step expresses) so the tie is
+  // preserved instead of collapsing to the default gate.
+  if( capspan_len_layer >= 0 ) {
+    u8 oi;
+    for(oi=0; oi<capspan_open_count; ++oi)
+      SEQ_PAR_Set(capspan_dst, capspan_open[oi].step, (u8)capspan_len_layer, 0, 95);
+  }
 
   // (f) restore the live engine (byte-identical) and mark only dst dirty
   SEQ_CORE_CaptureSpanRestore(src);
@@ -2126,12 +2282,16 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
   s8 len_layer  = dtcc->link_par_layer_length;
 
   // Quantize the window's note-ons -> steps. Iterate oldest..newest; collisions on a
-  // step are last-write-wins (melodic-mono target, same as the re-sim sink).
-  // EDGE (first cut, off the by-ear proof span): the taped tick has groove/step/port
-  // delay baked in, so a note swung EARLY past win_start (negative groove) is dropped as
-  // "before window", and one pushed LATE past win_end is dropped as "live bar". The
-  // clean melodic target has no such offset; precise edge handling rides with the
-  // precise-gate refinement (record note-offs).
+  // step are last-write-wins (melodic-mono target, same as the re-sim sink). Each on
+  // carries its precise gate (off.tick-on.tick, back-filled at tap time); a note still
+  // ringing at grab keeps gate 0 -> SEQ_CORE_CaptureGateToParLen returns the default. A
+  // note spanning more than one step is written as a multi-step length chain (SEQ's
+  // hand-drawn long-note encoding) by SEQ_CORE_CaptureMaterializeNote — a single Gld start
+  // step would otherwise lose the duration (it would just tie to the next note).
+  // EDGE (off the by-ear proof span): the taped tick has groove/step/port delay baked in,
+  // so a note swung EARLY past win_start (negative groove) is dropped as "before window",
+  // and one pushed LATE past win_end is dropped as "live bar". The clean melodic target
+  // has no such offset; precise window-seam handling stays deferred.
   u16 n = seq_core_cap_tape_count;
   u16 idx = (u16)((seq_core_cap_tape_head + SEQ_CORE_CAP_TAPE_EVENTS - n) % SEQ_CORE_CAP_TAPE_EVENTS);
   u16 i;
@@ -2142,10 +2302,8 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
     if( (s32)(e->tick - win_end) >= 0 ) continue;      // in the live bar (not completed)
     u16 step = (u16)((e->tick - win_start) / tps);
     if( step >= dst_steps ) continue;
-    if( note_layer >= 0 ) SEQ_PAR_Set(dst, step, (u8)note_layer, 0, e->note);
-    if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, step, (u8)vel_layer,  0, e->vel);
-    if( len_layer  >= 0 ) SEQ_PAR_Set(dst, step, (u8)len_layer,  0, 71); // ~3/4 gate (first cut)
-    SEQ_TRG_GateSet(dst, step, 0, 1);
+    SEQ_CORE_CaptureMaterializeNote(dst, step, dst_steps, e->gate, (u16)tps,
+                                    e->note, e->vel, note_layer, vel_layer, len_layer);
   }
 
   SEQ_PATTERN_DirtySetTrack(dst); // the capture IS a deliberate change to dst
