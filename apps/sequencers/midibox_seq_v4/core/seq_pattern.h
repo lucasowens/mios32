@@ -83,6 +83,16 @@ extern void SEQ_PATTERN_ProbePhrasesOnLoad(void);
 // its live state (pos 0, true pass-through) toward a target phrase's same-group
 // slice (pos PHRASE_MORPH_MAX). live = A + pos/MAX*(B-A), applied per-measure.
 // Grid/notes untouched; the other 3 groups untouched. See design §10.
+//
+// SEQ_PHRASE_MORPH gates the whole feature (the ~7.7 KB arm/target buffers + the
+// per-measure apply). Default ON; `make PHRASE_MORPH=0` compiles it out to reclaim
+// the RAM — the 7 entry points below become stubs (Target() returns -1, so every UI
+// morph intercept falls through). By-ear CUT candidate, design §9 2026-06-22. The
+// extern decls stay unconditional so the call sites link either way; PHRASE_MORPH_MAX
+// stays defined (seq_ui.c references it unconditionally).
+#ifndef SEQ_PHRASE_MORPH
+#define SEQ_PHRASE_MORPH 1
+#endif
 #define PHRASE_MORPH_MAX 16
 extern s32 SEQ_PATTERN_PhraseMorphArm(u8 n);    // arm target B = phrase n, group = ui_selected_group
 extern s32 SEQ_PATTERN_PhraseMorphSet(u8 v);    // set pos 0..PHRASE_MORPH_MAX (defers apply to boundary)

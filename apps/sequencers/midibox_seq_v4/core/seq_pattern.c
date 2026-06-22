@@ -113,6 +113,7 @@ static char seq_phrase_name[SEQ_FILE_B_NUM_PHRASES][21];
 //         non-drum tracks.  Extra ~6.5 KB .bss.  Grid and the other 3 groups
 //         are untouched.  Note swap and gate share one frozen per-step threshold
 //         so each step commits to B as a unit.
+#if SEQ_PHRASE_MORPH
 static u8 phrase_morph_target;  // armed target phrase B (0xff = disarmed)
 static u8 phrase_morph_group;   // focused group, LATCHED at arm time (0..NUM_GROUPS-1)
 static u8 phrase_morph_pos;     // morph position 0..PHRASE_MORPH_MAX
@@ -139,6 +140,7 @@ static u16 phrase_morph_p_size[SEQ_CORE_NUM_TRACKS_PER_GROUP];     // LIVE par s
 static u8  phrase_morph_vel_layer[SEQ_CORE_NUM_TRACKS_PER_GROUP];  // velocity par layer index (0xff = none)
 static u8  phrase_morph_note_layer[SEQ_CORE_NUM_TRACKS_PER_GROUP]; // note par layer index (0xff = none)
 static u8  phrase_morph_has_steps[SEQ_CORE_NUM_TRACKS_PER_GROUP];  // 1 = step data valid for this slot
+#endif
 
 // fill a 20-char name field with spaces + NUL (blank => UI shows the number)
 static void phrase_name_blank(char *p)
@@ -164,6 +166,7 @@ s32 SEQ_PATTERN_Init(u32 mode)
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
   phrase_drift = 0;
+#if SEQ_PHRASE_MORPH
   phrase_morph_target = 0xff; // disarmed
   phrase_morph_pos = 0;
   phrase_morph_dirty = 0;
@@ -172,6 +175,7 @@ s32 SEQ_PATTERN_Init(u32 mode)
     for(s=0; s<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++s)
       phrase_morph_has_steps[s] = 0;
   }
+#endif
   {
     u8 n;
     for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
@@ -296,6 +300,40 @@ s32 SEQ_PATTERN_WritebackAllDirty(void)
   u8 group;
   for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group)
     status |= SEQ_PATTERN_WritebackIfDirty(group);
+  return status;
+}
+
+// DRIFT-gated writeback — the recall-freeze cure (design §9 2026-06-22). Identical
+// to WritebackIfDirty but gated on phrase_drift (MY deliberate edits) instead of
+// seq_pattern_dirty (which generator auto-mutate also sets). A group carrying only
+// ambient wander has phrase_drift clear, so it is NOT saved on recall — it loads the
+// pristine phrase without paying a ~290 ms flash SAVE. Faithful to the capture-centric
+// model: recall = select a static grab; un-captured wander is abandoned by design
+// (you'd have CAPTUREd it via the ring). A group with a real edit (drift set) still
+// writes back, so a live nudge is never lost. SnapshotRead's tail still ORs all groups
+// into seq_pattern_dirty, so the recalled state writes back to working slots on the
+// next switch regardless.
+static s32 SEQ_PATTERN_WritebackIfDrifted(u8 group)
+{
+  if( group >= SEQ_CORE_NUM_GROUPS )
+    return -1;
+  if( !(phrase_drift & (1 << group)) )
+    return 0;
+  if( !(pattern_loaded & (1 << group)) )
+    return 0; // never loaded -> not a jam
+  ++seq_pattern_writeback_count;
+  if( seq_pattern_log_load_time ) {
+    DEBUG_MSG("[SEQ_PATTERN:%d] Writeback(drift) G%d -> %c%d", SEQ_BPM_TickGet(), group+1, 'A'+seq_pattern[group].group, seq_pattern[group].num+1);
+  }
+  return SEQ_PATTERN_Save(group, seq_pattern[group]);
+}
+
+static s32 SEQ_PATTERN_WritebackAllDrifted(void)
+{
+  s32 status = 0;
+  u8 group;
+  for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group)
+    status |= SEQ_PATTERN_WritebackIfDrifted(group);
   return status;
 }
 
@@ -471,8 +509,15 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
   // switch path's WritebackIfDirty-before-Load. Inside the forward-delay window,
   // outside the SDCARD critical section (Save takes the SD mutex itself). The
   // recalled phrase still loads pristine from the file below.
+  //
+  // Recall-freeze cure (design §9 2026-06-22): gate on phrase_drift (deliberate
+  // edits), NOT seq_pattern_dirty — so a group carrying only generator wander is
+  // NOT written back (no ~290 ms SAVE), killing the up-to-1.3 s recall freeze. A
+  // real edit still writes back. Un-captured wander is abandoned by design (recall =
+  // a static grab; you'd have CAPTUREd wander you wanted). By-ear-gated; revert this
+  // one call to WritebackAllDirty if wander must survive a recall.
   if( writeback_dirty_first )
-    SEQ_PATTERN_WritebackAllDirty();
+    SEQ_PATTERN_WritebackAllDrifted();
 
   // Read the snapshot into live with INTERRUPTS ON (mirror SEQ_PATTERN_Load, the
   // clean pattern-change path). The 4-group SD read takes several ms; the old
@@ -655,9 +700,11 @@ void SEQ_PATTERN_PhraseResetState(void)
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
   phrase_drift = 0;
+#if SEQ_PHRASE_MORPH
   phrase_morph_target = 0xff; // disarmed
   phrase_morph_pos = 0;
   phrase_morph_dirty = 0;
+#endif
   {
     u8 n;
     for(n=0; n<SEQ_FILE_B_NUM_PHRASES; ++n)
@@ -788,6 +835,7 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
 // tracks are touched.
 /////////////////////////////////////////////////////////////////////////////
 
+#if SEQ_PHRASE_MORPH
 // main CC whitelist: lerped CCs first, then snap-at-MAX CCs
 #define MORPH_CC_GROOVE_VALUE   SEQ_CC_GROOVE_VALUE   // 0x52 lerp
 #define MORPH_CC_TRANSPOSE_SEMI SEQ_CC_TRANSPOSE_SEMI // 0x50 lerp
@@ -1163,6 +1211,23 @@ u8 SEQ_PATTERN_PhraseMorphValue(void)
 {
   return phrase_morph_pos;
 }
+
+#else // !SEQ_PHRASE_MORPH
+
+// Phrase-posture morph compiled out (make PHRASE_MORPH=0) — stubs so the call sites
+// (seq_ui.c gestures, seq_core.c tick/invalidate, seq_testctrl.c 0x4f) link with no
+// #if, while the ~7.7 KB of arm/target buffers above are reclaimed. Target() < 0 makes
+// every UI morph intercept (GP position bar, datawheel fine-throw, LED thermometer)
+// fall through; Arm() refuses so SELECT+tap on a waypoint just reports it can't morph.
+s32  SEQ_PATTERN_PhraseMorphArm(u8 n)              { (void)n; return -1; }
+s32  SEQ_PATTERN_PhraseMorphSet(u8 v)              { (void)v; return -1; }
+s32  SEQ_PATTERN_PhraseMorphTick(void)             { return 0; }
+void SEQ_PATTERN_PhraseMorphCancel(void)           { }
+void SEQ_PATTERN_PhraseMorphInvalidateGroup(u8 g)  { (void)g; }
+s32  SEQ_PATTERN_PhraseMorphTarget(void)           { return -1; }
+u8   SEQ_PATTERN_PhraseMorphValue(void)            { return 0; }
+
+#endif // SEQ_PHRASE_MORPH
 
 
 /////////////////////////////////////////////////////////////////////////////

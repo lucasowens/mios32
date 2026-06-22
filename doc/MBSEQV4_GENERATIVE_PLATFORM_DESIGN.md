@@ -2701,9 +2701,11 @@ the flat-map. They split into **opposite** verdicts (the box handles recall; mor
   you'd have captured it; the ring is for play-then-keep). That makes **DRIFT-gated writeback**
   (≈1 line; `phrase_drift` already exists, unused by writeback) the **faithful** implementation of
   the new recall semantics, *not* a compromise — the "things revert" worry that reverted it
-  (2026-06-19) lived inside the now-retired two-face model. **Direction: ship the DRIFT-gated cure;**
-  only a cheap by-ear confirm remains (toggle live next reflash). Removes the ~1.3 s freeze from the
-  center of the flow. (Updates §10 phrase-recall-freeze + flat-map queue #1.)
+  (2026-06-19) lived inside the now-retired two-face model. **SHIPPED + by-ear GO 2026-06-22** —
+  `SEQ_PATTERN_WritebackAllDrifted` (gated on `phrase_drift`); recall's pre-writeback in
+  `SnapshotRead` calls it. Played on hardware: the ~1.3 s freeze is gone, abandoning un-captured
+  wander feels right ("i like it, no freeze"). Removes the freeze from the center of the flow.
+  (Resolves §10 phrase-recall-freeze + flat-map queue #1.)
 - **Morphing — recorded-state morph becomes the canonical/primary morph; live phrase-posture morph
   is demoted to a by-ear CUT candidate (user, 2026-06-22).** §5 already held three models;
   **recorded-state morph** (bounce A then B, window across the seam — ~0 new RAM, "preferred,
@@ -2713,8 +2715,16 @@ the flat-map. They split into **opposite** verdicts (the box handles recall; mor
   demotes it from *the* living-return mechanism to one of four performed returns (morph /
   soft-return / reseed / grab-a-moment); soft-return + reseed cover return-to-origin + evolution
   cheaply, and recorded-state gives the A→B crossfade. The only thing genuinely lost is continuous
-  A→B blending of two *live* engines. **Cut is decided-direction, executed by ear** (reclaims
-  ~7.7 KB). Updates §5 (Morphing) + §10 (phrase-morph keep/cut) + §5.6 #3.
+  A→B blending of two *live* engines. **Cut SHIPPED as a compile flag** `SEQ_PHRASE_MORPH`
+  (`make PHRASE_MORPH=0`, mirrors TESTCTRL; default ON so plain builds are unchanged). Build-verified
+  both states: the cut reclaims a **measured 6680 B (~6.5 KB) main RAM** (free 9.06 → 15.59 KB; the
+  "~7.7 KB" estimate corrected — buffers were main-RAM not CCM; flash −3592 B). The default stays ON
+  until the cut is blessed by ear in a real set (the freeze-cure build the user GO'd was the
+  `PHRASE_MORPH=0` hex, so the cut has at least one positive session — but missing-the-morph wasn't
+  the thing under test). **CAVEAT:** windowing isn't built, so the cut build has *no* live continuous
+  morph at all (hard cuts via recall + SWITCH-QUANTIZE still work) — building the recorded-state
+  window gesture is the follow-on that makes "recorded-state primary" real. Updates §5 (Morphing) +
+  §10 (phrase-morph keep/cut) + §5.6 #3 + §A5.
 - **Doc hygiene:** §5.6 concept-map's "Phrase recall" row still described the retired two-face
   recall ("posture = regen; FREEZE+tap = frozen tape"); reconciled to the static-grab model (the
   shipped FREEZE switch still governs *whether the generator wanders after you land*, which is the
@@ -3010,12 +3020,16 @@ crossfade (threshold frozen at arm); note Phase 1 = discrete pitch swap sharing 
 continuous — the morph is the transition, the bar-aligned recall the arrival.
 - **Open follow-ons:** note Phase 2 (scale-quantized glide as a selectable per-track mode);
   generator-dial morph; length/clock-div morph; generators-during-morph.
-- **Keep/cut — direction DECIDED 2026-06-22 (§9): CUT-leaning.** Recorded-state morph (§5; bounce
-  A→B, window the seam, ~0 RAM) is now the canonical morph; this live posture-morph is the **by-ear
-  cut candidate** — its ~7.7 KB is the largest discretionary RAM lever and it drives the unmeasured
-  all-16 force-dirty CPU wall. The new model (recall = static grab; living-return = a performed move)
-  gives cheaper substitutes (soft-return / reseed); the only loss is continuous A→B blend of two
-  *live* engines. Execute the cut by ear next reflash (so the follow-ons above are likely moot).
+- **Keep/cut — CUT shipped as a compile flag (2026-06-22, §9).** Recorded-state morph (§5; bounce
+  A→B, window the seam, ~0 RAM) is now the canonical morph; this live posture-morph is gated behind
+  `SEQ_PHRASE_MORPH` (`make PHRASE_MORPH=0`, mirrors TESTCTRL; default ON). Build-verified: the cut
+  reclaims a **measured 6680 B (~6.5 KB) main RAM** (free 9.06 → 15.59 KB; the "~7.7 KB" estimate is
+  corrected — the buffers are main-RAM, not CCM). The new model (recall = static grab; living-return
+  = a performed move) gives cheaper substitutes (soft-return / reseed); the only loss is continuous
+  A→B blend of two *live* engines. Default stays ON until the cut is blessed by ear in a real set;
+  flip the default (or fully remove) then. The open follow-ons above are likely moot if the cut
+  sticks. **CAVEAT:** windowing isn't built — the cut build has no live continuous morph at all (hard
+  cuts via recall + SWITCH-QUANTIZE still work); the recorded-state window gesture is the follow-on.
 
 **Phrase-recall landing — true deferred clip-launch (follow-on; SHIPPED feel is the
 immediate variant, 2026-06-16).** Loop A's recall now lands clean (QUANTIZE = bar-aligned
@@ -3070,13 +3084,14 @@ auto-mutate marks a group dirty** (`seq_generator.c` → `SEQ_PATTERN_DirtySetTr
   live feel raised a "things revert" worry and prompted a step-back on whole-model complexity,
   so it was reverted to baseline. The idea is sound and re-buildable; it's gated on the §5.6
   clarity pass + a by-ear call on whether un-captured wander should survive a recall.
-  - **Unblocked 2026-06-22 (§9):** the capture-centric model *answers* that by-ear question — recall
-    = select a static grab, the living-return is a performed move between grabs, so un-captured
-    wander is not precious at recall (you'd have captured it). DRIFT-gated writeback is therefore the
-    **faithful** recall behavior, not a compromise; the "things revert" worry was an artifact of the
-    retired two-face model. **Direction: ship it;** only a cheap by-ear confirm (toggle live) remains.
-    This is the recommended cure over incremental-save (which stays the fallback if by-ear says wander
-    *must* survive).
+  - **CURED + SHIPPED + by-ear GO 2026-06-22 (§9):** the capture-centric model *answered* the by-ear
+    question — recall = select a static grab, the living-return is a performed move between grabs, so
+    un-captured wander is not precious at recall (you'd have captured it); DRIFT-gated writeback is
+    the **faithful** recall behavior, not a compromise (the "things revert" worry was an artifact of
+    the retired two-face model). Built as `SEQ_PATTERN_WritebackAllDrifted` (gated on `phrase_drift`),
+    called by `SnapshotRead`'s pre-writeback. Played on hardware: freeze gone, feels right ("i like
+    it, no freeze"). Incremental-save is no longer needed for this (it stays a fallback only if a
+    future by-ear call reverses the wander-survives question).
 - *The only structural cure* if the freeze must die without losing wander: **incremental save**
   (program only the sectors that changed) — drops a save from ~18 sectors to a few. Its own
   bundle; touches the SD/file write path.
@@ -3093,8 +3108,10 @@ fire). Real levers, each gated:
   they "fold into the shared pool" (§10(b)), so 16 would box that build out; **settle the
   trigger-gen slot model before going below 32.** (No measurement needed for 64→32; this replaces
   the old "pending engaged-count" gate.) Self-bus (<100 B) + the MVP need *nothing* from this.
-- phrase-morph buffers ≈ 7.7 KB main SRAM (incl. the `phrase_morph_a/b` symbols the 6.7 KB
-  figure missed) — *pending the by-ear morph keep/cut* (§5.6 #3; owner: "undecided").
+- phrase-morph buffers = **measured 6680 B (~6.5 KB) main SRAM** (build-diff 2026-06-22; both the
+  ~6.7 KB and ~7.7 KB earlier figures were off — the exact buffer sum is 6680 B, all main-RAM not
+  CCM). **This lever is now LIVE:** `make PHRASE_MORPH=0` reclaims it (free 9.06 → 15.59 KB),
+  flag shipped 2026-06-22 (§9/§10). Default ON until the cut is blessed by ear in a set.
 - render double-buffer = 40 KB CCM; single-buffering saves 20 KB but loses lock-free safety —
   leave it. CPU: per-track processors run only when engaged, **BUT** chord_mask/tension/
   live-pitch force a full per-track re-render *every tick* (`seq_core.c:2757`) — never measured

@@ -157,6 +157,17 @@ ifeq ($(TESTCTRL),0)
 CFLAGS += -DSEQ_TESTCTRL_ENABLE=0
 endif
 
+# Phrase-posture morph (Loop A/B + note Phase 1, core/seq_pattern.c). Default ON.
+# By-ear CUT candidate (design §9 2026-06-22): recorded-state morph is now the
+# canonical morph; this live posture-morph is ~7.7 KB of arm/target .bss (the
+# largest discretionary RAM lever) and drives the all-16 force-dirty render cost.
+# Build with `make PHRASE_MORPH=0` to compile it out and reclaim the RAM for the
+# by-ear test (the morph gestures become no-ops). See SEQ_PHRASE_MORPH.
+PHRASE_MORPH ?= 1
+ifeq ($(PHRASE_MORPH),0)
+CFLAGS += -DSEQ_PHRASE_MORPH=0
+endif
+
 
 ################################################################################
 # Include source modules via additional makefiles
