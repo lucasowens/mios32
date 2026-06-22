@@ -62,10 +62,33 @@ always pretty, but expressive and dimensional.)
 The pilot loop: **sculpt to an interesting place → capture it → travel off → return or
 divert → capture → repeat.** Revisit states, take them new directions, blend.
 
+**A fusion instrument, not a generative one.** The generative layer is *additive* — it joins,
+doesn't replace, the two things this box already is: a **traditional step sequencer**
+(hand-program the grid) and a **live MIDI recorder** (play it in). All three are co-equal ways
+onto the same canvas, feeding **one shared loop**: *get material — by hand, by playing, or by
+generating — then process it, tweak it, harvest the good parts, refine them.* Generators and
+processors are **prospecting tools** — they throw up material and surface areas worth keeping;
+the hand and the ear decide what to harvest and how to refine. The pursuit is **symbiosis
+between the instrument and the intention**: the box proposes, the player disposes. So the goal
+is to **refine the whole synth**, not bolt a generative corner onto it — every path
+(*program / play / generate → process → tweak → harvest → refine*) must flow. ("Not a better
+trigger sequencer," below, means the *differentiated addition* is musicality; the sequencer and
+the recorder stay first-class substrate, never afterthoughts.)
+
+**Capture is the center (2026-06-21).** Of the loop's verbs, the one that earns its keep is
+**capture**: the core cycle is *capture · edit · process · capture · edit*. The modulation web
+(the bus, the self-bus, traversal, the harmony stack — §3 MOTION) throws up motion; you **harvest
+the good of it, refine it, run it again.** What you harvest is a **grab** — a *static* capture off
+the live source. The grab is your returnable object; **the first grab is the beginning** and your
+grabs in order are the set (§5). "Return" is just coming back to a grab. Generation *as its own
+engine* is a domain to focus on later — right now the win is capturing and refining the motion the
+instrument already makes.
+
 Two qualities are non-negotiable and shape everything:
 
-- **Repeatable states.** It must not feel random all the time. States are real,
-  namable, returnable objects — not "wherever the knobs happen to be."
+- **Repeatable states.** It must not feel random all the time. States (= **grabs**) are real,
+  namable, returnable objects — not "wherever the knobs happen to be." Exact, because a grab is
+  static.
 - **Falls apart and comes back into focus — unexpected yet *identifiable*.** The
   return is recognizable, not a coincidence. This is the hard requirement; see §5.
 
@@ -83,6 +106,19 @@ nothing external forces the ear back into the loop, so the design must.
 ---
 
 ## 2. Design principles (the discipline)
+
+> **How to hold these (2026-06-21).** The principles below are **heuristics earned by getting
+> burned, not laws** — tools in service of the result, which on a passion project is *the coolest
+> thing we can make, and the joy of making it*, not compliance. The protected core is tiny: the
+> two §1 non-negotiables (repeatable states; identifiable return) and faithfulness + deterministic
+> returnability. **Everything else is breakable when the music asks**, and *"is it time to break
+> this one?"* is a live question we keep asking **together**. When a rule blocks a cool idea, name
+> which kind it is — **earned** (breaking it re-incurs a known cost; the doc usually says what, so
+> pay the toll on purpose) or **fake** (arbitrary, inherited, taste-frozen-into-law, or
+> true-once-not-now — owed no deference). Then decide by ear and by joy, not by the rule. The
+> collaboration is two-way: the assistant *proposes* ideas and *flags* rules that look like
+> they're in the way — it does not gatekeep behind them. The worst outcome is the coolest thing
+> sitting one step behind a rule we made up.
 
 1. **POC is disposable.** Existing generative code is a *finding*, not a
    foundation. Nothing new must be backward-compatible with it. This is a license,
@@ -135,19 +171,78 @@ nothing external forces the ear back into the loop, so the design must.
    **infrastructure is licensed exactly when it sits on the critical path of a
    bundle** — design-ahead is "masquerading" only when no bundle needs it.
 
+8. **Validate the system, not the fragment.** *(Added 2026-06-21 — the strategy shift;
+   extends #7's grain.)* Discipline is a tool to drive a result; when it stops driving the
+   result, the discipline shifts. #2/#7 drove the early build well, but their unit — the
+   fragment, the single workflow-bundle — under-determines the thing that matters. You
+   **cannot tell whether one function is "musical" in isolation**, because musicality is an
+   *emergent property of the whole flow*, not of a part; and locally-correct fragments keep
+   failing at **assembly** — they don't compose, they're clunky together, or they blow the
+   RAM/CPU budget the moment everything is live. Proving fragments in the dark is validating
+   something that has no meaning without the rest of the pieces.
+   - **New unit of validation: a whole performance — a set, a path** — not a workflow bundle.
+     What's proven is that the *system* holds together: boot → sculpt a state → capture →
+     travel/morph → return → layer → land a piece, in budget, and is **performable and fun**
+     (the system-grain success word; "musical" was the fragment-grain word, and it was a guess).
+   - **The system is bounded** to the §1 flow *with the pieces already built* — that bound is
+     what keeps "prove the whole system" from growing without end (the #6 forcing function,
+     one level up). **No new feature is built until system-level play shows the flow needs it.**
+     The only infrastructure licensed unconditionally is what lets you *see or play* the system
+     faster (setup friction, a fixed test-bed) — never a fragment polish.
+   - **Method:** lay the system flat first — a budget map, a control-surface map, a flow/dirty
+     map; the structural walls are often visible **on paper before a note is played** — then
+     play a whole set against a target piece. The refinement queue **emerges from lived
+     friction**, not from a feature catalog. First flat-map: `doc/plans/2026-06-21-system-flatmap.md`.
+
 ---
 
 ## 3. The spine — core architecture (two nouns, one verb, one control)
 
-The whole instrument reduces to **two nouns, one verb, and one control**. Everything
-discussed — masks, voice-leading, windowing, capture-reprocess loops — is one of
-these. This is the canonical model; simpler than any source/transform-graph framing.
+The whole *engine* reduces to **two nouns, one verb, and one control** (Buffer / Generator /
+Processor / Bounce / Destination). That's the canonical engine model, below. But the engine is
+not the *instrument* — and conflating the two was a real gap (the slogan under-counts the live
+machine). The instrument view is the four homes:
+
+**Instrument view — four homes, CAPTURE at the center (2026-06-21).**
+
+- **MATERIAL** — the canvas: committed MIDI in track layers. Filled three co-equal ways —
+  **hand-program**, **play-in / record**, **generate** (§1 fusion; source-agnostic).
+- **MOTION** *(the generative heart — everything that makes material move/vary over time)*:
+  **traversal** (step progression — direction / jump / replay / skip / length); the **harmony
+  render-stack** (transpose / force-scale / chord-mask / GRAVITY-tension); **texture** (robotize /
+  groove / humanize / echo / LFO); and **routing — the patch cables: the bus (cross-track) and
+  the self-bus (same-track).** *This* is "generative" in the sense that matters — motion that
+  emerges from things modulating each other, not dice. Standalone **generators are one optional
+  MOTION source**, demoted; the shipped Turing generators + standalone chord-mask/tension are now
+  **examples/POCs to work from**, not the centerpiece. **Generation as its own engine is a
+  separate domain, deferred** (§8).
+- **CAPTURE** *(the hinge — the thing)* — freeze the motion into new material, retroactively
+  (play-then-keep). Bounce (render-stage, lossless) + the ring/tape (the emission residue). The
+  core loop is **capture · edit · process · capture · edit**: MOTION → CAPTURE → MATERIAL →
+  re-motion, forever (the recursion below).
+- **LIBRARY / RETURN** — where material + captures live and how you navigate them (§5): slots +
+  auto-writeback, PHRASES, the Pull, CHECKPOINT/REVERT, FREEZE, morph, windowing.
+
+**Organizing principle:** *arrange MOTION so CAPTURE is as lossless as possible* — push
+modulation into the render stage (bounce sees it losslessly); let the tape catch only the
+irreducible live/random residue. (This is what the "born-as-processors" heuristic was *for* —
+serving capture — held loosely per §2: if a cool motion only lives at emission time, the tape
+catches it; we don't refuse it.) **See §5 "Capture tap points" for the diagram of exactly where
+each freeze taps the flow** (the render/emission boundary is the whole story).
+
+The engine nouns below are the mechanics **inside** these homes: Generator/Processor realize
+MOTION, Bounce realizes CAPTURE, the Buffer is MATERIAL.
 
 ### Buffer (noun)
 A buffer holds **committed MIDI events**. Unlike audio, frozen MIDI stays
 *structured and transparent* — every event keeps its identity (pitch, velocity,
 timing, length individually addressable forever). The canvas. In MBSEQ terms a
 buffer is realized in track trigger/parameter layers (and captures).
+**Source-agnostic (the §1 fusion):** the same committed MIDI arrives three co-equal ways —
+**hand-programmed** on the grid, **live-recorded** by playing it in, or **deposited by a
+generator** — and everything downstream (processors, bounce, capture, windowing) treats it
+identically. The buffer doesn't know or care how it was filled; that is what lets one
+process/tweak/harvest layer serve all three entry paths.
 
 ### Generator (noun)
 A generator **deposits material into a buffer.** Conceptually equivalent to playing
@@ -230,10 +325,13 @@ the track; layer-cycle, when a generator is active, skips type-illegal layers
 (pitch generator stops only on Note par-layers); step LEDs already show occupancy
 (dark = empty/additive, lit = occupied/replace), satisfying the visible-and-chosen
 property with no new affordance. Add only: a small LCD destination readout
-(`DEST: Trk3·NoteL2·[OCC]`) and the type-legality filter. On generator load, the
-cursor auto-jumps to the first empty legal layer in the current track (predictable
-default; override by navigating). Track-granularity is **not a mode** — point at an
-unoccupied track and ENGAGE.
+(`DEST: Trk3·NoteL2·[OCC]`) and the type-legality filter. *(This originally specified an
+auto-jump to the first empty legal layer on generator load; that was **built and withdrawn
+2026-05-26** (F.3) — the auto-jump fought the deliberate gesture "engage on *this* drum," and
+the ENGAGE undo already protects accidental overwrites, so **the cursor always wins**.
+"Default destination" now means "absent a deliberate cursor placement," which can't be reliably
+detected. See §9 phase F.3 + the cursor-aware-destinations principle.)* Track-granularity is
+**not a mode** — point at an unoccupied track and ENGAGE.
 
 **Live-safety net:** one-deep auto-undo slot. When ENGAGE overwrites occupied
 content, the prior content auto-saves; UNDO restores; next ENGAGE clobbers the slot.
@@ -255,12 +353,12 @@ as deep as you like.
 ### Composition rules (how the pieces interact)
 Stated explicitly so they aren't re-derived, and so edge cases don't trip the model:
 
-- **Capture stores both faces** (§5): the *recording* (source + a processor-output
-  snapshot) and the *posture* (source + processor stack + params + generator state).
-  Patterns and track slots persist both — see the v3 format note (§6).
-- **FREEZE is the master mutation switch.** FREEZE = effective mutation rate 0%
-  across all generators; loops hold, rerolls pause. Two-face recall (load + FREEZE
-  held) is exactly "load posture, immediately freeze" → the frozen-tape face.
+- **A grab is static material** (§5, simplified 2026-06-21): it stores the *recording* (the
+  captured notes) and *carries* its config/seed as reseed material — but it does not regenerate on
+  recall. Patterns and track slots persist both the notes and the config.
+- **FREEZE is the master mutation switch** — on the **source**, not on grabs. FREEZE = effective
+  mutation rate 0% across all generators; loops hold, rerolls pause. (It holds the *live* wander;
+  grabs are already static, so it has nothing to hold there.)
 - **Soft return composes through windowing.** Dialing mutation to 0 with a window
   active: the loop goes static, processors transform, the window slices — soft return
   reaches the listener through the window. SNAP (hard return to anchor) is orthogonal
@@ -282,6 +380,37 @@ is finite. The model stays "non-destructive everywhere," realized via a render-c
 mechanism, its cost model, and the corrected RAM budget are in **§A2 / §A5
 (Part II, provisional)** — they are *not* a prerequisite for the first sound (§8).
 
+### Status dashboard (what's true now — read this cold)
+
+*The one "where is this project" surface. Verdict (2026-06-21): **playable, not yet
+performable** — see §8 + `doc/plans/2026-06-21-system-flatmap.md`.*
+
+| System | Status | Where |
+|---|---|---|
+| Spine: Buffer / Generator / Processor / Bounce / Destination | shipped | §3 |
+| Drum-pitch unlock (`link_par_layer_note`) | shipped | §6, §8 |
+| Pitch generator (Turing: ENGAGE/ROLL/BOUNCE/LOCK/MULT/ANCHOR/SNAP), drum + normal | shipped | §8, §9 |
+| Render-stack + chord-mask processor; pitch-chain migration (bake deleted) | shipped | §8, §9 |
+| Tension Workbench (GRAVITY / GRIP / RESOLVE / SHADE) | shipped (soft GO) | §8, §9 |
+| Bounce — lossless computed-output, PATTERN-hold gesture | shipped | §7, §9 |
+| FEARLESS auto-writeback | shipped | §9 |
+| CHECKPOINT / REVERT (anchor) | shipped | §9, §11 |
+| THE PULL (track-grain recombine) | shipped | §9, §11 |
+| PHRASES (snapshot library: drift LED, naming, cross-session probe) | shipped | §9, §11 |
+| Phrase/posture morph (Loop A/B + note Phase 1) | shipped | §10 |
+| SWITCH-QUANTIZE (global launch grid) | shipped — by-ear pending | §10 |
+| Per-track-RNG determinism keystone | shipped — by-ear pending | §9, §10 |
+| Retroactive CAPTURE (ring + re-sim + live tape + precise gate) | shipped (first cuts) | §10 |
+| FREEZE (master mutation switch) | shipped | §3, §5.6, §11 |
+| **Recall-freeze cure** (#1 — decide recall semantics, then cure) | **OPEN — next move** | §8, §10 |
+| Make invisible modes visible (#2); panic UNDO/REDO (#3); hold-polarity (#4) | queued (play-readiness) | §8 |
+| Unified UNDO/REDO | queued / design-ahead | §10(a2) |
+| SET durable baseline | queued / design-ahead | §6, §9, §10(a) |
+| Trigger generators (don't fit as twin pool) | queued — needs redesign | §8, §10(b) |
+| Self-bus (self-modulation CC + note-grain) | queued / design-ahead | §6, §10(c) |
+| Robotize → render-stack migration | queued | §9, §10 |
+| Windowing (sampler reads); track slots (RAM captures) | partial / deferred | §5.5 |
+
 ---
 
 ## 4. MIDI-as-sample mental model
@@ -289,7 +418,8 @@ mechanism, its cost model, and the corrected RAM budget are in **§A2 / §A5
 A structurally (not loosely) accurate lens:
 
 - **Live stream** = process-in-flight. The engine; can surprise; never repeats
-  exactly. (Generative groups.)
+  exactly. (A generator's running loop **or** a live MIDI performance played in —
+  both are processes in flight, both samplable by the same capture.)
 - **Sample / capture** = a *frozen, bounded, random-access* buffer. The bounded edges
   unlock sampler operations — window position, length, reverse, read-rate vs
   transport, jump-to-offset, layer/overlay — precisely *because* it's addressable.
@@ -315,26 +445,237 @@ problem.
 
 ## 5. State, capture, and morphing
 
-### Two faces of a captured state
-A capture is **both** at the instant of capture (identical sound), but behaves
-oppositely the moment you touch it:
+### Grabs and the source — the working model (simplified 2026-06-21)
 
-- **The recording** — the literal notes that came out. Dead, reliable, repeatable.
-  The *anchor*.
-- **The generative posture** — the configuration (seed + transform/param positions)
-  that *produced* them. Alive: re-enter it and it regenerates *fresh*. The *spring*.
+**Source and grab are the same material in two states — live and frozen** (the §4 sample
+discipline taken at its word):
 
-The pilot loop needs both. Store a state as both; the performable choice is *which
-face you grab*. (This is a recall-gesture choice on shared data — see §5.5 — not two
-storage classes.)
+- **Source (live)** — whatever is moving *now*: a generator wandering, a line you're playing in, a
+  hand-built loop, modulation in motion. The fountain you grab *from*.
+- **Grab (frozen)** — a **capture** off the source into a pattern: **static, exact, durable.**
+  Your working material, and the thing you return to.
 
-### Recall semantics (decided)
-Re-entering a saved state **relaunches the posture and regenerates** — it does *not*
-resume runtime position. "Dipping back into the well": the well is the spring, not
-the water already drawn. *Similar-but-not-identical* return is the **feature**, and
-the cheaper thing to build. (Recall ≠ resume; confirmed against §6 save/recall.)
+A grab is the *recording* (§4: dead, reliable, repeatable). It does **not** regenerate *by itself* —
+it *carries* its config (settings + seed) as **reseed material**, but you don't "re-enter it and
+watch it bloom." The living-ness is the source (now) and the moves you make *between* grabs (below).
 
-### "Identifiable yet unexpected return" — the mechanism
+**But a grab is never a dead end — work it and it becomes a source again.** Load a grab and run
+motion over it (generators, processors, modulation, your hands) and it *is* the live source,
+ready to grab from. That's the **§3 recursion**, and it's literally the **process** step of
+*capture · edit · process · capture*: a frozen grab thawed back to living. The cycle is one
+material moving between **frozen (grab)** and **live (source)**, forever. **The first grab is the
+beginning; your grabs in order are the path** — the set builds itself as you snag.
+
+**Freeze always commits to static — wander OFF — wherever it lands** (this *restores* the §3 spine:
+*"BOUNCE freezes current output to source **and disengages**"*; the shipped same-group "save-only
+bounce that keeps the gen running" was a deviation, now removed). The destination (§3) only chooses
+*where the static goes*, not whether the generator stops:
+
+- **In place** (dst = the source's own track) — freeze right over the running generator; the static
+  replaces it here. *(Explicitly allowed — the "generators write fresh space / never vaporize a
+  loved capture" rule protects frozen grabs from generators; it never stops you freezing the live
+  generator on purpose.)*
+- **A new slot** (dst = elsewhere) — the static lands in a new pattern and you go there.
+
+Either way the wander **ends** — after a freeze you're working *static*, not babysitting a
+still-wandering source. Each freeze = a new **static starting point** derived from the last; the
+chain of freezes is your path, and the patterns morph apart as you work each. The wander resumes
+only when you deliberately re-engage (**"thaw" = just ENGAGE over a grab**, not a new verb).
+
+The "keep the generator *running*" cases are **different verbs, not a freeze mode** — which is why
+freeze needs no keep-running variant:
+- **COPY** (existing copy-pattern) — fork the *live* source: a second copy, generator still on,
+  both wandering. For "two living versions."
+- **Retroactive CAPTURE** (the ring) — grab a *static* snapshot of what just played **without
+  stopping** the jam (play-then-keep). The real "bank a variation while I keep going," and better
+  than a freeze-that-keeps-running — you grab the good bar *after* you hear it.
+
+*(Decided 2026-06-21: freeze always disengages; the muddy "save-only bounce keeps the gen running"
+is replaced by COPY [live fork] / the ring [static, non-stop] / freeze [static, stop]. Flag at
+build time — it changes the shipped same-group bounce. See §9.)*
+
+**What a freeze captures = everything as-heard (faithfulness, heard = saved) — and the mechanism
+is config-copy, not a recording (refined 2026-06-21).** Two layers freeze differently:
+
+- **The generator's wander → OFF** (above): the loop stops mutating; you keep the current loop.
+- **The emission effects → CONFIG COPIED ACROSS, kept distinct** (robotize / groove / humanize /
+  echo): the freeze copies their *settings + seed* with the grab; on playback the **deterministic**
+  emission re-applies *identically* on the full render material → it **sounds the same.** This is
+  the **groove model generalized** (groove already preserves-as-config and re-applies). It beats
+  baking-via-the-tape on every axis: **lossless** (the tape is a *mono* note-stream — rolls/chords
+  collapse; config-copy re-applies on the full polyphonic material), **tweakable** (emission stays
+  config on the grab, not fused into dead notes), and **cheaper** (a seed, not a note-stream).
+  *(This — not a tape-bake — is why robotize isn't migrated: freeze copies its seed and it
+  re-applies faithfully, deterministically. The keystone made it deterministic.)*
+
+So freeze = render material (mirror) **+** emission **config** (deterministic re-apply). The
+**RING** (per-bar seed-frames, cheap) is freeze's **retroactive backbone**: retroactive freeze
+grabs the last K bars' state from the ring and reconstructs (re-sim) — the §10 CAPTURE
+"seed-frame + recording" split, sharpened.
+
+**Where the TAPE survives — its one irreducible job: LIVE MIDI input** (and consumed external/bus
+input). A human's played-in notes have no seed or config to copy, so the *only* way to reproduce
+them is to have recorded them. Everything *internal* is config-copy + ring reconstruction.
+**Dependency:** humanize + the coin-flips (probability / random-gate) are still on the global RNG —
+until the **deferred emission-determinism follow-on** (§10) makes them deterministic, the tape is
+the *bridge* for them; after it lands, **tape = live-keys-only.** (Generators / robotize / groove /
+echo / traversal are already deterministic — keystone.)
+
+**What actually needs a *recording* — the precise boundary (2026-06-21).** Most "live" things don't.
+**Live transpose** and **live chord-for-the-mask** are *render-stage controls* — the held key/chord
+drives a processor and the **result is in the mirror**, so you capture the transposed/masked
+*output*, not the held input. A recording is only needed when the live input **varies over the
+span** (you *perform* the transpose, change chords as a progression, or play a part live on top) —
+a human performance over time that no config can reconstruct. And for that, **"just hit record" is
+the recorder:** the traditional sequencer RECORD lands live-played notes into a track; the ring is
+the same capture *without arming* (play-then-keep). There is **no separate big tape to build** — it's
+RECORD + the ring's thin input-record.
+
+| What you're capturing | Mechanism | Needs a recording? |
+|---|---|---|
+| Held transpose / held chord (render-stage) | **BOUNCE** the result (baked into the notes) | No |
+| Deterministic emission (robotize / groove / echo) | **config-copy** (re-applies, lossless, tweakable) | No |
+| Live-played notes — *deliberate* | the normal **RECORD** (arm + play → track) | yes, the existing record |
+| Live-played notes / *performed* control — *retroactive* | the **ring** (records consumed input in the frame) | yes, the ring's thin input-half |
+
+So the "live recorder" is just **RECORD (arm-first) + the ring (play-then-keep)** — held/render-stage
+controls and deterministic emission never touch it.
+
+*(This replaces the earlier "two faces of a captured state / recall picks which face." What's gone
+is only the idea that a grab re-animates *by itself on recall* — you make it live **deliberately,
+by working it**, which is exactly what killed the resume-vs-regenerate complexity. The recursion —
+grab → source → grab — is untouched. See §9 2026-06-21.)*
+
+### Capture tap points — where each freeze taps the flow (source-verified 2026-06-21)
+
+The two faces aren't abstract — they fall out of **one line in the signal pipeline, the
+render/emission boundary**, which decides which capture you need:
+
+- **Above the line (render stage):** everything is written into the **output mirror** as par/trg
+  layers — structured, snapshottable. **BOUNCE** just copies it. *Lossless.* This is the
+  *rendered-layers* form of the recording.
+- **Below the line (emission stage):** robotize, groove, coin-flips, live keys — these never
+  touch the mirror; they exist *only as the played stream*. To keep them you must either **record
+  what sounded** (the live **TAPE**, while playing — the *recording* face) or **re-run them from a
+  seed** (**RE-SIM**, while stopped — driven by the **RING**, the *posture/seed* face).
+
+So: one buffer you can photograph, one stream you can only record or regenerate. That's why there
+is more than one capture, and it's the whole model in a sentence.
+
+**Current — where each capture taps today:**
+
+```mermaid
+flowchart LR
+  HP["hand-program"]:::src
+  GEN["generators"]:::src
+  BWB["bounce writeback"]:::src
+
+  SRC["SOURCE layers<br/>par/trg · AHB · single-buf<br/><i>never read at tick</i>"]:::stage
+  RENDER["RENDER STACK (tick prologue)<br/>memcpy src→out, run slots:<br/>PITCH · CHORD_MASK · TENSION · LIMIT"]:::render
+  MIRROR["OUTPUT MIRROR<br/>CCM double-buf · fully rendered"]:::render
+  TICK["TICK reads mirror<br/>builds the step event"]:::stage
+  EMIT["EMISSION (after mirror read)<br/>robotize · groove · humanize · echo<br/>coin-flips · + live MIDI keys"]:::emit
+  DRAIN["MIDI-OUT drain<br/>real send → then passive tee"]:::emit
+  OUT(("sounds"))
+
+  HP --> SRC
+  GEN --> SRC
+  BWB --> SRC
+  SRC --> RENDER --> MIRROR --> TICK --> EMIT --> DRAIN --> OUT
+
+  BOUNCE["BOUNCE<br/>force render → snapshot MIRROR<br/>✅ full render stack · ❌ no emission"]:::cap
+  RINGW["RING (per bar, ref_step==0)<br/>snapshot pre-emission STATE / seed"]:::cap
+  RESIM["RE-SIM (stopped)<br/>re-drive seed WITH wander →<br/>capture RE-EMITTED stream<br/>✅ wander/traversal/robotize · ❌ live keys"]:::cap
+  TAPE["live TAPE (playing)<br/>passive tee, post-send<br/>✅ what sounded + live keys<br/>❌ mono · rolls/chords collapse"]:::cap
+  DEL["deleted seq_capture.c<br/>old hot-path tap · lossy/raced"]:::dead
+
+  MIRROR -. "snapshot" .-> BOUNCE
+  RENDER -. "state/seed" .-> RINGW
+  RINGW -. "feeds" .-> RESIM
+  DRAIN -. "send-redirect sink" .-> RESIM
+  DRAIN -. "passive tee" .-> TAPE
+  EMIT -. "was here" .-> DEL
+
+  classDef stage fill:#eceff1,stroke:#546e7a,color:#000
+  classDef render fill:#c8e6c9,stroke:#2e7d32,color:#000
+  classDef emit fill:#ffe0b2,stroke:#ef6c00,color:#000
+  classDef cap fill:#bbdefb,stroke:#1565c0,color:#000
+  classDef src fill:#f5f5f5,stroke:#9e9e9e,color:#000,stroke-dasharray:3 3
+  classDef dead fill:#ffcdd2,stroke:#b71c1c,color:#777,stroke-dasharray:4 3
+```
+
+| Capture | Taps at | Sees | Misses |
+|---|---|---|---|
+| **BOUNCE** (`SEQ_CORE_CaptureTrackOutput`) | **MIRROR**, after a forced quiet render | the full render stack, losslessly | *all* emission |
+| **live TAPE** (playing) | **DRAIN** — passive tee, *after* the real send | what actually sounded — coin-flips, groove, robotize, **live keys** | mono stream; rolls/chords collapse; seam-drops |
+| **RING + RE-SIM** (stopped) | RING = **STATE** at the prologue; RE-SIM **re-emits** via the send-redirect | a regenerated take: wander, traversal order, robotize | live keys (the tape's job) |
+| ~~`seq_capture.c`~~ | *(was inside `ScheduleEvent`, hot path)* | — | the *wrong* tap; **deleted** |
+
+Three things that trip everyone (precise): (1) **BOUNCE force-renders, then reads the MIRROR** —
+not source, not the stream → lossless for render, blind to emission. (2) **The TAPE is a passive
+observer at the very end** — it fires *after* the real send, return value discarded; it records
+what played, never changes it. (3) **The RING is a seed (STATE), not MIDI** — RE-SIM turns it back
+into sound by re-driving and captures the *re-emitted* stream (same hook the MIDI-file exporter
+uses); a mirror-snapshot there would just *be* BOUNCE and lose robotize + traversal order.
+*(Processor order is PITCH→CHORD_MASK→TENSION→LIMIT by slot index, not the enum value.)*
+
+**End state — the convergence** (per §3: *arrange MOTION so CAPTURE is lossless* — push emission
+effects up into the render stack so the MIRROR sees more, BOUNCE captures more, and the TAPE
+shrinks to only what can't be a layer):
+
+```mermaid
+flowchart LR
+  SRC["SOURCE layers"]:::stage
+  RENDER["RENDER STACK (grown)<br/>pitch-chain · chord-mask · tension<br/>+ MIGRATED: robotize·groove·humanize·echo<br/>+ self-bus NOTE-grain"]:::render
+  MIRROR["OUTPUT MIRROR<br/>now sees almost everything"]:::render
+  TICK["TICK"]:::stage
+  EMIT["EMISSION — shrunk to the residue<br/>live MIDI keys + irreducible coin-flips<br/>+ self-bus CONFIG-grain (timeline)"]:::emit
+  DRAIN["MIDI-OUT drain"]:::emit
+  OUT(("sounds"))
+
+  SRC --> RENDER --> MIRROR --> TICK --> EMIT --> DRAIN --> OUT
+  EMIT -. "migrate → render-stack-native" .-> RENDER
+
+  BOUNCE["retroactive BOUNCE — the ONE verb<br/>snapshot MIRROR, off the RING<br/>→ dst = track | pattern"]:::cap
+  RING["RING (seed-frames · retroactive window)"]:::cap
+  TAPE["TAPE — only the residue<br/>live keys · coin-flips · config self-mod"]:::cap
+
+  MIRROR -. "snapshot · lossless core" .-> BOUNCE
+  RING -. "retroactive window" .-> BOUNCE
+  DRAIN -. "residue only" .-> TAPE
+
+  classDef stage fill:#eceff1,stroke:#546e7a,color:#000
+  classDef render fill:#c8e6c9,stroke:#2e7d32,color:#000
+  classDef emit fill:#fff3e0,stroke:#ef6c00,color:#000,stroke-dasharray:4 3
+  classDef cap fill:#bbdefb,stroke:#1565c0,color:#000
+```
+
+- **BOUNCE becomes the one verb** — made retroactive by the RING (grab the last K bars), targetable
+  to **track *or* pattern**. Same tap (MIRROR), wider destination.
+- **The emission box shrinks** to the irreducible: **live MIDI keys** and **coin-flips** (a step
+  firing-or-not is a yes/no with no layer to photograph) — the only things that *must* use the TAPE.
+- **Self-bus splits by tap, not by mechanism:** *note-grain* self-mod is render-stack-native →
+  BOUNCE catches it at the MIRROR; *config-grain* CC-routing is a timeline → it lives in the
+  TAPE/residue. (Why the MVP takes the note-grain half first — it's the lossless one.)
+- **Robotize is the lone debt:** until it migrates up, RE-SIM must re-emit to reproduce it.
+
+### Return = navigate your grabs (simplified 2026-06-21)
+
+**Return is selecting an earlier grab** — exact, the same notes you snagged. So "identifiable
+return" (§1) is a *fact*, not a mechanism we engineer, and there's no resume-vs-regenerate
+question — a grab is static. The old "recall relaunches and regenerates / recall ≠ resume" law is
+**retired**: it fought §4, and SEAMLESS recall (a shipped phase-resume) contradicted it anyway.
+
+The *living* return — "falls apart and comes back into focus" (§1) — is a **performed move
+*between* grabs**, not a property of recall:
+
+- **Morph** toward an earlier grab — the divergence converges (phrase-morph, shipped).
+- **Soft-return** — dial the divergence you added back toward 0 so the worked pattern re-coheres.
+- **Reseed** — feed a grab back into the *source* as its seed → it evolves forward from where you
+  took it (return-as-evolution).
+- **Grab a moment** — the ring reaches back to a specific bar that already played.
+
+### "Identifiable yet unexpected return" — the mechanism (of the performed return above)
 The disorder must be a **reversible transformation of an identity**, not a
 *replacement*. The thing that fell apart and the thing that re-coheres share DNA:
 
@@ -397,13 +738,14 @@ against the backbone.
 
 ### 5.5 Slots, captures, and windowing (decided)
 
-- **Group slot = pattern.** No parallel mechanism. A saved pattern already carries
-  *both* §5 faces: trg/par layers (the recording) **and** track CCs 0x80–0x95 (the
-  posture — robotize mask, probabilities, loop control, anchor seeds). 4 banks × 64 =
-  256 addressable group-states, 20-char names, per-group binding. (See §6 anchors.)
-- **Two-face recall is a gesture, not separate storage.** *Posture recall* = load and
-  let generators run (today's default). *Frozen-tape recall* = load with FREEZE held,
-  so generators don't re-run (existing ROBOLOOP FREEZE does the work). Zero new mode.
+- **Group slot = pattern.** No parallel mechanism. A saved pattern carries the captured notes
+  (trg/par layers) **and** its config (track CCs 0x80–0x95 — robotize mask, probabilities, loop
+  control, anchor seeds), the latter as **reseed material**. 4 banks × 64 = 256 addressable
+  grabs, 20-char names, per-group binding. (See §6 anchors.)
+- **Recall = select a static grab (simplified 2026-06-21).** Loading a grab plays the captured
+  notes, exact. *(The earlier "two-face recall gesture" — load+run for a regenerating posture vs
+  load+FREEZE for frozen tape — is retired: a grab is static either way. FREEZE acts on the live
+  source. To make a grab generative again, **reseed** the source from it, §5. See §9 2026-06-21.)*
 - **Quick-capture** = SAVE-button single-press → save the current group state to the
   next free pattern slot in the active bank, auto-named `CAP_NNN`; long-press = the
   traditional save UI. Bank-full **wraps** the oldest auto-named slot (promoted/
@@ -519,8 +861,11 @@ and drift** — function/symbol names are the durable anchors. See
 - Per-group pattern selection: `seq_pattern[SEQ_CORE_NUM_GROUPS]`
   ([seq_pattern.c:50](../core/seq_pattern.c#L50)); `SEQ_PATTERN_Load` fans one read
   across the group's four contiguous tracks (`group * TRACKS_PER_GROUP`).
-- **Consequence:** changing a pattern changes all 4 tracks of the group *together*.
-  A "state" = a group = 4 fixed tracks.
+- **Consequence (platform fact):** changing a pattern changes all 4 tracks of the group
+  *together*. *(The early **performer model** "a state = a group = 4 fixed tracks" is
+  superseded — recall is organism-primary; the grain is the **track** (Pull) / the **phrase**;
+  groups survive only as invisible storage layout. See the 2026-06-11 revision note below + §9;
+  the §11 glossary "State" entry is the current definition.)*
 - **Concurrency** = up to **4 independent group-states**. No spanning / one-state-
   many-groups; copying makes an independent instance that drifts. States don't *grow*;
   you get more *of them* or more *contrast*. A whole-box organism is coordinated
@@ -531,9 +876,15 @@ and drift** — function/symbol names are the durable anchors. See
 
 ### Save/recall (intentional)
 Switching patterns without saving loses changes (jam freely, commit deliberately).
-Recall brings a state back *as saved* and **relaunches/regenerates** — it was on disk,
-not running in the background. Reconstructed continuity, not literal concurrency
-(see §5 recall semantics — this is the desired behavior).
+Recall brings a state back *as saved* — **exact** (a grab is static material; the same notes you
+snagged). It was on disk, not running in the background.
+
+> **Simplified 2026-06-21:** the earlier "recall relaunches/regenerates the posture" clause is
+> **retired.** Saved states are static grabs; recall is selecting one (exact). The living-ness
+> lives in the *source* (now) and in the *performed* returns between grabs (morph / soft-return /
+> reseed). See §5 "Return = navigate your grabs" + §9 (2026-06-21). *(This supersedes the
+> "recall-relaunches clause unchanged/still stands" notes in the dated blocks below, which were
+> written before the grab-and-work simplification.)*
 
 > **Reversed 2026-06-11** (direction; mechanism provisional): the lose-on-switch
 > clause is overturned — the working state will always persist (auto-writeback on
@@ -653,6 +1004,12 @@ not running in the background. Reconstructed continuity, not literal concurrency
 Built in a few-day sprint. All **disposable** (§2.1) — but several pieces are
 conceptually load-bearing.
 
+> **Re-cast 2026-06-21:** the shipped **generators + standalone processors** (Turing pitch gen,
+> chord-mask, tension) are now explicitly **examples/POCs to work from**, not the centerpiece —
+> the architecture recentered on CAPTURE + the MOTION modulation web (§3, §9). Their *function*
+> (harmony constraint, mutation) survives inside MOTION's render stack; their current standalone
+> UIs/forms are reference, not the target. Generation-as-its-own-engine is a deferred domain.
+
 ### Conceptually load-bearing (ideas survive; code may not)
 - **ROBOLOOP page** (shipped): reseed / freeze / freeze-q / reroll / master-sync,
   scale-aware robotize. *The freeze-edit-regenerate symbiosis loop.* FREEZE/REROLL are
@@ -701,17 +1058,100 @@ conceptually load-bearing.
 
 ---
 
-## 8. The first real musical build (music-first build order)
+## 8. Build order — the current roadmap (system-shakedown-driven, 2026-06-21)
+
+> **The roadmap is now system-derived, not a feature ladder.** Per §2 #8 (the strategy
+> shift), the next thing built is decided by **system-level play**, not a pre-planned
+> sequence of features. The music-first ladder below (steps 0–8 + the Tension Workbench)
+> was the bottom-up era — **all shipped** — and is kept as the historical record. What
+> follows is the roadmap the first **flat-map** produced (`doc/plans/2026-06-21-system-flatmap.md`).
+
+**System verdict (2026-06-21): the box FITS but does not HOLD TOGETHER — it is *playable*
+but not yet *performable*.** Everything is resident and runs (no everything-on RAM spike;
+the elf is the worst case), but the system breaks at the two seams where the maps overlap:
+
+- **Wall 1 — the recall freeze is the center of the flow hitting its own SPOF.** "Travel
+  with generators → return via phrase recall" freezes the clock **up to ~1.3 s** (generator
+  wander dirties all 4 groups; recall serializes 4 × ~290 ms SD writebacks into the landing
+  window), and the margin system *structurally* can't cover it (250 ms cap). The RAM escape
+  hatch is dead (§A5: both regions ~9 KB). *Verified live workaround: hold FREEZE before a
+  recall — frozen groups stop re-dirtying, so the writeback collapses (undocumented today).*
+- **Wall 2 — the next intended capability doesn't fit.** Trigger generators (the instrument
+  is pitch-only today) want an ~11.25 KB twin pool that fits **neither** ~9 KB region. They
+  must fold into the existing 64-slot pool — a redesign, not a detail.
+
+**The emergent refinement queue** (ranked for *performable and fun*; #1–#5 play-readiness,
+#6–#7 capability/reliability, gated behind them):
+
+1. **DECIDE the recall-landing semantics by ear** — *may un-captured generator wander be
+   abandoned on a recall?* This is a decision, not a build, and it gates which freeze cure
+   is legal: yes → DRIFT-gated writeback (≈1 line; `phrase_drift` already exists, unused by
+   writeback); no → incremental-save (own bundle; re-measure the ~290 ms cost first). **Highest leverage.**
+2. **Make the invisible modes visible** — persistent `sel_view` label; FREEZE shown on the
+   recall row (it silently re-defines *what recall sounds like* AND *how long it freezes*).
+   UI feedback only, ~0 RAM.
+3. **A panic UNDO/REDO net** — there is no physical UNDO button, and REVERT-hold can destroy
+   the live jam with no recovery. Fits, may *free* main RAM by collapsing the 5 one-deeps;
+   extend it to cover the capture-to-slot span (no undo today).
+4. **Fix the hold-polarity reversal** — PHRASE hold = *create*, SELECT+BOOKMARK hold =
+   *destroy*, same 1000 ms. One mis-timed press loses the set.
+5. **Measure the all-16 live-input render worst case on device** — chord_mask/tension force a
+   full re-render every tick; never measured; lands exactly on the GRAVITY/chord sweep.
+6. **Trigger generators — fold into the shared pool** (capability; gated on #1/#3).
+7. **Atomic snapshot writes + the SET durable baseline** (reliability; reuse the SET layer's
+   proven temp+rename for `SnapshotWrite`).
+
+Full detail, the three flat-maps, the cross-map risk register, and the fixed-Ableton test-bed
+spec live in `doc/plans/2026-06-21-system-flatmap.md`.
+
+### The MVP — the first full sequencer workflow (locked 2026-06-21)
+
+The MVP is **one complete, playable loop** (the system-grain unit, §2 #8), centered on **CAPTURE**
+(§3): *get material → patch the motion → harvest it → refine + return.* It deliberately leans on
+the **modulation web + capture**, NOT the generators — those are demoted to examples/POCs (§3).
+
+> **Get material** — hand-program a line *or* play one in (record). *(Generators optional.)*
+> → **Patch the motion** — a **bus** track and/or the track modulating **itself** (self-bus)
+> bending pitch/harmony through the render stack; **traversal** varying the path. This is the
+> "generative."
+> → **Harvest** — when the motion throws up something good, **CAPTURE** it retroactively to a
+> slot/track/pattern (play-then-keep).
+> → **Refine + return** — hand-edit the captured material on the grid; bank it as a phrase;
+> return to it; layer it (3-frozen-+-1-alive). Then **capture · edit · process · capture · edit.**
+
+Smallest complete version: one track of material + one modulation source + capture-to-slot +
+recall. **What the MVP makes load-bearing** (and what falls off the critical path):
+
+- **In the MVP (commit to these, not "deferred-and-assumed"):**
+  1. **The recall-freeze cure (queue #1)** — capture+return *is* the loop; the ~1.3 s freeze
+     breaks return. Gated on the by-ear recall-semantics decision.
+  2. **Bounce-off-the-ring → pattern** (the queued next capture slice) — the harvest target.
+  3. **Self-bus, note-grain / render-stack half** — the same-track modulation you named central,
+     and it captures *losslessly*. (The config-grain CC-routing half is the deeper prize but it's
+     tape-only-capturable → phase 2.)
+  4. Plus the play-readiness items #2 (visible modes) and #3 (panic UNDO) — a capture/refine loop
+     needs a safety net.
+- **Demoted / deferred off the MVP path:** the Turing **generators** (examples, optional source);
+  the standalone chord-mask/tension as standalone (their function lives in MOTION's render stack);
+  **trigger generators + generation-as-its-own-engine** — a *separate domain* for later (§3),
+  explicitly NOT in the first full workflow.
+
+So the reframe reorders the roadmap cleanly: **capture + modulation + return are the MVP; the
+generation engine is the next domain after it plays.**
+
+---
+
+### Historical: the first musical build (music-first ladder — all shipped)
 
 The spine is settled and there is no architectural reason left to defer pitch. The
 first build is the **drum-pitch triplet** — chosen over the normal-track version
 because it composes with existing drum-rhythm tooling.
 
-**The ordering principle (enforces §2.2):** prove the *music* with throwaway code
+**The ordering principle (enforced §2.2):** prove the *music* with throwaway code
 *before* building the architecture that makes it performant. The render-cache spine
 (§A2) is **not** step 1. A sound comes first; infrastructure follows a sound you've
 already heard and liked. Earlier drafts front-loaded the cache — that is corrected
-here.
+here. *(This ladder is the bottom-up era; §2 #8 superseded its grain 2026-06-21.)*
 
 **The three pieces** (detail; built in the order below, not this listing order):
 
@@ -882,16 +1322,18 @@ Append-only-ish; revise an entry only with a dated note.
 - **Destination UX = decorate existing controls** (track select / layer cycle / step
   LEDs) + small LCD readout + type-legality filter; one-deep auto-undo as the
   live-safety net; default destination = first empty legal layer.
-- **Bounce = the freeze verb.** **Recall = relaunch/regenerate, not resume.**
+- **Bounce = the freeze verb.** ~~Recall = relaunch/regenerate, not resume.~~ *(Retired
+  2026-06-21: recall = select a static grab, exact; the regenerate/resume question is gone. The
+  living-ness is the source + performed moves between grabs. See the 2026-06-21 block + §5.)*
 - **Composition rules made explicit** (FREEZE = master mutation switch; soft return
   composes through window; SNAP orthogonal to window; window source is performance
   state; bounce waits for sweep quiet; generators write only live tracks; type-class
   stacks compose additively).
 
 **State / capture / morph (§5)**
-- **Group slot = pattern**; it already carries both §5 faces (recording = layers,
-  posture = CCs). **Two faces are a recall *gesture*** (load+FREEZE vs load+run), not
-  separate storage.
+- **Group slot = pattern**; it carries the captured notes (layers) + config (CCs).
+  ~~Two faces are a recall gesture (load+FREEZE vs load+run).~~ *(Retired 2026-06-21: a grab is
+  static; recall = select it, exact. Config rides as reseed material, not a regenerating face.)*
 - **Track slots are net-new**, hybrid persistence (RAM default, explicit SD-promote
   deferred). Justified by §4 polyphonic sampling, which patterns can't express.
 - **Quick-capture = SAVE-button** (single→next free `CAP_NNN` in active bank, wrap
@@ -2036,8 +2478,9 @@ crystallized here; build order is a later GO.
   there is no explicit saved baseline. Decision: add a **SET** layer above the disposable
   **SESSION**. The 2026-06-11 inversion is *reframed, not reversed* — always-persist now means
   *"persist to the SCRATCH session"*; a SET is an explicitly-blessed copy. SAVE-SET blesses the
-  whole shelf; RELOAD-SET returns to it (the deliberate "back to what I saved"); the
-  recall-relaunches clause is unchanged.
+  whole shelf; RELOAD-SET returns to it (the deliberate "back to what I saved"). *(The
+  "recall-relaunches" rider here is superseded — recall = select a static grab; §9 2026-06-21.
+  The SET return is unaffected: it reloads static grabs either way.)*
   - **Scope:** a SET = banks `B1–B4` + config `C` (+ `G/M/S/BM`, cheap and faithful).
     **Phrases (`PH`) persist independently** — a growing durable library that survives
     RELOAD-SET (a captured waypoint is never lost; keeps the §10 L1 probe hazard dormant). The
@@ -2154,135 +2597,99 @@ is now faithful for melodic articulation including long notes (by-ear GO; HIL
 follow-on.** **Next slice = bounce-off-the-ring with dest = track + pattern** (lossless retroactive
 freeze to any slot). Slice plan: `doc/plans/2026-06-20-unified-freeze.md`.
 
+**2026-06-21 — Strategy shift: validate the SYSTEM, not the fragment (DECIDED; §2 #8 added).**
+A design review + a source-grounded system flat-map (`doc/plans/2026-06-20-design-review-and-refine.md`,
+`doc/plans/2026-06-21-system-flatmap.md`). The builder's call: fragment-grain validation has
+"very little meaning" — you can't tell if one function is musical without using it enough to
+make music, and locally-correct pieces keep failing at assembly (clunk, won't compose, RAM/CPU
+walls). Discipline is a tool to drive a result; it shifts when it stops working.
+- **New validation grain = a whole performable set/path**, bounded to the §1 flow with the
+  pieces already built; "performable and fun" replaces "musical" as the bar; build licensed by
+  system-level play, not a feature catalog (§2 #8; §8 reframed; §2.7's grain extended).
+- **Flat-map verdict: the box FITS but doesn't HOLD TOGETHER — playable, not yet performable.**
+  Two structural walls live at map *overlaps* (invisible per-fragment): (1) the **recall freeze**
+  = budget × dirty-mask × FREEZE-mode — the center of the flow freezes ~1.3 s, RAM escape dead;
+  (2) **trigger gens don't fit** (~11.25 KB twin pool > both ~9 KB regions). The emergent,
+  system-derived refinement queue (#1–#7) replaces the §8 feature ladder.
+- **Verified factual correction:** main RAM is **~9 KB free, not ~33 KB** (the 2026-06-19
+  re-measure mis-stated it by ~24 KB); the "~40 KB CCM-relocation lever" is **withdrawn** — both
+  regions are ~9 KB and par/trg source is DMA-locked to main. §A5 + §10 levers corrected.
+- **The dirty/writeback mask is reframed from "fragility locus" (§5.6) to the design's single
+  point of failure** — every return-family op rides it; it gets a containment plan, not just a name.
+- **Scope anchor — a FUSION instrument, not a generative one (user, 2026-06-21).** The generative
+  layer is *additive*; it fuses with the traditional step sequencer + the live MIDI recorder into
+  one shared *get-material → process → tweak → harvest → refine* loop (program / play / generate
+  are co-equal sources). Generators/processors are prospecting tools for material the hand then
+  harvests + refines — symbiosis between instrument and intention. Goal = **refine the whole
+  synth**, not a generative corner. Folded into §1 (north star), §3 (source-agnostic buffer), §4
+  (live stream = generated *or* played-in). Guards against the doc's drift toward generative-first.
+- **Architecture recentered on CAPTURE — four homes; generators demoted; generation deferred
+  (user, 2026-06-21).** The instrument is **MATERIAL / MOTION / CAPTURE / LIBRARY**, capture at
+  the center (folded into §3). **MOTION is the generative heart** — the patchable modulation web
+  (bus + self-bus + traversal + harmony render-stack); "modulation counts as generative." The
+  shipped Turing generators + standalone chord-mask/tension are **demoted to examples/POCs to
+  work from** (user: "what we have now are examples and POCs"). **Generation as its own engine =
+  a separate domain, deferred.** Organizing principle: *arrange MOTION so CAPTURE is lossless.*
+  The **MVP = the first full sequencer workflow** (§8) — capture · edit · process · capture · edit
+  — leaning on modulation+capture, NOT generators; makes the recall-freeze cure, bounce-to-pattern,
+  and self-bus (note-grain) load-bearing; resolves the review's spine-vs-instrument gap (the engine
+  is two-noun; the instrument is four-home).
+- **Return simplified to "grab and work" (user, 2026-06-21).** A saved state is a **static grab**
+  (a capture off the live source), not a posture-you-re-enter-and-it-regenerates. **Return =
+  select an earlier grab** (exact, identifiable by construction); the first grab is the beginning,
+  grabs in order are the path/set. This is §4's sample discipline taken at its word, resolving the
+  §4↔§5 tension in §4's favor. **Retired:** the "recall relaunches/regenerates / recall ≠ resume"
+  law (it fought §4; SEAMLESS recall contradicted it) and "two faces are a recall gesture." The
+  *living* return is a **performed move between grabs** — morph / soft-return / **reseed** (feed a
+  grab back into the source → return-as-evolution) / grab-a-moment (the ring). Generativity lives
+  in the *source* (now) + the moves between grabs, never in re-animating a saved state — so the
+  resume/regenerate complexity is **deleted, not solved.** **The §3 recursion is untouched:** a
+  grab is never a dead end — load it and run motion over it and it *becomes a source again*
+  (source/grab = two states of one material, live↔frozen; the *process* step of
+  capture·edit·process·capture). Folded into §1 / §3 / §5 (rewritten
+  "Grabs and the source" + "Return = navigate your grabs") / §6 / §11. User: "yes 100%."
+- **Freeze semantics nailed down (user, 2026-06-21).** **(a) Freeze always disengages** — the
+  generator's *wander* turns OFF (restores the §3 spine "BOUNCE freezes + disengages"; the shipped
+  same-group "save-only bounce keeps the gen running" was a deviation, removed). Destination (in
+  place / new slot) only picks *where the static lands*, not whether the gen stops. **(b) Emission
+  is CONFIG-COPIED across, not tape-baked (refined later same day).** Freeze copies the emission
+  settings + seed; the **deterministic** emission re-applies identically on the full render
+  material → **sounds the same** (faithfulness). The **groove model generalized** — and it beats
+  tape-baking: **lossless** (the tape is a mono note-stream, rolls/chords collapse), **tweakable**
+  (emission stays config on the grab, not fused into dead notes), **cheaper** (a seed). *This — not
+  a tape-bake — is why robotize isn't migrated.* The **RING** (seed-frames) is the retroactive
+  backbone (re-sim reconstructs the last K bars). **(b2) The TAPE shrinks to its irreducible job:
+  LIVE MIDI input** (+ consumed external/bus) — the only thing with no config to copy. Dependency:
+  humanize + coin-flips need the **emission-determinism follow-on** (§10) before they're
+  config-copyable; until then the tape bridges them → after, tape = live-keys-only. **(c) The "keep
+  running" cases are separate verbs:** **COPY** = fork the *live* source (gen on); **retroactive
+  CAPTURE (ring)** = static snapshot without stopping (play-then-keep); **THAW** = just ENGAGE a gen
+  over a grab (QoL, not a new verb). Build-time flag: changes the shipped same-group bounce **and
+  drops most of the emission tape**. Folded into §3 / §5 (freeze section) / §10.
+
 ---
 
 ## 10. Open questions (unresolved forks)
 
-Closed this round and removed: sampler slot model, windowing playback, render-cache
-design (now §A2, provisional), set-density shape (now §5 skeleton/muscle). §8 steps
-1–4 all closed by ear 2026-05-24 (see §9).
+> **The live roadmap is the §8 system-derived queue (#1–#7), not this list.** §10 holds the
+> standing forks. A long tail here is CLOSED/SHIPPED — collapsed to pointers (full narrative
+> lives in §9 + the REFERENCE doc + the dated plan files). Read it blocking-the-next-move first.
 
-**Gating (answer before/at the start of the relevant phase)**
-- **Base SRAM — measured 2026-05-24 (CLOSED):** 95.9KB used / ~32KB free main, 64KB
-  CCM virgin. First build fits trivially; full Part II fits but tight (~8KB static).
-  See §A5.
-- **MSP/handler-stack high-water — measured 2026-05-25 (CLOSED).** Phase D.0:
-  sentinel paint of free MSP region from `APP_Init`, readback via `CMD_MSP_QUERY`.
-  After full harness exercise: **peak 592 B** against **~32 KB free region** (~2 %
-  usage; ≈ 32 KB headroom). Phase D's +20 KB double-buffer lands in **CCMRAM**, so
-  it never competed with MSP anyway — separate budget. Numbers + table in §A5.
-- **Max generator loop length** for static allocation — a real capability-vs-budget
-  decision (§A5). Recommended v1 default: 64-step cap with tiling across longer
-  tracks; revisit if a piece wants longer. Decides at step 5 phase E.
+**Closed/shipped — folded to §9 + REFERENCE (no longer open):** base-SRAM + MSP high-water
+(measured, §A5); the phase A–F step-5 sub-decisions (CCM placement, render scheduling, knob
+detection, cache invalidation, TRKMODE migration, generator pool, BOUNCE destination, §9);
+phase-F.3 cross-track capture + the withdrawn ENGAGE auto-jump; the `0x96`+ ext-CC persistence
+bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot / windowing-playback
+/ render-cache / set-density forks (now §5 / §A2).
 
-**Step 5 sub-decisions (answer as the relevant phase lands)**
-- **CCM placement mechanism — CLOSED 2026-05-25 (phase A).** `CCM_SECTION
-  __attribute__((section(".bss_ccm")))` macro added in `mios32_config.h`,
-  guarded on `MIOS32_FAMILY_STM32F4xx` (no-op fallback elsewhere). Mirrors
-  the existing `AHB_SECTION` pattern. Linker `.bss_ccm` / `.bss_ccm.*`
-  sections in `etc/ld/STM32F4xx/STM32F407VG.ld` route to the 64 KB CCMRAM
-  region.
-- **Render task scheduling — CLOSED 2026-05-25 (phase D).** Tick prologue +
-  sweep-window live render. No new FreeRTOS task. `SEQ_CORE_RenderTracks` in
-  the tick prologue picks sweep vs quiet per track based on touched timestamp.
-  FreeRTOS background task deferred until §A4 #5/#6 measure a real worst-case
-  miss; today's chord_mask render is single-digit µs so a background task
-  would buy nothing.
-- **Knob-moving detection — CLOSED 2026-05-25 (phase D).** Per-track
-  `seq_render_touched_ms` timestamp. `SEQ_CC_Set` cases for slot-relevant
-  fields call `SEQ_CORE_RenderTouched()` via `SEQ_CORE_ChordMaskSlotSync`.
-  Cheaper than encoder-input hooking; doesn't depend on hardware specifics;
-  generalizes to future processor params.
-- **Per-step vs whole-buffer cache invalidation** (phase D): whole-buffer default
-  is fine; window position is the incremental special case (deferred to v2 windowing).
-- **TRKMODE ChordMask UX migration — CLOSED 2026-05-25 (phase C).** Shortcut
-  preserved: `SEQ_CC_Set` calls `SEQ_CORE_ChordMaskSlotSync` for MODE /
-  CHORDMASK_STRENGTH / BUSASG. v2 pattern format unchanged; stack-editor UI
-  deferred until more processors exist.
-- **Generator pool allocation strategy — CLOSED 2026-05-25 (phase E).** Static
-  cap-64 pool, per-(track, instrument) sparse index map (16×16 byte table, 0xFF
-  = unallocated). Eviction policy: **refuse-with-message** on full ("pool full
-  (64/64)" via `SEQ_UI_Msg`). LRU deferred — not needed yet (the spine ships
-  with 16 max tracks × at-most-16 drums per track = 256 possible (track, instr)
-  pairs, but a realistic live session engages 4–8; pool ceiling is far above
-  observed use). Revisit only if play behavior demands.
-- **BOUNCE destination semantic — CLOSED 2026-05-25 (phase F).** BOUNCE
-  honors §3: cursor IS the destination. Cursor on engaged gen → in-place
-  (replace). Cursor on empty drum slot while a gen is engaged elsewhere on
-  track → relocate (additive at dst, src restored from whole-track undo).
-  See §8 step 5 phase F for the resolution order and the one-deep-undo
-  caveat (relocate disengages every other gen on the src track).
+**Still gating (genuinely open):**
+- **Max generator loop length** for static allocation — v1 default 64-step + tiling across
+  longer tracks; revisit if a piece wants longer (≈3×/generator, §A5).
 
-**Closed phase F.3 (2026-05-26)**
-- **Processor BOUNCE cross-track capture — CLOSED.** Reframed: §3
-  ¶176-178 actually wants in-place processor bounce to BE destructive
-  ("the processed notes *are* the buffer"). What was missing was the
-  symmetric *additive* half — capture src's output into an empty
-  *other* track's source. Wired as `SEQ_CORE_ProcessorBounceCapture`
-  with a visible-track + count-other-track-processors dispatch in the
-  PITCHGEN GP8 handler; refuses if multiple other-track processors
-  (ambiguous). Same-track BOUNCE retains the existing in-place /
-  replace semantic.
-- **ENGAGE destination auto-jump — CLOSED.** `SEQ_GENERATOR_FindFirstEmptyDrum`
-  + a GP1-disengaged-branch check in `seq_ui_trkpitchgen.c`. Cursor
-  jumps if its drum has any non-zero Note step AND no allocated slot.
-  Confirmed live + bytewise-test green; closes §10's "ENGAGE destination
-  auto-jump" item.
-
-**Open bugs (pre-existing, surfaced 2026-05-25)**
-- **`SEQ_CC_CHORDMASK_STRENGTH = 0x96` is outside the v2 persisted ext-CC range
-  0x80–0x95** ([seq_file_b.c:62-64](../apps/sequencers/midibox_seq_v4/core/seq_file_b.c#L62-L64)).
-  Consequence: chord-mask strength resets to 0 on every reboot or pattern
-  reload — playmode persists but the dial does not, so the user sees
-  TRKMODE=ChordMask with Msk:000 after a flash. Predates phase C (regression
-  goes back to when the CC was added 2026-05-24). Fix is small: extend
-  `SEQ_FILE_B_TRK_EXT_CC_LAST` to 0x96 (or the next clean boundary) and bump
-  the v2 ext-tag — but format-bumps are a v3-format concern, so park here
-  until the v3 format work lands.
-  **Update 2026-06-09 — un-parked, promoted into the Tension Workbench bundle**
-  (§8 second build): the bug is wider than recorded — CCs **0x96–0x99** (strength,
-  bus, drum-mask L/H) all sit past the persisted range and reset on reload. The
-  small ext-range bump (new ext tag, range to a clean boundary) ships with the
-  workbench, independent of the larger v3 format; GRIP's CC lands inside it.
-  **CLOSED 2026-06-10 — shipped with the Workbench.** A versioned **V3 ext-tag**, range
-  widened to 0x80–0x9F (covers chord-mask 0x96–0x99 + GRIP 0x9A), with the V2 byte-count
-  frozen separately so old V2 patterns still load. HIL round-trip pins it; chord-mask
-  strength + GRIP now survive reboot/recall.
-
-**Tension Workbench — BUILT + by-ear GO (2026-06-10).** Track 1 shipped as one bundle,
-HIL-green, confirmed by ear. Decisions that emerged or refined the 2026-06-09 plan
-(build narrative → REFERENCE doc):
-- **Monotone pull, varied push.** The grip hash keys on `zone` only on the PUSH side
-  (LEAN/RUB/SLIP each select a different tense set — the §2.3 "variety"); the PULL side
-  collapses all zones to one grip class, so deeper pull only ADDS gripped voices and
-  the band nests — pulling harder can never pop a voice back outward. Resolves the
-  latent §2.2-monotone-vs-§2.3-variety tension in favor of what the ear expects
-  (§8.1 "collapse, not dropout").
-- **GRIP is per-track (CC 0x9A, mirrored into the slot's `strength`); it shares the
-  chord-context bus + drum scope with chord-mask** — no separate tension-bus CC.
-  GRAVITY/SHADE stay global (config-persisted, like the scale — performance state,
-  not pattern state).
-- **RESOLVE = per-tick glide sized to the ticks remaining to the next downbeat,
-  pinned to exactly 0 in the `ref_step==0` branch; instant when the transport is
-  stopped; a manual GRAVITY turn cancels it.** (Not the `SEQ_GENERATOR_Tick` pattern
-  the plan named — that fires on per-track wrap, not the global musical measure.)
-- **ext-CC fix shipped as a versioned V3 tag**, range widened to 0x80–0x9F, with the
-  V2 byte-count *frozen separately* so old V2 patterns still load. Existing bank slots
-  already had room for the wider block (layer data dominates `pattern_size`), so no
-  bank re-format was needed.
-- **Encoders have no felt detent (raised by the user): 0 is a value, not a position.**
-  So RESOLVE (reliable return) and a bipolar LCD position meter (fill-from-center +
-  zone-boundary ticks) are how you find home — the meter is the encoder-native
-  feedback the gesture needs. Also clarifies the model: within a zone the dial
-  *continuously* recruits voices (threshold), across boundaries the target band
-  *steps* — not binary.
-- **Throughput: a host rig-builder library + CLI** (`python -m harness.rigs tension`,
-  one command after a flash) + a `pattern_save` verb — the §1 "setup friction kills
-  ear-testing" answer; also the trap that masked the first listen (a rig built on a
-  multi-layer session buried the gripped voice — fixed by loading a clean baseline).
-- **The GO is soft:** it works; no refinement requested. The §10 by-ear tunables (zone
-  widths, SHADE terrain, depth-vs-grip split) shipped at their starting values and are
-  revisited only when the ear asks. **Track 2 (pitch-chain migration) is licensed.**
+**Tension Workbench — SHIPPED + by-ear GO 2026-06-10 (§9; build narrative → REFERENCE).** The
+GRAVITY field (monotone pull / varied push), per-track GRIP, RESOLVE, SHADE; ext-CC fix shipped
+as the V3 tag (0x80–0x9F). Soft GO (works, no refinement requested). The by-ear tunables below
+stay live dials, revisited only when the ear asks.
 
 **Open puzzles (surfaced 2026-05-25, not gating, revisit with a clean baseline)**
 - **EDIT-LCD vs tick-time gate read disconnect.** While diagnosing the
@@ -2302,88 +2709,30 @@ HIL-green, confirmed by ear. Decisions that emerged or refined the 2026-06-09 pl
   `AUTO_TEST` baselines exist and we can A/B a clean state against the
   current broken one.
 
-**Tension Workbench (decide at the workbench, by ear — 2026-06-09)**
-*Soft-resolved 2026-06-10: the by-ear GO confirmed the bundle works at these starting
-values — nothing below needs changing yet; each stays a live dial, revisited when the
-ear asks. Already resolved outright by the build: chord-root = ARP_SORTED lowest held
-note (fallback global root); GRAVITY persistence = global config (performance) state;
-GP map = GP1 GRAVITY / GP2 SHADE / GP3 GRIP / GP8 RESOLVE / GP16↔FX_SCALE (provisional);
-SHADE = parallel modes. New from the build: a **depth-vs-grip split** (dial magnitude
-currently drives both how-far and how-many — split only if the ear wants "few notes
-very tense" vs "all notes slightly tense" as separate moves).*
-- Zone boundaries/count on the bipolar sweep (proposed DRONE/CHORD/SCALE ←0→
-  LEAN/RUB/SLIP; collapsing LEAN into RUB or widening the detent dead-zone are
-  legitimate by-ear outcomes).
-- Pull floor: root-only vs root+fifth at full CCW.
-- Chord-root derivation for the ladder: recommended = lowest held note's PC via the
-  ARP_SORTED stack (bass proxy — inversions then *move the gravity floor*, which is
-  performable); fallback = global root when no chord held.
-- SHADE under a static held chord (terrain-tension: the chord goes "wrong" against
-  the darkened scale) — feature or confusion? Listen.
-- SHADE mode family: parallel modes recommended (root fixed = the brightness move);
-  relative variant rotates root — a different instrument, defer.
-- Physical page + GP allocation (decide with hardware in hand, §A3 precedent).
-- Global GRAVITY persistence: performance state (like window source, §3) vs session
-  config — decide when saving feels wrong.
-- **Momentary "spring" gesture for processor sweeps (parked candidate, from Torso T-1's
-  TEMP button).** Hold-to-deviate, release-snaps-back: a transient deviation that auto-reverts
-  on release — e.g. hold TEMP + sweep GRAVITY, release and the field springs back. Distinct
-  from the persistent FREEZE master-switch and CHECKPOINT/REVERT (those hold/protect state;
-  this is a momentary live-sweep gesture). Parked, not blessed — decide with hardware in hand.
-  *(Orphan-folded 2026-06-14 from the retired save-model plan so it isn't lost.)*
-- ~~Track 2 edges: echo, the live/jam input path, per-step Root/Scale overrides.~~
-  **CLOSED 2026-06-10** (Track 2 built): echo keeps its per-repeat re-snap (the
-  snap is idempotent on mirror notes; pushed-note echoes resolve into the
-  terrain); the live/jam path is untouched (live notes never traverse the render
-  buffers — same primitives, same tcc truth); per-step Root/Scale overrides are
-  read by the PITCH render from the buffer being built (`pitch_step_scale_root`).
-  Accepted-edge list in §9 (2026-06-10).
-- **Drum-track pitch chain** (new, from the Track 2 drum fence): drums keep the
-  legacy emission chain because a 0 Note byte means "lay_const fallback, still
-  plays" — mirror-rest silence and skip-0 are both wrong there. Migrating drums
-  needs its own design pass (what does transposer-silence mean for a kit? does
-  the fallback note transpose?). Pitched-drum GRAVITY work is unaffected
-  (chord-mask/tension process drum note layers already).
-- STOP-mid-RESOLVE semantics: now lands at 0 (boundary). If by ear the landing
-  feels wrong mid-performance, the alternative is freeze-at-mid-ramp (one line).
+**Tension Workbench — by-ear tunables (soft-resolved 2026-06-10; revisit when the ear asks).**
+Zone boundaries/count, pull floor (root vs root+fifth), chord-root derivation (ARP_SORTED lowest
+held note / global-root fallback), SHADE-under-static-chord (feature or confusion?), SHADE mode
+family (parallel vs relative), depth-vs-grip split, GRAVITY persistence (performance vs session
+config), physical GP allocation — all shipped at starting values; each stays a live dial.
+- **Momentary "spring" gesture (parked candidate, Torso T-1's TEMP).** Hold-to-deviate,
+  release-snaps-back: a transient sweep that auto-reverts (hold TEMP + sweep GRAVITY, release →
+  field springs back). Distinct from FREEZE (persistent) and CHECKPOINT/REVERT. Decide with
+  hardware in hand.
+- **Drum-track pitch chain** (Track-2 drum fence): drums keep the legacy emission chain (a 0 Note
+  byte = lay_const fallback, not a rest — mirror-rest silence and skip-0 are both wrong).
+  Migrating needs its own pass (transposer-silence for a kit? does the fallback note transpose?).
+- **STOP-mid-RESOLVE** now lands at 0 (boundary); freeze-at-mid-ramp is the one-line alternative
+  if the landing feels wrong by ear.
 
-**Save-model rethink (2026-06-11) — directions decided (§9), mechanisms open;
-working detail in `doc/plans/2026-06-11-save-model-groups-performing-curating.md`**
-- Tape storage: session file vs RAM+SD journal vs dedicated bank (the bank option
-  breaks the hard-wired bank↔group identity — leaning against).
-- ~~Checkpoint storage~~ — **RESOLVED 2026-06-13 (built + GO, Stage C)**: an
-  internal fifth "bank" `MBSEQ_AN.V4`, lazy-created at first CHECKPOINT, reached
-  by a **sentinel bank index** — not a `NUM_BANKS` bump (that would index
-  `seq_pattern[4]` out of bounds in `SaveAllBanks` and surface the anchor in the
-  bank UI). Reuses the record serializer wholesale (gen state rides the V4 tag)
-  and stays out of every `for(bank<NUM_BANKS)` loop → non-navigable, untouched by
-  session writeback. Grain = whole-organism (4 groups, one gesture), one-deep.
-- ~~Gen-state extension-tag scope~~ — **RESOLVED 2026-06-12 (built + GO, Stage
-  B)**: V4 ext tag = V3 payload + a fixed-stride gen sub-block (count + 4 entries
-  × 177 B: instrument, par_layer, engaged, dials, loop/locks/anchor/mult). Every
-  content-replacing load clears + re-seeds the track's generators from the record
-  (resume ENGAGED); a gen-less slot kills them. Cap = `SEQ_GENERATOR_PERSIST_SLOTS`
-  (4)/track; write degrades V4→V3→none per record.
-- ~~Track-grain pull gesture~~ — **RESOLVED 2026-06-12 (built + GO)**: the
-  track-hold mirror — hold select-row = destination, held+select = source column,
-  GP letter + number commits, SELECT+CLEAR = one gesture back. Remaining opens
-  carried on the bundle's watch list: two-face choice at pull time (deferred
-  post-tape), multi-track chord-select shadowed while a track is held, slot
-  NAME in the pull overlay (backlog).
-- Phrase format: MBSEQ_S.V4 record-version bump vs new file (carrier verified
-  friendly — `song_size` already parameterized).
-- Performance fence for auto-writeback (Digitone II PERFORM KIT lesson) —
-  **deliberately UNBUILT in v1 (FEARLESS, 2026-06-13)**: CHECKPOINT/REVERT bound
-  the blast radius, so committed performance never traps you. The by-ear trigger
-  to design one: if a live processor sweep mid-transition ever *edits* a state
-  you meant to keep *playing*. On the watch list, not built.
-- ~~Still-unblessed proposals riding the rethink~~ — **all blessed 2026-06-11**
-  (the tape with its §5.5 supersession placed, row tension meter, chord hand,
-  two-surface model, CHECKPOINT/REVERT verbs). After FEARLESS shipped (Stages
-  A–C, GO 2026-06-13), the rethink's only still-open mechanism forks are **tape
-  storage** and **phrase format**; checkpoint storage/grain and gen-state scope
-  are resolved above, the performance fence is deliberately unbuilt, and the pull
-  gesture shipped with RECOMBINE.
+**Save-model rethink (2026-06-11) — SHIPPED as FEARLESS + RECOMBINE (§9; narrative → REFERENCE).**
+Resolved (built + GO): checkpoint storage (sentinel `MBSEQ_AN.V4`), gen-state V4 tag, the
+track-grain pull gesture, the tape's §5.5 supersession, the two-surface model. Genuinely-open
+forks that remain:
+- **Phrase format** — `MBSEQ_S.V4` record-version bump vs a new file (carrier verified friendly:
+  `song_size` already parameterized).
+- **Performance fence for auto-writeback** (Digitone-II PERFORM-KIT lesson) — **deliberately
+  UNBUILT**: CHECKPOINT/REVERT bound the blast radius. By-ear trigger to design one: if a live
+  processor sweep mid-transition ever *edits* a state you meant to keep *playing*. Watch list.
 
 **Bounce north-star — capture ALL processing as-heard, reset on the copy (2026-06-12).**
 The user's stated end-state for bounce/freeze: *apply every processor and generator,
@@ -2555,300 +2904,59 @@ the generative freeze/bounce law); the actionable build sketches live here.
   render-stack migration** (see the Bounce north-star entry above) — migrating it makes FREEZE
   hold it and BOUNCE freeze it editable, dropping the lone emission-time exception.
 
-**Retroactive CAPTURE — the frame/ring ("Capture MIDI," generalized to the organism). Direction, 2026-06-19.**
-The user's north-star, reached by working up from robotize's per-bar anchor ring: **Ableton's
-Capture MIDI, generalized from "what I played" to "everything the organism did."** The box is
-always listening — it rings the last K bars — and after you like what happened you hit **CAPTURE**
-(no arming, no record-first) to retrieve them as self-contained, editable, bounce-able material.
-(Ableton's mechanics confirm the shape: always-listening retroactive retrieve; a bounded ring that
-discards oldest when full — Live uses 16384 events / drop oldest 1024; MIDI is low-bandwidth so it
-is cheap; capture mints a new clip.)
+**Retroactive CAPTURE — the frame/ring ("Capture MIDI," generalized). SHIPPED first cuts + by-ear
+GO 2026-06-20 (§9 2026-06-20; narrative → REFERENCE + plan files).** The north star:
+always-listening, play-then-keep — grab the last K bars off the ring as editable, bounce-able
+material. Two kinds of ring content: a regenerable **seed-frame** (re-sim) and a lived-through
+**tape** (records what sounded). Shipped: the per-bar generative-frame **ring** (`seq_core_cap_ring`, 17
+deep), **re-sim** (stopped — rewind + re-drive with wander, record the emitted stream), the **live
+tape** (playing — passive tee off the MIDI-out drain; strictly more faithful), the **UTILITY hold
+→ row → GP-n** gesture, the par-aware thermometer, and **precise gate + multi-step length** (tape).
+Plans: `doc/plans/2026-06-19-capture-ring.md`, `doc/plans/2026-06-20-unified-freeze.md`.
+- **Open / deferred — re-sim reproduction preconditions** (correctness, filed as unknowns):
+  cross-generator tick ordering; polymetric bar alignment (the ring is indexed by a *global*
+  measure counter — a len-12 and a len-16 track cross bars at different times); global-RNG state
+  for the deferred coin-flips. "Restore byte-identical" is about state *after* re-sim, not re-sim
+  *reproducing* the original. (The **tape** needs none of this — it records; re-sim is the fallback
+  for un-performed/stopped spans, which makes "determinism is THE keystone" a stale framing.)
+- **Open / deferred — build:** bounce-off-the-ring with dest = pattern (the next slice);
+  live-MIDI-in tape; emission coin-flips (measure-axis-hash vs tape); ring persistence; true
+  1-voice Note-init; re-sim multi-step; the window-seam groove/delay edge.
 
-- **The content split = the §5 two faces, at capture level.** The ring holds two kinds of thing:
-  - **Seed-frame (the spring) — what's *regenerable*.** A small per-bar snapshot of the
-    deterministic generative state (robotize seed, generator state, self-mod). Re-enter it →
-    regenerates; re-simulate it offline → bounce to static. Bytes/bar.
-  - **Recording (the tape) — what's *lived-through*.** The non-deterministic external streams:
-    consumed bus modulation (Design 1) **and live MIDI input** (the Capture-MIDI core). Recorded
-    as actual events — a human/bus can't be seed-replayed. Thin (MIDI is low-bandwidth).
+**Pre-build recon — gotchas + coverage gaps (2026-06-19; full report
+`doc/plans/2026-06-19-pre-build-recon.md`).** A deep multi-agent pass (8 subsystems, 122
+source-verified findings); build-changing corrections folded into §9 / §10(a)/(c). Two things to
+keep visible:
+- **Trigger-gen pool (A11):** the 64-slot pool is shared / first-come / no-fairness; a full-size
+  separate pool (11.25 KB) won't fit CCM — so share-with-fairness or a slim separate pool
+  (16–24 B/slot). (= §8 queue #6.)
+- **Coverage gaps the recon did NOT examine** (check before building): the UI / LED / encoder
+  layer; the CV/AOUT path; song-mode / transport edge cases vs the capture-ring bar closure;
+  concurrency beyond the named mutexes; worst-case timing under load (unmeasured on device); and
+  — per discipline — no by-ear validation of any of it. *(The 2026-06-21 flat-map began the UI /
+  budget / dirty-mask laydown the recon skipped.)*
 
-  CAPTURE grabs both for the last K bars → one self-contained unit. This is literally §5's
-  recording-+-posture resolved into a single gesture: **seed for the reproducible, recording for
-  the lived-in.**
-- **Determinism is the keystone (the seed-frame half).** For offline re-simulation to reproduce a
-  span exactly, the generative engine must be deterministic from **per-track seeds**. Robotize
-  already is (per-track xorshift32 — and `SEQ_ROBOTIZE_Freeze(K)` already does the seed-ring K-bar
-  grab, proving the UX). Generators are **not** — they draw from the **global** RNG (`jsw_rand`) +
-  carry big state. **Enabling refactor: move generators (and any generative RNG) to per-track
-  seeds.** Then any span re-simulates deterministically → offline bounce of robotize + generators
-  + self-mod, exact, with no hot-path recording.
-- **Design 1 — record consumed inputs (cross-track + live).** A track's frame records the external
-  inputs it consumed — bus modulation (transposer note / PC-set / routed CCs, per step) **and**
-  live MIDI in — so a modulated or played-over track captures self-contained **from its own
-  seat**, with no need to re-run the modulator, working even if the modulator is a live human.
-  (Design 2 — whole-organism lockstep re-sim — rejected as the heavier, more fragile purist
-  option.)
-- **What CAPTURE closes.** It resolves the "BOUNCE can't freeze time-varying behavior" gap (the §9
-  law caveat): offline re-sim (seed-frame) + recorded inputs (bus + live) freezes **any** span —
-  direction/length self-mod, robotize, generators, bus modulation, live keys — into a flat static
-  pattern. Division of labor: **BOUNCE freezes content transforms; CAPTURE freezes the lived
-  timeline.** Together they cover everything.
-- **The ring + output.** A bounded retroactive buffer, bar-grid-indexed (`robotize_measure_ctr` is
-  the precedent), discard-oldest when full (Ableton: 16384/1024). Depth = last K bars; CAPTURE
-  takes a span → a new track/layer (Ableton: a new clip). The recorded half is concrete notes
-  (trivially static/bounce-able); the seed half stays regenerable (the spring) or bounces via
-  re-sim.
-- **Relationship to existing.** Robotize Freeze = the seed-ring K-bar grab (built — the proof).
-  The deleted `seq_capture.c` = the *wrong* way (hot-path emission tape, lossy/raced — §9
-  2026-05-30). `SEQ_CORE_CaptureTrackOutput` = the right computed-capture pattern (force render,
-  snapshot, sweep-safe). Existing live-record = arm-then-play; CAPTURE = **play-then-keep**.
-- **Open / build-time.** The per-track-RNG generator refactor (scope: every `SEQ_RANDOM_Gen_Range`
-  call in `seq_generator.c`); exactly what the frame must hold for full determinism (global-RNG
-  seeding, generator firing order, polymetric bar alignment — flagged unknowns); the live-MIDI-in
-  tap point + event timing/quantize-or-loose; RAM (seed-ring cheap ~bytes/bar; recorded-input
-  thin; output-record only as a bounded fallback). **This is the keystone build** — it unlocks
-  self-mod bounce, robotize freeze-to-static, and live capture in one stroke. **→ FIRST CUT SHIPPED
-  2026-06-19** (generators + chord_mask + random traversal moved to per-stream seeds/hash; streams
-  now seekable + forward-deterministic). **Still owed by CAPTURE:** the per-bar seed-snapshot RING +
-  bank-format persistence (the actual K-bar retroactive grab + cross-reload re-sim), the live-MIDI-in
-  tap, and the emission-time coin-flips (probability/humanize/random-gate/echo — measure-axis-hash vs
-  capture-as-tape, deliberately deferred so they don't go dead-static). See the SHIPPED note in the
-  pre-build recon entry below for the seed-vs-hash policy + per-slot decision.
+**PER-TRACK-RNG keystone — FIRST CUT SHIPPED + by-ear GO 2026-06-20 (§9; narrative → REFERENCE).**
+The determinism refactor that makes spans seekable + forward-deterministic (the CAPTURE
+prerequisite). Policy: stateful streams → caller-owned xorshift seed; standalone per-step render
+gates → stateless `grip_hash`. Done: generators (per-pool-slot seed, minted at ENGAGE), chord_mask
+(shared `grip_hash`, zone 0x20), random traversal (`random_traverse_state`, SCRUB-safe). +256 B
+CCM. `CMD_RNG_SEED` 0x4d.
+- **Still deferred (feeds CAPTURE):** the emission-time coin-flips (step-prob / random-gate /
+  humanize / echo — measure-axis-hash vs capture-as-tape, undecided) and the per-bar seed-snapshot
+  ring + bank-format persistence. HIL limit: no behavioral pin for traversal trajectory / SCRUB
+  (partly closed since by `CMD_CLOCK_STEP` / `CMD_TRANSPORT`).
 
-  **→ RING + RE-SIM + PHYSICAL GESTURE SHIPPED + by-hand/by-ear GO 2026-06-20** (HIL 187/187). The
-  retroactive grab: an always-on per-bar generative-frame **ring** (`seq_core_cap_ring`,
-  `SEQ_CORE_CAP_RING_BARS=17` = the live in-progress bar + **16 grabbable** completed bars,
-  visible-track, main SRAM; explicit-modulo index) + `CMD_CLOCK_STEP` (synchronous stopped-transport
-  tick driver, also closes the keystone's traversal-trajectory HIL gap) + the **re-sim**
-  (`SEQ_CORE_CaptureSpanReSim`: snapshot all live state → rewind to the window-start frame → re-drive
-  K bars **with generator wander on**, recording the EMITTED stream → restore byte-identical) →
-  quantized into a static dst track. **The materialize is the load-bearing correction:** an
-  output-mirror snapshot is just BOUNCE — it loses robotize (emission-time) AND traversal order
-  (stripped by `ResetGenerativeForBounce`). CAPTURE records the **emitted MIDI stream** (reusing the
-  MIDI exporter's hook+sink), which carries both.
-  **Physical gesture (the first user gesture; host = UTILITY on the midiphy panel, `seq_ui.c`):**
-  transport STOPPED; **hold UTILITY** to arm (GP-LED thermometer of the grabbable count, UTILITY LED
-  lit) → **tap a select-row** for the dst track → **tap GP-n** to grab the last n bars + commit. A
-  quick UTILITY *tap* (<`CAPTURE_UTIL_TAP_MS`=500ms) = the stock Utility page; a *hold* returns you
-  where you were.
-  **Ring 16→17 + seed-in-frame:** the bar's robotize seed moved INTO the capture frame
-  (`seq_core_cap_frame_t.robotize_seed`) so the frame is self-contained and FREEZE's shared 16-deep
-  `robotize_seed_snapshots` ring is untouched — and a *full 16-bar* grab now works (was 15; the 17th
-  slot is the live bar).
-  **Par-aware thermometer (`SEQ_CORE_CaptureMaxK`):** the lit GP LEDs + the "max N bars" readout + the
-  ring query all show min(ring depth−1, what the dst par/trg buffer holds for **the source's layout**),
-  so the LEDs equal exactly what a grab accepts. Consequence of `SEQ_PAR_MAX_BYTES=1024`: a 16-instr
-  drum-layout source caps at ~4 bars; a lean 1-voice melodic source grabs the full 16.
-  **First-cut scope:** stopped-only (play→stop→keep; while-playing is a follow-on), note-on materialize
-  w/ default gate (pitch/rhythm/velocity/traversal-order/wander faithful; precise gate = refinement),
-  melodic target (a true 1-voice Note-track init for clean drum-source grabs is still parked — Note
-  par-layer typing isn't a simple field write, and the HIL harness can only make drum-layout tracks).
-  Full build/decision detail + the review-caught bugs (whole-measure guard, src-mirror, queue-flush,
-  step-phase, source-push, loopback) + the par/trg independent-instrument-count fix: plan
-  `doc/plans/2026-06-19-capture-ring.md` and REFERENCE "Retroactive CAPTURE".
-
-  **→ WHILE-PLAYING = a LIVE TAPE SHIPPED + by-ear GO 2026-06-20** (HIL 190/190). The decisive
-  reframe: stopped CAPTURE must *regenerate* the unrecorded past (re-sim); while PLAYING the notes
-  are sounding now, so it just *records* them. The tape is the **smaller build AND strictly more
-  faithful** — it keeps the emission coin-flips / live keys / loopback-bus / real timing that the
-  seed-based re-sim structurally cannot reproduce. (Re-sim-while-playing was the alternative: it
-  would need context-ifying `SEQ_CORE_Tick` + a chunked drive to dodge clock-stall, for a *less*
-  faithful result — rejected.) This realizes §5's two faces under one gesture: a **passive tee** off
-  the MIDI-out drain (`callback_midi_tap`, called after the real send — not the redirect sink)
-  fills a flat per-bar note-on tape (`seq_core_cap_tape[768]`, ~6 KB main SRAM), bucketed by absolute
-  `item->timestamp` at grab time (NOT by the measure counter, which advances at prefetch → seam
-  skew); `SEQ_CORE_CaptureSpanTape` quantizes the window under `MUTEX_MIDIOUT`; the dispatcher
-  `SEQ_CORE_CaptureSpan` routes PLAYING→tape / STOPPED→re-sim so the UTILITY gesture is identical in
-  both states. Infra: `CMD_TRANSPORT` (the real play-button path) closes the long-flagged "no
-  clock-START verb" HIL gap. First cut = note-ons/default-gate (matches re-sim).
-
-  **→ PRECISE GATE + MULTI-STEP LENGTH SHIPPED (tape path) + by-ear GO 2026-06-20.** The tap records
-  the note-offs the tee already carries (running-status vel-0); `SEQ_CORE_CaptureGateToParLen` inverts
-  the playback formula (gate = tps·len/96) back to a stored length. The load-bearing fix: a hand-drawn
-  note longer than one step is a length **chain** across steps (the player maxes a step's length, then
-  carries it on the next), so a lone Gld start step would lose the duration (it just ties to the next
-  note). `SEQ_CORE_CaptureMaterializeNote` rebuilds the chain — gated Gld start, carried Gld steps
-  (note + velocity repeated, gate off), fractional tail that terminates the sustain — exactly SEQ's
-  hand-drawn long-note encoding. The stopped re-sim sink got the simpler glide-tail fix (still-open
-  note at window end → Gld) but **not yet** the full multi-step helper (same-helper follow-on). HIL
-  `test_capture_precise_gate.py` (gate-gradient + glide + multi-step pins). This closes the
-  precise-gate refinement and is the **first shipped slice of the unified FREEZE → anywhere model (§9
-  2026-06-20)** — CAPTURE and BOUNCE are one verb, bounce the lossless core, the tape the temporary
-  catch for the not-yet-migrated emission residue.
-
-  Still deferred: re-sim multi-step (same helper), bounce-off-the-ring with dest = pattern (the next
-  slice), live-MIDI-in tape, emission coin-flips, ring persistence, true 1-voice Note-init, the
-  window-seam groove/delay edge.
-
-**Pre-build recon — gotchas + optimizations (2026-06-19; full report `doc/plans/2026-06-19-pre-build-recon.md`).**
-A deep multi-agent code pass (8 subsystems, 122 source-verified findings) before committing to the six
-builds. Build-changing corrections are already folded into §9 / §10(a) / §10(c) above; the headlines:
-
-- **Keystone confirmed (A1).** Generators draw the GLOBAL RNG (`jsw_rand`) and store no seed — re-sim is
-  impossible until they move to per-track seeds via `SEQ_RANDOM_GenRangeXorshift` (the robotize
-  precedent). Scope is wider than generators: **humanize, probability, random-gate, random-direction,
-  echo all draw global RNG too** (C2). Trap: `SEQ_RANDOM_Gen_Range` doesn't advance when `min==max`.
-  Optimization: make the CHORD_MASK probability gate (A2) a pure `(track,step,zone)` hash like
-  `tension_grip_hash`, not a seed.
-- **Four render-stack fences any new reader must honor (A8):** Arp / Drum / Chord-layers / note-0
-  (= kit-preset, not rest). A naive self-bus / trigger / capture reader otherwise gets phantom drum hits
-  or chord-index-as-pitch.
-- **One-tick bus lag (A7):** render runs at the tick prologue *before* the loopback loop, so a render-stack
-  self-route sees prior-tick bus state — a real ordering constraint, not a race.
-- **RAM placement correction (C12/B6):** the new features are **cheap and belong in main SRAM, not the
-  scarce ~9 KB CCM** — per-track seed 64 B, self-bus fields <100 B, capture ring ~320–500 B (the robotize
-  ring's home). The relocation lever is ~**40 KB** of CCM-eligible main-RAM buffers (the doc's old "~56 KB"
-  counted a since-deleted ring), available if CCM tightens — feature cuts are not the lever.
-- **CAPTURE reuses existing machinery (B1–B3, B7):** robotize's `seed_snapshots[16]` ring + the
-  `ref_step==0` per-bar hook + `SEQ_CORE_CaptureTrackOutput` (force-renders first); tap live input at
-  `SEQ_MIDI_IN_BusReceive` (raw events, lossless). Self-bus persistence is free in ext-CCs 0x9B–0x9F (B5).
-- **Trigger-gen pool decision (A11):** the 64-slot pool is shared / first-come / no-fairness, and a
-  full-size separate pool (11.25 KB) won't fit CCM — so share-with-fairness, or a slim separate pool
-  (16–24 B/slot).
-- **Unified UNDO (A13):** the gen undo arms only on FIRST engage — the consolidated journal must define
-  re-engage + multi-step-gesture (ENGAGE+ROLL+BOUNCE) commit-as-unit semantics.
-
-**Coverage gaps the recon did NOT examine** (check before building): the UI / LED / encoder layer (menus,
-gestures, editing pages); the CV/AOUT path; song-mode / transport edge cases vs the capture-ring bar
-closure; concurrency beyond the named mutexes (MIDI-hooks vs core-tick task preemption for a shared ring);
-worst-case timing under load (not measured on device); and — per discipline — **no by-ear validation** of
-any of it.
-
-**PER-TRACK-RNG keystone — FIRST CUT SHIPPED (code + HIL, by-ear PENDING flash), 2026-06-19.**
-The user picked the keystone (the CLAUDE.md §2 "music-first" rule was edited the same day to
-license infrastructure "to the degree it makes sense for the particular feature set"). A 2nd
-multi-agent pass (4 mappers → design synthesis → 3 adversarial verifiers) caught a real design
-bug in the first synthesis — it would have hashed the **emission-time** coin-flips on a
-stateless `(track,step)` key, which goes **dead-static** (a 50% step plays always/never; humanize
-becomes a fixed detune) because those draws have no measure axis (robotize stays alive precisely
-*because* it folds `robotize_measure_ctr`). That killed the synthesis's "all-or-nothing else it's
-untestable" rationale (false — robotize is reproducible by *capturing* its global-minted value, not
-by determinism). The corrected, tighter first cut shipped:
-- **Seed-vs-hash policy (decided).** Interleaved/stateful streams → caller-owned **xorshift seed**
-  (`SEQ_RANDOM_GenRangeXorshift`); standalone per-step render-stack gates → **stateless `grip_hash`**.
-- **Generators (A1).** A per-**pool-slot** `u32 seed` on `seq_generator_t` (NOT per-track — pool
-  iteration/alloc order would otherwise leak into the draw order; per-slot makes each stream
-  order-independent). **Minted fresh from the global RNG at ENGAGE** (preserves the old fresh-line-
-  per-engage feel — *not* salt-from-content, which would have made every engage identical) and
-  advanced by every reroll/perturb/rate-gate draw on the one shared stream. RAM-only (no bank-format
-  bump); `SlotSet` re-mints on a zero (file-loaded) seed so loaded slots don't alias onto the
-  `0xdeadbabe` stream; a RAM-snapshot restore (track-undo / capture-trample) keeps its real seed.
-- **chord_mask (A2).** Both probability gates → the shared `grip_hash(track,instr,step,zone)`
-  (`tension_grip_hash` renamed; chord_mask zone `0x20`, disjoint from TENSION's `{0,4,5,6}`). Now a
-  **stable per-(track,step) gripped subset** instead of a per-render-fresh (flickering) one — likely
-  a small audible improvement, by-ear GO flagged. **Its determinism rides on the shared `grip_hash`,
-  which the TENSION HIL suite already pins** — a future `grip_hash` refactor touches both processors.
-- **Random traversal.** Per-track `random_traverse_state` (main SRAM, beside `robotize_seed_state`)
-  for Random_Dir/Step/D_S; minted fresh at run-start (`SEQ_CORE_Reset`); **SCRUB save/restores it**
-  so the manual nudge can't desync the playback stream (the lone out-of-band `NextStep` consumer —
-  the in-tick jump-back/skip recursion correctly stays on the stream). The original Random_D_S
-  `rnd < 0x40` dir-flip quirk (compares the full word, so dir-flip rarely fires) is preserved verbatim.
-- **Deferred (the CAPTURE bundle's calls, not bugs):** the **emission-time coin-flips** — step-prob
-  (`seq_core.c` normal + drum + `seq_layer.c:411`), random-gate, humanize, echo — stay on the global
-  RNG until their measure-axis-hash-vs-capture-as-tape question is decided; and the **per-bar seed
-  snapshot ring + bank-format persistence** (the actual K-bar retroactive grab + cross-reload re-sim).
-  This build makes the streams **seekable/restorable + forward-deterministic** (the prerequisite),
-  not the ring.
-- **Verification.** 3 adversarial lenses re-read the shipped source → **sound, zero fatal/zero
-  must-fix.** Confirmed: shared gate+value stream, `min==max` zero-advance parity (draw count
-  unchanged), pure hash + disjoint zone, lossless 5×7-bit `u32` seed codec, SCRUB correctness.
-- **Cost.** +4 B/slot ⇒ **+256 B CCM** (pool is CCM-resident; ~8.6 KB CCM free remains), +64 B main
-  SRAM (traversal), negligible flash. Builds clean TESTCTRL=1 (test) and =0 (gig, −9.8 KB).
-- **HIL.** `tests/apps/seq_v4/test_rng_determinism.py` (6 pins): fresh-engage non-zero seed,
-  ROLL seed-determinism, different-seed→different-output, **wander re-simulates from a seed**
-  (the keystone proof), two-instruments-distinct-seeds, traversal seed round-trip. Known limits
-  (acknowledged, not gaps to fix now): **no behavioral pin for the traversal trajectory or the SCRUB
-  save/restore** (the harness has no clock-START verb to drive `NextStep`; structurally covered by
-  the generator wander pin's end-to-end proof of the same GenXorshift conversion) — a follow-up
-  needs a clock-step verb. New testctrl `CMD_RNG_SEED` 0x4d (gen/trv seed get/set).
-- **Next:** by-ear GO on flash (chord_mask texture + generator/traversal feel still musical — bar is
-  "reproducible AND musical", NOT bit-identical to the old global-RNG output, since draw order
-  changed). Then the deferred follow-ons feed the CAPTURE bundle (the north-star).
-
-**Phrase morphing (Loop A) — SHIPPED + by-ear GO 2026-06-16** (candidate 2026-06-13).
-Surfaced by the user right after the PHRASES Stage A by-ear GO ("does this open up
-morphing between phrases?"). The analysis below is the original design rationale; what
-Loop A actually shipped (and where it diverged) is the SHIPPED note at the end of this
-entry. Because a
-phrase stores the full committed organism as *values* (not refs — see the §9
-2026-06-13 snapshot-library entry), **both endpoints A and B are available as data**,
-and the engine already re-renders the organism from source into the output mirror on
-demand — so feeding it an *interpolated* state and re-rendering is the path recall
-already uses. Endpoints are exact for free (`morph=0` IS A, `morph=1` IS B — the
-§2/"every dial sweeps 0→max incl. true pass-through" ethos). Two kinds, and the split
-is load-bearing:
-- **Posture morph (the cheap, musical win).** The continuous state — processor dials
-  (GRAVITY position, mask strength, TENSION, mutation rate/depth, robotize),
-  transpose, groove, length, generator dials — interpolates as `live = A + morph·(B−A)`
-  on a knob: glide the *sculpt/feel* from waypoint A toward B, immediate (not
-  bar-quantized — like the GRAVITY isolator-throw). Tiny in RAM (read B's CC block,
-  ~couple KB, into a target buffer; lean the live CCs toward it). This is the thing
-  §5's Morphing model #1 said was unavailable ("interpolating two live engines on
-  shared voices is not available") — the phrase model makes a *form* of it available:
-  not two live engines, but the live engine's **posture interpolated between two
-  stored postures**.
-- **Note-content morph (harder, partial).** Trigger grid can't be half-on — only a
-  *scheduled* crossfade (progressively flip steps A→B as the knob turns); per-step
-  velocity/length interpolate fine; per-step **pitch** wants scale-quantizing to not
-  sound wrong; generator loops/locks/anchor don't meaningfully interpolate (hold A's
-  until a crossover, or freeze during the morph). **RAM is the gate:** full per-step
-  morph needs two whole organisms resident (~35 KB each; only ~40 KB free) — too
-  tight. So the engineering steer: **morph the posture continuously, swap the grid +
-  generators discretely** (at a threshold, or hold-until-commit).
-- **Where it fits:** makes *"a set is a path"* continuous, and is exactly §4's
-  **"transitioning (performed, not dead bars)"** made real — sweep the posture *toward*
-  the next waypoint, then commit the structural jump on the bar. The morph is the
-  transition; the (shipped) bar-aligned recall is the arrival — two complementary
-  gestures. Open: generators-during-morph; grid-crossfade ordering; the morph control
-  surface (knob/fader assignment).
-
-**SHIPPED (Loop A, 2026-06-16) — what was built, and where it diverged from the theory
-above.** Per-group posture morph from the focused group's LIVE posture (pos 0 = true
-pass-through, A snapshotted at arm so it's reversible) toward a target phrase's same-
-group slice (pos `PHRASE_MORPH_MAX`=16). Control: SELECT+tap a waypoint = arm (toward
-that phrase, for the focused group); the **datawheel** is the fine throw and the **GP
-row** is a 16-segment coarse bar + LED thermometer; tap-to-recall = the arrival (lands
-structure, releases the morph). Two divergences from the rationale above, both
-deliberate: (1) **the morphed set is the ext-CC posture block 0x80..0x9f ONLY** —
-robotize (mask/density/probabilities), chord-mask strength, tension GRIP. Transpose/
-groove/length live in the main `cc[128]` array (outside the ext block) and the generator
-dials in the V4 gen sub-block — *neither morphs in Loop A* (the "GRAVITY position,
-transpose, groove, generator dials" list above was aspirational). (2) **applied
-per-measure** at the `ref_step==0` boundary (beside the RESOLVE landing), not "immediate"
-— per-bar stepping reads as intentional and is cheap; immediate is unnecessary. Resolved
-opens: the control surface (datawheel + GP-bar + SELECT+tap arm). New: `CMD_PHRASE_MORPH`
-0x4f; the morph counts as drift (a hands gesture); disarm is leave-as-live (UNDO is the
-net); an armed morph is RELEASED whenever the focused group's live CCs are replaced
-out-of-band (recall/revert/pattern-switch/pull/UNDO/session-load) so a later nudge can't
-lerp off a stale A. Engine in `seq_pattern.c` (`SEQ_PATTERN_PhraseMorph{Arm,Set,Tick,
-Cancel,Target,Value}` + `phrase_morph_apply`, ~260 B .bss Loop A), endpoint reader
-`SEQ_FILE_B_PhraseReadCCs`. **Loop B SHIPPED (2026-06-17):** extends the morphed set
-to (a) main-array CC whitelist — groove_value and transpose_semi lerp linearly, groove_style
-and transpose_oct *reversible* snap (B at full throw, arm-time A below it — pulling the dial
-back un-snaps them, since lerping an enum/octave index is musically meaningless); (b) per-step
-velocity lerp (from stored arm-time A toward B, per-measure, non-drum tracks only); (c)
-*reversible* per-step gate crossfade — each step that differs between A and B carries a random
-switchover threshold FROZEN at arm (in `phrase_morph_gate_thresh`): the step shows B when
-`thresh < pos`, else A. So each differing step is B with probability pos/MAX (pos 0 = all A,
-pos MAX = B exactly), but the crossfade is **deterministic, reversible (pos→0 restores A
-bit-exactly), and stable at a held position** — no per-measure creep and no one-way ratchet.
-Every Loop B dimension thus honors the Loop A reversibility invariant. The velocity/gate/note
-index strides by the LIVE track geometry (`SEQ_PAR_NumStepsGet`), never the phrase's on-disk
-`p_size`, with an `idx < SEQ_PAR_MAX_BYTES` guard — so a geometry mismatch (phrase captured at
-a different track length) can't mis-index or overrun the par buffer. New reader:
-`SEQ_FILE_B_PhraseReadTrackData` (reads main CC[128] + two par layers (velocity + note) + gate
-trg layer 0 from a phrase record without touching live state).
-**Note morph — Phase 1 SHIPPED (2026-06-18, discrete swap):** the note pitches now morph too,
-via a per-step discrete swap that *shares the gate's frozen threshold* — so each step commits
-to B as a unit (below `thresh`: A's pitch + A's gate; above: B's pitch + B's gate). A note
-never takes an interpolated value (no off-scale glide), and the swap is reversible/stable like
-the gate. Result: at full morph you land on **B's rhythm AND B's notes** (was: B-rhythm/A-melody
-hybrid); at the midpoint the two patterns are a frozen-random braid of pure-A and pure-B steps.
-`phrase_morph_note_a/_b` buffers; chord/poly tracks morph only the first note layer (full
-poly = a Phase-1 limitation); drums excluded. Total morph .bss: ~6.6 KB. HIL: 8 Loop B tests.
-**Note morph — Phase 2 (queued):** scale-quantized glide as a *selectable per-track mode*
-(pitch slides A→B through FORCE_SCALE degrees) alongside the discrete swap.
-**Follow-ons (still open):** generator dials; length/clock-div morph; generators-during-morph.
+**Phrase morphing (Loop A + B + note Phase 1) — SHIPPED + by-ear GO 2026-06-16/18 (§9; narrative
+→ REFERENCE).** Per-group posture interpolation live→a target phrase, datawheel/GP-bar, SELECT+tap
+to arm; pos 0 = reversible pass-through. Loop A = ext-CC posture block (robotize / chord-mask /
+GRIP); Loop B = main-CC whitelist (groove/transpose) + per-step velocity lerp + reversible gate
+crossfade (threshold frozen at arm); note Phase 1 = discrete pitch swap sharing the gate threshold
+(land on B's rhythm AND notes). `CMD_PHRASE_MORPH` 0x4f; ~6.6 KB .bss. Makes "a set is a path"
+continuous — the morph is the transition, the bar-aligned recall the arrival.
+- **Open follow-ons:** note Phase 2 (scale-quantized glide as a selectable per-track mode);
+  generator-dial morph; length/clock-div morph; generators-during-morph. **Keep/cut still open**
+  (§5.6 #3, "morph" naming) — the ~7.7 KB buffers are a gated RAM lever if cut.
 
 **Phrase-recall landing — true deferred clip-launch (follow-on; SHIPPED feel is the
 immediate variant, 2026-06-16).** Loop A's recall now lands clean (QUANTIZE = bar-aligned
@@ -2863,26 +2971,11 @@ two unhooked out-of-band CC-replace paths from the morph review (`SEQ_PATTERN_Fi
 seq_ui_disk.c cross-session copy) and the pre-existing `SEQ_FILE_B_Open` FILE_ReadReOpen
 leak stay filed (negligible / never mid-morph).
 
-**SWITCH-QUANTIZE — global launch grid + auto-measured margin (SHIPPED 2026-06-18,
-pending by-ear).** A live "global quantize" (Ableton-style): switches land on a selectable
-musical grid — `SWITCH_QUANTIZE_GRID` (persisted), ladder `0=Instant, 1/16, 1/8, 1/4 beat,
-1/2 bar, 1 bar, 2, 4, 8 bars`. The knob is the **datawheel on the PHRASE view** (when no
-morph is armed — morph keeps the wheel while armed), with an on-screen label; grid>0 couples
-synched-switching on, grid 0 = immediate. **(B) auto-measured margin:** `SEQ_PATTERN_Handler`
-times the real switch I/O (µs stopwatch, worst-case) into `seq_core_pattern_switch_measured_ms`,
-and the pattern-change forward-delay uses `SEQ_CORE_SwitchMarginMs()` = `measured+20ms` instead
-of the flat 100 — so the window self-sizes to the SD cost (tighter feel). The grid is
-floor-clamped to what the I/O can service (`SEQ_CORE_SwitchQuantize16ths`). **Two paths:**
-*pattern change* gated at the existing pre-margin decision point (`(bpm_tick/96+1) % grid`,
-grid 0 = the EXACT old pattern-boundary behaviour → zero regression); *phrase recall* (Phase 2)
-loads its content at tap (interrupts-on, off the hot path — preserves the §9 glitch fix) and
-defers only its **re-phase** to the grid boundary via `seq_core_recall_rephase_req` →
-`reset_trkpos_req` in the tick (RATOPC's re-phase mechanism; cheap, no SD, so tick-safe).
-SEAMLESS recall is unchanged (no re-phase). `CMD_SWITCH_QUANTIZE 0x4e` (testctrl get/set).
-**Open:** the knob is datawheel-when-not-morphing (no live quantize *during* an armed morph);
-sub-bar grids re-phase recall cleanly via reset_trkpos_req but pattern-change finer-than-bar
-landing depends on the pre-margin window (fine at techno tempi). The deferred true-clip-launch
-note above still stands for the content-swap-at-tap tail.
+**SWITCH-QUANTIZE — global launch grid + auto-measured margin (SHIPPED 2026-06-18, by-ear
+pending; §9 → REFERENCE).** Switches land on a selectable musical grid (Instant…8 bars), datawheel
+on the PHRASE view; the forward-delay self-sizes to measured SD cost. `CMD_SWITCH_QUANTIZE` 0x4e.
+- **Open:** no live quantize *during* an armed morph; the true-clip-launch tail (content swaps at
+  tap — see the clip-launch note above) still stands.
 
 **Design-detail (defer until building the relevant piece)**
 - Track-slot SD file format (defer until RAM-only slots prove useful).
@@ -2910,8 +3003,8 @@ zero-fill; ~12–16 ms × ~18 sectors). Recall wrote back *every dirty group*, a
 auto-mutate marks a group dirty** (`seq_generator.c` → `SEQ_PATTERN_DirtySetTrack`), so a
 4-group jam paid 4×290 ms.
 - *Margin-sizing can't fix it* (needs ~1.3 s; `SEQ_CORE_SwitchMarginMs` caps at 250 ms).
-- *Full-fidelity deferral can't fit* — snapshotting the outgoing organism is ~30 KB vs ~33 KB
-  free main SRAM. Dead end as a RAM snapshot.
+- *Full-fidelity deferral can't fit* — snapshotting the outgoing organism is ~30 KB vs ~9 KB free main SRAM (§A5 corrected). Dead end
+  as a RAM snapshot.
 - *Tried + reverted (ephemeral-wander):* gate the recall writeback on `DRIFT` (deliberate
   edits) instead of `seq_pattern_dirty`, so generator wander is abandoned on recall (snap to
   the committed phrase). Worked on the bench (wander recall → 0 writebacks → ~72 ms), but the
@@ -2922,15 +3015,19 @@ auto-mutate marks a group dirty** (`seq_generator.c` → `SEQ_PATTERN_DirtySetTr
   (program only the sectors that changed) — drops a save from ~18 sectors to a few. Its own
   bundle; touches the SD/file write path.
 
-**RAM/CPU headroom levers (gated, do-not-cut-speculatively).** Measured 2026-06-19 (see §A5
-update): **CCM is the binding constraint at ~9 KB free; main SRAM ~33 KB free.** Each lever is
-gated:
+**RAM/CPU headroom levers (gated, do-not-cut-speculatively).** Re-measured 2026-06-20 against
+the HEAD elf (see §A5): **both regions are ~9 KB free** — ~9.1 KB main, ~8.6 KB CCM. The earlier
+"~33 KB free main + ~40 KB relocation lever" is **withdrawn** (the main figure was wrong by
+~24 KB; the par/trg source is `AHB_SECTION`/DMA-locked to main, so the relocation lever cannot
+fire). Real levers, each gated:
 - generator pool 64 → ~16–32 slots reclaims ~6 KB of the scarce CCM — *pending a real
   engaged-generator-count measurement* (owner: "not sure yet").
-- phrase-morph buffers ≈ 6.7 KB main SRAM — *pending the by-ear morph keep/cut* (§5.6 #3;
-  owner: "undecided").
+- phrase-morph buffers ≈ 7.7 KB main SRAM (incl. the `phrase_morph_a/b` symbols the 6.7 KB
+  figure missed) — *pending the by-ear morph keep/cut* (§5.6 #3; owner: "undecided").
 - render double-buffer = 40 KB CCM; single-buffering saves 20 KB but loses lock-free safety —
-  leave it. CPU is already well-gated (per-track processors run only when engaged).
+  leave it. CPU: per-track processors run only when engaged, **BUT** chord_mask/tension/
+  live-pitch force a full per-track re-render *every tick* (`seq_core.c:2757`) — never measured
+  at 16 tracks (§10 open puzzle / flat-map Map A); the all-16-sweeping worst case is unproven.
 
 ---
 
@@ -2944,19 +3041,64 @@ gated:
 - **ROLL** — force an immediate reroll of unlocked steps; works at mutation 0.
 - **Processor** — non-destructive continuous transform over a buffer (robotize, mask,
   voice-leading, windowing).
-- **Bounce** — commit current processor/engaged-generator output into the buffer as
-  notes.
+- **Bounce** — commit the heard output (render stack + engaged generators) into a buffer as
+  real notes. The lossless freeze-to-static verb. Made **retroactive** by the capture ring/tape
+  (freeze the last K bars) and targetable to any track + pattern. *(Terminology fork, flagged
+  2026-06-21: §9's "unified FREEZE → [track,pattern]" names this verb FREEZE, which **collides**
+  with FREEZE-the-mutation-switch below. Unresolved — the honest name is retroactive BOUNCE.)*
+- **CAPTURE** — the gesture that grabs the last K bars off the ring/tape into editable static
+  material. While PLAYING = the **tape** (records what actually sounded — emission coin-flips,
+  live keys, real timing). While STOPPED = **re-sim** (re-drives the generative frame to
+  regenerate the span; reproduction has open preconditions — polymetry/global-RNG, §10).
+  Converging with BOUNCE as emission effects migrate to the render stack (§9 2026-06-20).
+- **Ring / tape** — the always-on retroactive buffers CAPTURE reads from: `seq_core_cap_ring`
+  (per-bar generative frames, 17 deep) and `seq_core_cap_tape` (flat note-on stream). Buffers,
+  not verbs.
+- **FREEZE (the mutation switch)** — the global master switch (METRONOME button) that holds the
+  live **source's** wander: mutation rate effectively 0, loops hold, rerolls pause. Reversible;
+  commits nothing. *(It acts on the source, not on grabs — grabs are static. The old "load+FREEZE
+  = a different recall face" reading is retired, simplified 2026-06-21.)* Per the flat-map it also
+  suppresses the recall-freeze (frozen groups stop re-dirtying). *Distinct from the proposed
+  retroactive-bounce verb that §9 unfortunately also calls FREEZE.*
 - **Destination** — a generator's write target (layer = parallel/free; track =
-  independent/costs a voice); the add-vs-replace control.
+  independent/costs a voice); the add-vs-replace control. Covers the **deposit** path only; the
+  **source/recall** half of performance (THE PULL, PHRASES, CAPTURE-aiming, windowing) is the
+  §5.6 concept map, the spine's unnamed other half.
 - **Undo slot** — single-deep RAM buffer holding content overwritten by ENGAGE; UNDO
-  restores. Live-safety net, out-of-band from the spine.
-- **State** — a returnable configuration. Originally modelled as a *group* (= 4 tracks);
-  the shipped recall grains are the **track** (the Pull) and the **phrase** (whole-organism
-  snapshot). Has a *recording* face and a *posture* face. See §9.
-- **Seed / Posture / Anchor** — the identity an instance returns to / the live config
-  that regenerates on recall / a frozen snapshot of a generator loop (SNAP reverts).
-- **Soft return / hard return** — dial mutation toward 0 (drifted-but-identifiable) /
-  SNAP to anchor (identical).
+  restores. Live-safety net, out-of-band from the spine. *(Today there are 5 bespoke one-deeps
+  and no REDO; the queued **UNDO/REDO** unifies them into one panic net — §9 2026-06-19, §10(a2).)*
+- **THE PULL** — track-grain load from any slot into the live organism (hold select-row =
+  destination, GP letter+number commits; SELECT+CLEAR = one back). Makes ensemble membership a
+  performance decision rather than a premature 4-track commitment. Shipped (RECOMBINE).
+- **CHECKPOINT / REVERT** — one-deep whole-organism safety anchor (4 groups incl. live
+  generators), stored in the sentinel bank `MBSEQ_AN.V4`. SELECT+BOOKMARK tap = CHECKPOINT,
+  hold ≥1 s = REVERT. *(Hold-polarity hazard, flagged 2026-06-21: REVERT-hold **destroys** the
+  live jam while PHRASE-hold **creates** — same 1000 ms; and REVERT does not pre-writeback. §8 queue #4.)*
+- **SET (durable baseline)** — a blessed file-copy of the whole shelf (banks B1–4 + config),
+  above the disposable SCRATCH session; SAVE-SET / RELOAD-SET (the Digitone-2 split). The Tier-3
+  return. Design-ahead, build queued (§9 2026-06-19, §10(a)).
+- **PHRASES** — the whole-organism snapshot library (16 waypoints, sentinel bank `MBSEQ_PH.V4`);
+  tap a waypoint = recall, hold = capture. Phrases are immutable; a live nudge lands in the
+  working slot. *(A set is a path of waypoints.)*
+- **DRIFT** (`phrase_drift`) — the per-group "deliberately edited since the last recall/capture"
+  mask, distinct from `seq_pattern_dirty` because it **excludes ambient generator wander** (the
+  `seq_generator_in_automutate` gate). The "my edits only" register; drives the drift LED and is
+  the second register the cheap recall-freeze cure would reuse.
+- **Grab** — a **capture** off the source into a pattern: static, exact, durable working
+  material. The thing you return to. The first grab is the beginning; grabs in order are the path.
+- **Source** — whatever is live *now* (a generator wandering, a played line, a hand-built loop,
+  modulation in motion): the transient fountain you grab *from*. Not saved, not returned to.
+- **State** — a returnable configuration = **a grab** (static). Recall grains are the **track**
+  (the Pull), the **pattern**, and the **phrase**. *(Earlier modelled with a "recording face" and
+  a regenerating "posture face"; simplified 2026-06-21 — a grab is static, generativity is the
+  source + the moves between grabs. See §5, §9.)*
+- **Seed / Posture / Anchor** — the identity a *performed return* heads toward / a grab's
+  carried config (**reseed material** — feed it back into the source; it does *not* regenerate on
+  recall) / a frozen snapshot of a generator loop (SNAP reverts).
+- **Soft return / hard return** — *performed moves between grabs:* dial the divergence toward 0
+  (drifted-but-identifiable) / SNAP to anchor (identical).
+- **Reseed** — feed a grab back into the *source* as its seed → it evolves forward from where you
+  took it (return-as-evolution). The forward-facing alternative to "going back."
 - **Per-step lock** — per-step flag; locked steps survive reroll. The human-vs-machine
   handoff dial.
 - **Mutation amount / per-step multiplier** — global reroll probability / per-step
@@ -2968,8 +3110,9 @@ gated:
   RAM-by-default, optionally SD-promoted.
 - **Quick-capture** — *withdrawn 2026-06-11; superseded by the tape (append-only take list)
   and the phrase library (§5.5, §9).* (Was: SAVE single-press → next free `CAP_NNN` slot.)
-- **Frozen-tape vs posture recall** — load+FREEZE (frozen face) vs load+run (posture
-  face); gestures on the same data.
+- ~~**Frozen-tape vs posture recall**~~ — *retired 2026-06-21.* Recall is now just "select a
+  static grab" (exact); there is no regenerating posture-face to recall. FREEZE acts on the live
+  *source*, not on grabs. See §5 "Return = navigate your grabs."
 - **Skeleton / muscle** — macro set arc via groups stacking (upstream tooling) /
   within-group texture via processor + generator dials (the fork's value).
 - **Bus / chord-context playmode** — loopback transport (source on Bus port → same-tick
@@ -3099,11 +3242,15 @@ at ENGAGE are live; per-step LOCK and per-step MULT share the cursor.
 
 The BOUNCE control is the first place the §3 destination semantic is wired in
 the UI: cursor IS the destination, occupancy decides additive-vs-replace.
-Phase F.3 (2026-05-26) wired the ENGAGE auto-jump-to-first-empty-legal-layer
-behavior (§3 "default destination = first empty legal layer") and the
-cross-track processor BOUNCE-capture symmetric counterpart of in-place
-processor BOUNCE — both halves of the §3 destination model are now
-present in the UI for generators and processors alike.
+Phase F.3 (2026-05-26) wired an ENGAGE auto-jump-to-first-empty-legal-layer —
+but **it was withdrawn the same day** (it fought the deliberate gesture; the
+cursor always wins). The cross-track processor BOUNCE-capture (symmetric
+counterpart of in-place processor BOUNCE) shipped and stands.
+*(Stale-Part-II note 2026-06-21: this whole GP1–GP8-encoder-page layout is the
+generator-UI of the bottom-up era; the live surface has since moved to a
+held-modifier gesture vocabulary — UTILITY-held CAPTURE, the SELECT-combos,
+PHRASE-view. Treat A3 as a record of the May generator page, not the current
+control surface — see the flat-map control-surface map, `doc/plans/2026-06-21-system-flatmap.md`.)*
 
 **Turing model (mechanics):** loop array; global mutation rate; per-step multiplier
 (4-bit, 0×–2× — *hybrid scope*); per-step lock bitmask; contour (walk/Brownian/
@@ -3139,21 +3286,26 @@ global.
 
 ## A5. RAM budget (corrected; base measured 2026-05-24)
 
-**Re-measured 2026-06-19 (current build, post Phase A–H + PHRASES + morph).** The base
-table below is the 2026-05-24 *virgin* state; CCM is no longer 0. Actuals now (from
-`__ram_end` / `__ram_end_ccm`):
+**Re-measured 2026-06-20 against the HEAD elf** (`apps/sequencers/midibox_seq_v4/project_build/project.elf`,
+`arm-none-eabi-nm`; post Phase A–H + PHRASES + morph + CAPTURE). The base table below is the
+2026-05-24 *virgin* state; CCM is no longer 0. Actuals:
 
 | Region | Used | Free | Note |
 |---|---|---|---|
-| Main RAM (128 KB) | ~94.5 KB | **~33 KB** | par/trg layers + capture ring + per-track state + `ucHeap` + MSP region |
-| CCM (64 KB) | ~55 KB | **~9 KB** | render double-buffer (par/trg output mirrors ~40 KB) + generator pool (~11.5 KB) |
+| Main RAM (128 KB @ 0x20000000) | **118.9 KB** (`.bss` 120384 B + `.data` 1152 B + `._usrstack` 256 B) | **~9.1 KB** | `__ram_end 0x2001dbc0` → `_estack 0x20020000` = 9280 B; this free region is **also** where the MSP stack grows down from `_estack`. |
+| CCM (64 KB @ 0x10000000) | **55.4 KB** (`__ram_end_ccm 0x1000dda8`) | **~8.6 KB** | render double-buffer (par/trg output mirrors ~40 KB) + generator pool (11776 B = 64×184) |
 
-**CCM is now the binding constraint (~9 KB), not main RAM** — the "all 64 KB CCM virgin"
-framing below is historical. Gated headroom levers (see §10 "RAM/CPU headroom levers"):
-generator pool 64→~16–32 (~6 KB CCM back, pending engaged-count); phrase-morph buffers
-~6.7 KB main (pending by-ear keep/cut); render single-buffer (20 KB CCM back, but loses
-lock-free — not recommended). *(A subagent audit this session mis-stated free main RAM as
-~92 KB; corrected here against the elf — verify RAM claims against source, per CLAUDE.md.)*
+**BOTH regions are ~9 KB free — the relocation lever is DEAD.** The earlier "~33 KB free
+main + ~40 KB of CPU-only buffers relocatable into CCM" framing is **withdrawn (2026-06-20)**:
+the 2026-06-19 re-measure read CCM correctly but **mis-stated main RAM by ~24 KB**. You cannot
+pour 40 KB into an 8.6 KB CCM hole, and the par/trg *source* layers are `AHB_SECTION` (DMA
+region) so they can't move to CCM at all. **Read every "does it fit" verdict in this doc
+against ~9 KB / ~9 KB.** Real levers (all gated, see §10): gen pool 64→~16–32 (~6 KB CCM back),
+render single-buffer (20 KB CCM back, loses lock-free — not recommended), track slots 16→8.
+**"Everything-on" is the steady state, not a spike** — every generative buffer is statically
+allocated and permanently resident (the elf *is* the worst case); engaging a processor costs
+CPU, not RAM. Full per-component map + queued-build running balance:
+`doc/plans/2026-06-21-system-flatmap.md` (Map A).
 
 **Measured base (2026-05-24, MBSEQV4P, commit `3d144ab2`):**
 
@@ -3178,9 +3330,12 @@ Cross-checked via `arm-none-eabi-size -A` and `nm --size-sort`.
 | `uip_buf` | ~1.5 KB | **yes** | Must stay in main RAM. |
 | `aout_channel` | ~1.4 KB | **likely yes** (SPI DMA) | Verify before moving. |
 
-Net: ~56 KB of existing main-RAM allocations are trivially CCM-relocatable if needed.
-The lever below ("relocate CPU-only buffers to CCM first — highest-value, zero-cost")
-is well-supplied.
+> **SUPERSEDED 2026-06-20 — this table is the 2026-05-24 virgin-state projection and is now
+> wrong twice over.** (1) The `ring (seq_capture.c)` row (16 KB) was **deleted** 2026-05-30
+> (§9 bounce-unification). (2) The "~56 KB relocatable, lever well-supplied" conclusion is
+> **dead**: CCM is now 55.4 KB used / ~8.6 KB free, so there is nowhere to relocate *to* — and
+> the par/trg *source* layers are `AHB_SECTION` (DMA) and can't move to CCM regardless. Both
+> regions are ~9 KB free. See the corrected re-measured table at the top of §A5 + the flat-map.
 
 **Threshold met** (base ≤ ~104 KB) and all 64 KB CCM is virgin — but "met" is the
 *floor*, not comfort. The free main-RAM region is *shared with the runtime MSP/handler
@@ -3269,6 +3424,14 @@ code-only and does not move either budget.
 
 3. **Render-cache marginal cost, not double-counted.** New = the 2× *output* (~40KB);
    *source is the existing 20KB par/trg buffer.* (See §A2.)
+
+> **HISTORICAL (2026-05-24 worst-case projection) — superseded by the actuals at the top of
+> §A5.** This was the *forecast*; the box is now built and measured: **both regions are ~9 KB
+> free, not "~8 KB static headroom against 192 KB with ~56 KB relocatable."** The relocation
+> lever cannot fire (CCM is full; par/trg source is DMA-locked to main). The forecast was
+> roughly right that the full vision "fits but lands near the edge" — but the margin is
+> tighter than stated and there is no relocation slack. Read the corrected re-measured table
+> + the flat-map (Map A) for the live numbers; the analysis below is kept for provenance.
 
 **Does it fit? — yes, but read the margin correctly.** Two distinct answers:
 
