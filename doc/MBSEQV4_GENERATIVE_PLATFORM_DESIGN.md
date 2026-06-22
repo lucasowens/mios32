@@ -1051,10 +1051,30 @@ conceptually load-bearing.
   musical roadmap).
 
 ### Parked / cruft
-- `feature/tm-generator` — parked, "needs runtime-hook redesign" (already hit this wall).
+- ~~`feature/tm-generator`~~ — *stale note, corrected 2026-06-22: the branch does not exist.*
 - Conditional triggers — roadmap (see §A1).
-- Tracked `.DS_Store` (`git rm --cached`); bundled TK PDFs in `doc/` (redistribution
-  consideration on a public repo).
+- Tracked `.DS_Store` — **untracked 2026-06-22** (10 files; `.gitignore` already had the
+  catch-all). Bundled TK manual PDFs in `doc/` (~1.36 MB; redistribution consideration on a
+  public repo) — left in place (confirm no fork-doc links before removing).
+
+### Reclaim / cleanup ledger (2026-06-22 — audit vs HEAD elf)
+A source-audit for reclaimable headroom (binding constraint = CCM ~8.6 KB). **Honest finding:
+there is essentially NO dead CCM** — every CCM byte is load-bearing and the deleted `seq_capture.c`
+left zero orphan, so dead-code removal does **not** relieve the constraint. The real CCM headroom
+is one gated lever (the generator pool, §A5/§10). The genuinely-dead/removable items are all in
+**flash/main**, not CCM:
+- **`seq_ui_trkpitchgen.c` "Pitch Gen (POC)" page (~2.25 KB flash)** — superseded by the spine
+  generator. **Removal QUEUED for a build session, not done 2026-06-22:** verification found it's
+  **HIL-harness-coupled** (the harness has `Page.PITCHGEN`=59; `tests/capture_now.py` calls it; the
+  page table is positional-by-enum and `CMD_PAGE_SET` keys off the row's stable-id), so removing it
+  needs the harness page-constants updated + an HIL run to validate — can't be done safely off-device.
+  (The reclaim audit's "zero references / dead-safe" was wrong — it missed the Python harness.)
+- **`TESTCTRL=0` gig build → ~10.5 KB flash + 264 B RAM** (clean-rebuild delta; `make cleanall` first).
+  Free for performance/release builds. *(Supersedes the earlier "−7.7 KB" figure.)*
+- **GENERATE suite** (`seq_ui_trkeuclid.c`) ~6.3 KB flash + ~1.9 KB main — reachable (EDIT GP15/16),
+  kept "as examples"; clean cut if ever retired. **Phrase-morph buffers** ~6.7 KB main — gated on
+  the morph keep/cut (§5.6 #3). Neither is CCM.
+  Full ledger: the reclaim-audit run this session (Map A/B/C).
 
 ---
 
@@ -3020,8 +3040,13 @@ the HEAD elf (see §A5): **both regions are ~9 KB free** — ~9.1 KB main, ~8.6 
 "~33 KB free main + ~40 KB relocation lever" is **withdrawn** (the main figure was wrong by
 ~24 KB; the par/trg source is `AHB_SECTION`/DMA-locked to main, so the relocation lever cannot
 fire). Real levers, each gated:
-- generator pool 64 → ~16–32 slots reclaims ~6 KB of the scarce CCM — *pending a real
-  engaged-generator-count measurement* (owner: "not sure yet").
+- generator pool slot-count is **the** CCM lever (184 B/slot; audit 2026-06-22): **64 → 32 frees
+  ~5.9 KB CCM and is near-free** — 32 simultaneous engaged generators is far past observed use
+  (pitch-only, ~1 gen/track ⇒ ≤16); `alloc_slot` refuses gracefully when full, so a smaller pool
+  only lowers a ceiling that isn't hit. **64 → 16 frees ~8.8 KB but is coupled to trigger-gens** —
+  they "fold into the shared pool" (§10(b)), so 16 would box that build out; **settle the
+  trigger-gen slot model before going below 32.** (No measurement needed for 64→32; this replaces
+  the old "pending engaged-count" gate.) Self-bus (<100 B) + the MVP need *nothing* from this.
 - phrase-morph buffers ≈ 7.7 KB main SRAM (incl. the `phrase_morph_a/b` symbols the 6.7 KB
   figure missed) — *pending the by-ear morph keep/cut* (§5.6 #3; owner: "undecided").
 - render double-buffer = 40 KB CCM; single-buffering saves 20 KB but loses lock-free safety —
