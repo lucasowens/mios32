@@ -70,7 +70,7 @@ generating — then process it, tweak it, harvest the good parts, refine them.* 
 processors are **prospecting tools** — they throw up material and surface areas worth keeping;
 the hand and the ear decide what to harvest and how to refine. The pursuit is **symbiosis
 between the instrument and the intention**: the box proposes, the player disposes. So the goal
-is to **refine the whole synth**, not bolt a generative corner onto it — every path
+is to **refine the whole sequncer**, not bolt a generative corner onto it — every path
 (*program / play / generate → process → tweak → harvest → refine*) must flow. ("Not a better
 trigger sequencer," below, means the *differentiated addition* is musicality; the sequencer and
 the recorder stay first-class substrate, never afterthoughts.)
@@ -700,15 +700,18 @@ return recipes compose.
   (mutes/levels/macro). 8 tracks for a 2-state morph. *Interpolating two live engines
   on shared voices is not available* (§6 group binding): morph = balancing two
   concurrent group-states.
-- **Recorded-state morph (preferred, cheaper)** — window through a captured buffer.
-  "Morph two states" = bounce A then B end-to-end, window across the seam. Crosses
+- **Recorded-state morph (the canonical morph — decided 2026-06-22, §9).** Window through a
+  captured buffer. "Morph two states" = bounce A then B end-to-end, window across the seam. Crosses
   *tape*, not springs — reliable and repeatable, exactly what identifiable-return
-  wants. (Uses existing bounce mechanics; no new "concatenate" verb in v1, per §2.1.)
-- **Phrase-posture morph (added 2026-06-13 — a third model the PHRASES snapshot
-  library unlocks; candidate, not built).** Interpolate the live engine's *posture*
-  (dials/CCs) between two stored phrase snapshots on a knob — a form of the "two live
-  engines" morph the first bullet ruled out, now possible because the phrase holds the
-  full committed state as values. Details + the posture-vs-note-content split + RAM
+  wants, and **~0 new RAM**. (Uses existing bounce mechanics; no new "concatenate" verb in v1, per §2.1.)
+- **Phrase-posture morph (shipped 2026-06-16 — Loop A/B + note Phase 1; now a by-ear CUT candidate,
+  §9 2026-06-22).** Interpolate the live engine's *posture* (dials/CCs) between two stored phrase
+  snapshots on a knob — the one thing the other models can't give: a continuous A→B blend of two
+  *live* engines (possible because the phrase holds the full committed state as values). **But it
+  costs ~7.7 KB main RAM — the largest discretionary RAM lever — and is the gesture that drives the
+  unmeasured all-16 force-dirty CPU wall** (flat-map Map A #3). With recorded-state morph now
+  primary and the new model offering cheaper performed returns (soft-return / reseed), this is the
+  candidate to cut by ear to reclaim the RAM. Details + the posture-vs-note-content split + RAM
   gate in §10 ("Phrase morphing").
 
 ### Set structure (skeleton and muscle)
@@ -802,7 +805,7 @@ never speculatively).
 | **CAPTURE / BOUNCE** | snapshot the *computed output* as a variation | PATTERN-hold + destination pick | a slot / track-slot |
 | **THE PULL** | track-grain load from any slot | SELECT-hold + source pick | RAM (one-deep undo) |
 | **PHRASES** | whole-organism snapshot library, 16 waypoints | PHRASE-view tap = recall / hold = capture | sentinel bank `MBSEQ_PH.V4` (0xfd) |
-| **Phrase recall** | restore the organism from a phrase (posture = regen; FREEZE+tap = frozen tape) | tap a waypoint | — |
+| **Phrase recall** | restore the organism from a phrase — a *static grab*, exact (the FREEZE switch governs whether the source *wanders after* you land, not a face the gesture picks; §9 2026-06-22) | tap a waypoint | — |
 | **CHECKPOINT / REVERT** | one-deep whole-organism safety anchor | SELECT+BOOKMARK tap / hold | sentinel bank `MBSEQ_AN.V4` (0xfe) |
 | **UNDO / REDO** (Tier 1) | step back/forward the last *deliberate* gesture — consolidates the track / generator / utility one-deeps + adds the missing redo | one UNDO + one REDO (provisional) | shared shallow RAM store |
 | **SET (durable baseline)** | a blessed copy of the whole shelf you reload to (the DN2 split) | SAVE-SET / RELOAD-SET (provisional) | `/SETS/<name>/` on SD |
@@ -827,8 +830,9 @@ never speculatively).
    One "landing" control (Instant / Quantize-16th / Quantize-bar / Seamless) would unify it.
    *Medium risk — touches recall feel.*
 3. **"Morph" means three different things** — WINDOW (read-position), posture-morph,
-   phrase-morph. Distinct names would remove the collision. *Pure clarity, low risk* — but
-   gated on the still-open morph keep/cut (§10).
+   phrase-morph. Distinct names would remove the collision. *Pure clarity, low risk.* Morph
+   keep/cut **direction decided 2026-06-22 (§9):** recorded-state morph is canonical; live
+   phrase-posture morph is the by-ear cut candidate (~7.7 KB lever) — execute by ear next reflash.
 4. **Robotize is the lone emission-time special-case** (resets on bounce, §3). Migrating it
    to a render-stack processor completes the §3 closure and drops the exception. *Its own
    session (already queued in §10).* — *This is also the engine that drives overlap #5: each
@@ -2687,6 +2691,36 @@ walls). Discipline is a tool to drive a result; it shifts when it stops working.
   over a grab (QoL, not a new verb). Build-time flag: changes the shipped same-group bounce **and
   drops most of the emission tape**. Folded into §3 / §5 (freeze section) / §10.
 
+**2026-06-22 — Phrase mode + morphing reviewed under the capture-centric model (DECIDED; doc-only).**
+A model review of phrase recall + phrase morphing against the 2026-06-21 capture-centric overhaul +
+the flat-map. They split into **opposite** verdicts (the box handles recall; morph is the strained one):
+- **Recall — the box handles it; the overhaul *unblocked* the cheap freeze cure.** The flat-map's
+  #1 open by-ear question ("may un-captured generator wander be abandoned on phrase recall?") is
+  **answered by the new model itself**: recall = select a *static* grab, and the living-return is a
+  performed move *between* grabs — so un-captured wander is not precious at recall (if you wanted it,
+  you'd have captured it; the ring is for play-then-keep). That makes **DRIFT-gated writeback**
+  (≈1 line; `phrase_drift` already exists, unused by writeback) the **faithful** implementation of
+  the new recall semantics, *not* a compromise — the "things revert" worry that reverted it
+  (2026-06-19) lived inside the now-retired two-face model. **Direction: ship the DRIFT-gated cure;**
+  only a cheap by-ear confirm remains (toggle live next reflash). Removes the ~1.3 s freeze from the
+  center of the flow. (Updates §10 phrase-recall-freeze + flat-map queue #1.)
+- **Morphing — recorded-state morph becomes the canonical/primary morph; live phrase-posture morph
+  is demoted to a by-ear CUT candidate (user, 2026-06-22).** §5 already held three models;
+  **recorded-state morph** (bounce A then B, window across the seam — ~0 new RAM, "preferred,
+  cheaper," reliable/repeatable) is now primary. The shipped **live phrase-posture morph** (~7.7 KB
+  main RAM — the largest discretionary RAM lever — and the gesture that drives the *unmeasured*
+  all-16 force-dirty CPU wall, flat-map Map A #3) is the **by-ear cut candidate.** The new model
+  demotes it from *the* living-return mechanism to one of four performed returns (morph /
+  soft-return / reseed / grab-a-moment); soft-return + reseed cover return-to-origin + evolution
+  cheaply, and recorded-state gives the A→B crossfade. The only thing genuinely lost is continuous
+  A→B blending of two *live* engines. **Cut is decided-direction, executed by ear** (reclaims
+  ~7.7 KB). Updates §5 (Morphing) + §10 (phrase-morph keep/cut) + §5.6 #3.
+- **Doc hygiene:** §5.6 concept-map's "Phrase recall" row still described the retired two-face
+  recall ("posture = regen; FREEZE+tap = frozen tape"); reconciled to the static-grab model (the
+  shipped FREEZE switch still governs *whether the generator wanders after you land*, which is the
+  source's state, not a face the recall gesture picks). §5 Morphing's "candidate, not built" tag on
+  phrase-posture morph was also stale (it shipped 2026-06-16) — corrected.
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -2975,8 +3009,13 @@ crossfade (threshold frozen at arm); note Phase 1 = discrete pitch swap sharing 
 (land on B's rhythm AND notes). `CMD_PHRASE_MORPH` 0x4f; ~6.6 KB .bss. Makes "a set is a path"
 continuous — the morph is the transition, the bar-aligned recall the arrival.
 - **Open follow-ons:** note Phase 2 (scale-quantized glide as a selectable per-track mode);
-  generator-dial morph; length/clock-div morph; generators-during-morph. **Keep/cut still open**
-  (§5.6 #3, "morph" naming) — the ~7.7 KB buffers are a gated RAM lever if cut.
+  generator-dial morph; length/clock-div morph; generators-during-morph.
+- **Keep/cut — direction DECIDED 2026-06-22 (§9): CUT-leaning.** Recorded-state morph (§5; bounce
+  A→B, window the seam, ~0 RAM) is now the canonical morph; this live posture-morph is the **by-ear
+  cut candidate** — its ~7.7 KB is the largest discretionary RAM lever and it drives the unmeasured
+  all-16 force-dirty CPU wall. The new model (recall = static grab; living-return = a performed move)
+  gives cheaper substitutes (soft-return / reseed); the only loss is continuous A→B blend of two
+  *live* engines. Execute the cut by ear next reflash (so the follow-ons above are likely moot).
 
 **Phrase-recall landing — true deferred clip-launch (follow-on; SHIPPED feel is the
 immediate variant, 2026-06-16).** Loop A's recall now lands clean (QUANTIZE = bar-aligned
@@ -3031,6 +3070,13 @@ auto-mutate marks a group dirty** (`seq_generator.c` → `SEQ_PATTERN_DirtySetTr
   live feel raised a "things revert" worry and prompted a step-back on whole-model complexity,
   so it was reverted to baseline. The idea is sound and re-buildable; it's gated on the §5.6
   clarity pass + a by-ear call on whether un-captured wander should survive a recall.
+  - **Unblocked 2026-06-22 (§9):** the capture-centric model *answers* that by-ear question — recall
+    = select a static grab, the living-return is a performed move between grabs, so un-captured
+    wander is not precious at recall (you'd have captured it). DRIFT-gated writeback is therefore the
+    **faithful** recall behavior, not a compromise; the "things revert" worry was an artifact of the
+    retired two-face model. **Direction: ship it;** only a cheap by-ear confirm (toggle live) remains.
+    This is the recommended cure over incremental-save (which stays the fallback if by-ear says wander
+    *must* survive).
 - *The only structural cure* if the freeze must die without losing wander: **incremental save**
   (program only the sectors that changed) — drops a save from ~18 sectors to a few. Its own
   bundle; touches the SD/file write path.
