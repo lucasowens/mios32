@@ -132,6 +132,13 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 //   track_drum_init gives only a single Note layer (no length). payload [track] ->
 //   reply [track, status]. Fills 0x49 (CAPTURE-bundle low gap).
 #define CMD_TRACK_NOTE_INIT      0x49
+// CAPTURE_PERF: capture-while-performing freeze probe. With the transport RUNNING, fire a
+//   whole-organism phrase capture (4 SD writes) on this +3 task — the same priority as the
+//   physical UTILITY capture gesture — and report how long the +4 emission task was starved.
+//   bpm_tick is ISR-driven (keeps counting through a stall), so we measure the gap between
+//   emission-task services instead. payload [n] -> reply
+//   [status, running, wall_ticks(5x7), max_gap(5x7)]. Fills 0x48 (top of the free low gap).
+#define CMD_CAPTURE_PERF         0x48
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -1909,6 +1916,53 @@ static void cmd_transport(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// CMD_CAPTURE_PERF — capture-while-performing freeze probe. Run with the transport RUNNING
+// (CMD_TRANSPORT start, then let a bar or two elapse). Fires SEQ_PATTERN_PhraseCapture(n)
+// INLINE on this task (TASK_MIDI_Hooks, +3 — the same priority as the physical UTILITY
+// capture gesture, so it faithfully reproduces the live freeze) and reports how long the +4
+// emission task (SEQ_CORE_Handler) was actually starved during the 4-record SD write.
+// SEQ_BPM_TickGet() is ISR-driven and keeps counting through the stall, so we measure the
+// gap between emission-task services instead (SEQ_CORE_ServiceMaxGapGet). freeze_fraction =
+// max_gap / wall_ticks: ~1.0 = full freeze (clock dead during capture), ~0 = clock stayed alive.
+// payload [n] -> reply [status, running, wall_ticks(5x7 LE), max_gap(5x7 LE)]  (12 bytes)
+//   status:  0x01 ok, 0x02 malformed, 0x03 capture refused/failed
+//   running: transport running at probe time (1); if 0 the tick fields are meaningless
+//   wall_ticks: bpm_tick advance across the capture = capture duration in ISR ticks
+//   max_gap:    peak emission-task service gap during the capture, in ISR ticks
+static void cmd_capture_perf(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 reply[12];
+  memset(reply, 0, sizeof(reply));
+  if( len < 1 ) {
+    reply[0] = 0x02; // malformed
+    send_reply(port, CMD_CAPTURE_PERF, reply, sizeof(reply));
+    return;
+  }
+
+  u8 running = SEQ_BPM_IsRunning() ? 1 : 0;
+  SEQ_CORE_ServiceGapReset();
+  u32 t0 = SEQ_BPM_TickGet();
+  s32 r = SEQ_PATTERN_PhraseCapture(payload[0] & 0x7f);
+  u32 t1 = SEQ_BPM_TickGet();
+  u32 wall = t1 - t0;
+  u32 gap = SEQ_CORE_ServiceMaxGapGet();
+
+  reply[0] = (r >= 0) ? 0x01 : 0x03;
+  reply[1] = running;
+  reply[2] = (wall >> 0)  & 0x7f;
+  reply[3] = (wall >> 7)  & 0x7f;
+  reply[4] = (wall >> 14) & 0x7f;
+  reply[5] = (wall >> 21) & 0x7f;
+  reply[6] = (wall >> 28) & 0x0f;
+  reply[7]  = (gap >> 0)  & 0x7f;
+  reply[8]  = (gap >> 7)  & 0x7f;
+  reply[9]  = (gap >> 14) & 0x7f;
+  reply[10] = (gap >> 21) & 0x7f;
+  reply[11] = (gap >> 28) & 0x0f;
+  send_reply(port, CMD_CAPTURE_PERF, reply, sizeof(reply));
+}
+
+
 // CMD_CAPTURE_SPAN — retroactive CAPTURE. sub-op:
 //   0 = CAPTURE  [0, src, k, dst]  -> [src, dst, status]
 //         status: 0x01 ok; else 0x10|(-r) for the SEQ_CORE_CaptureSpan dispatcher's
@@ -2613,6 +2667,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRANSPORT:
             cmd_transport(port, payload_buf, payload_len);
+            break;
+          case CMD_CAPTURE_PERF:
+            cmd_capture_perf(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

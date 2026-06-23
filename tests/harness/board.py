@@ -84,6 +84,7 @@ from .sysex import (
     CMD_CLOCK_STEP,
     CMD_CAPTURE_SPAN,
     CMD_TRANSPORT,
+    CMD_CAPTURE_PERF,
     RNG_SEED_GEN_GET,
     RNG_SEED_GEN_SET,
     RNG_SEED_TRV_GET,
@@ -1439,6 +1440,39 @@ class Board:
         if len(payload) < 2:
             raise RuntimeError(f"short TRANSPORT reply: {payload!r}")
         return bool(payload[1])
+
+    def capture_perf(self, n: int, timeout: float = 12.0) -> dict:
+        """Capture-while-performing FREEZE PROBE. Run with the transport RUNNING.
+
+        Fires a whole-organism phrase capture (4 SD writes) on the firmware's +3
+        SysEx task — the same priority as the physical UTILITY capture gesture — and
+        reports how long the +4 emission task (SEQ_CORE_Handler) was actually starved
+        during it. bpm_tick is ISR-driven and keeps counting through a stall, so it
+        cannot detect the freeze; instead the firmware measures the gap between
+        emission-task services. Returns a dict:
+          - ok:          capture succeeded
+          - running:     transport was running at probe time (gap is meaningless if not)
+          - wall_ticks:  bpm_tick advance across the capture = capture duration in ISR ticks
+          - max_gap:     peak emission-task service gap during the capture, in ISR ticks
+          - freeze_fraction: max_gap / wall_ticks — ~1.0 = clock dead the whole capture,
+                             ~0.0 = clock stayed alive. The metric the fix must drive down.
+        Generous timeout: the lazy file-create + 4 SD writes can take >1s on current fw."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_CAPTURE_PERF, bytes([n & 0x7f])))
+        payload = self.wait_for_sysex(CMD_CAPTURE_PERF, timeout=timeout, since=since)
+        if len(payload) < 12:
+            raise RuntimeError(f"short CAPTURE_PERF reply ({len(payload)}b): {payload!r}")
+        if payload[0] != CMD_STATUS_OK:
+            raise RuntimeError(f"CAPTURE_PERF status {payload[0]:#04x}: {payload!r}")
+        wall = payload[2] | (payload[3] << 7) | (payload[4] << 14) | (payload[5] << 21) | (payload[6] << 28)
+        gap = payload[7] | (payload[8] << 7) | (payload[9] << 14) | (payload[10] << 21) | (payload[11] << 28)
+        return {
+            "ok": payload[0] == CMD_STATUS_OK,
+            "running": bool(payload[1]),
+            "wall_ticks": wall,
+            "max_gap": gap,
+            "freeze_fraction": (gap / wall) if wall else 0.0,
+        }
 
     def capture_ring_query(self, timeout: float = 1.0) -> dict:
         """Query the retroactive-CAPTURE ring: which track it records, how many

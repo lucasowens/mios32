@@ -2765,6 +2765,39 @@ as the RAM lever only.
   this is the next bundle. (Incremental save is NOT the cure here — a fresh slot's first capture is
   all-new data; the cure is the yield, then optionally chunk/RAM-stage for cross-tick consistency.)
 
+**2026-06-23 — Capture-while-performing freeze: the premise was WRONG; lean capture already fixed it
+(DIAGNOSED on-device + by-ear GO; RESOLVED).** Built the diagnostic first (a perf test, as planned),
+and it overturned the 2026-06-22 (cont.) belief above. **The audible clock does NOT freeze on a
+whole-organism phrase capture.** Measured on-device (new `CMD_CAPTURE_PERF` verb): during a ~640 ms
+capture the emission task (`SEQ_CORE_Handler` in `TASK_MIDI`, +4) was starved for **1 ISR tick out of
+570** — `freeze_fraction` 0.002. The paradox dissolves: emission is +4 and wakes every 1 ms via
+`vTaskDelayUntil`; the capture runs at +3 (`SEQ_PATTERN_PhraseCapture` holds only `MUTEX_SDCARD`, never
+`MUTEX_MIDIOUT`, and the SD busy-wait runs interrupts-on), so +4 simply **preempts** the spin and keeps
+playing. (The *separate* `SEQ_CORE_CaptureSpan` ring-grab DOES hold `MUTEX_MIDIOUT` across the grab —
+that one would freeze emission; it isn't the phrase-capture path.)
+- **What the remembered "~1.16 s freeze" actually was:** the PRE-lean-capture path — a modal naming
+  keypad popup + two extra name-writes (6 SD writes, plus a screen-hijacking modal). Lean capture
+  (5638e97a, the morning before) removed both ⇒ ~640 ms, no popup. By-ear on the current build:
+  **"feels fine."** What remains is a ~640 ms *control-surface* hang (the +2 UI task — LED/LCD/button
+  scan — is starved by the +3 capture) while the music plays straight through; acceptable by ear now.
+- **Test-design correction (load-bearing for any future probe):** `SEQ_BPM_TickGet()` is incremented in
+  the HIGHEST-prio HW-timer ISR (`SEQ_BPM_Timer_Master`), so it keeps counting through any interrupts-on
+  stall — **useless for freeze detection**. The real signal is the emission-task *service gap*
+  (`bpm_tick` vs `bpm_tick_prefetched`); shipped as `SEQ_CORE_ServiceGapReset` / `SEQ_CORE_ServiceMaxGapGet`.
+- **Fix-path correction (parks the old plan):** wiring `MIOS32_SDCARD_TASK_SUSPEND_HOOK` is mostly a red
+  herring — it wraps only the 512-byte DMA payload (~0.28 ms), **not** the ~290 ms card-programming
+  busy-wait poll (`mios32_sdcard.c:556`, which has no hook). The real lever, *if the ~640 ms
+  control-surface hang ever needs shrinking*, is a yield **inside the completion poll** (scheduler-guarded
+  via `xTaskGetSchedulerState()`), which benefits every SD write; note `MUTEX_SDCARD` serializes all SD
+  users, so a poll-yield frees the clock/UI but not another SD writer. **Parked as future polish** — not
+  built, because by-ear says the freeze is already gone.
+- **Shipped:** `CMD_CAPTURE_PERF` + the service-gap tracker as a **permanent regression guard**
+  (`tests/apps/seq_v4/test_capture_perf.py`) pinning "capture-while-playing keeps the audible clock
+  running" — this realizes §8 timing-test (8) "SD-write isolation on quick-capture." HIL **196/196** (the
+  run also caught + fixed 5 tests left stale by 5638e97a's by-ear changes: the morph **tent** re-coheres
+  to A at full throw, and lean capture is **naming-opt-in** — a bare capture no longer persists a typed
+  phrase name).
+
 ---
 
 ## 10. Open questions (unresolved forks)

@@ -585,4 +585,9 @@ extern u32 SEQ_CORE_MSPPaintInitialDepth(void); // _estack - hi, MSP already use
 extern u32 SEQ_CORE_MSPPaintLo(void);          // absolute address of paint floor (= &_eusrstack)
 extern u32 SEQ_CORE_MSPPaintHi(void);          // absolute address of paint ceiling (= SP at paint - margin)
 
+// emission-task service-gap probe (capture/SD-write freeze detection — bpm_tick is
+// ISR-driven and keeps counting through a stall, so it can't see the freeze; this gap can)
+extern void SEQ_CORE_ServiceGapReset(void);    // zero the peak, anchor "last service" to now
+extern u32  SEQ_CORE_ServiceMaxGapGet(void);   // peak ISR-tick gap between emission services since reset
+
 #endif /* _SEQ_CORE_H */

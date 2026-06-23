@@ -489,6 +489,20 @@ u8 SEQ_CORE_CaptureMaxK(u8 src)
 static u32 bpm_tick_prefetch_req;
 static u32 bpm_tick_prefetched;
 
+// --- emission-task service-gap instrumentation (capture/SD-write freeze probe) ---
+// SEQ_CORE_Handler runs once per TASK_MIDI (+4) service (~every 1ms while the engine
+// runs). bpm_tick is incremented in the HIGHEST-priority HW-timer ISR
+// (SEQ_BPM_Timer_Master), so SEQ_BPM_TickGet() keeps counting even while the emission
+// TASK is starved — which makes it USELESS for detecting a clock-task stall. The gap
+// (in ISR ticks) between successive SEQ_CORE_Handler entries CAN detect one: a healthy
+// clock services every tick or two, but if a lower-priority task hogs the CPU (e.g. a
+// long SD write that never yields) bpm_tick races ahead and the gap balloons. We track
+// the peak gap since the last reset so a perf verb (CMD_CAPTURE_PERF) can fire a capture
+// and read back how long emission was actually starved. See SEQ_CORE_ServiceGapReset /
+// SEQ_CORE_ServiceMaxGapGet, and the tracker at the top of SEQ_CORE_Handler.
+static u32 seq_core_service_last_tick;  // bpm_tick at the last SEQ_CORE_Handler entry
+static u32 seq_core_service_max_gap;    // peak inter-service gap (ISR ticks) since reset
+
 static float seq_core_bpm_target;
 static float seq_core_bpm_sweep_inc;
 
@@ -2974,8 +2988,38 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 // this sequencer handler is called periodically to check for new requests
 // from BPM generator
 /////////////////////////////////////////////////////////////////////////////
+// Reset the emission-task service-gap probe: zero the peak and anchor "last service"
+// to the current ISR tick. Call this immediately before the operation under test
+// (e.g. a phrase capture) while the transport is running.
+void SEQ_CORE_ServiceGapReset(void)
+{
+  seq_core_service_last_tick = SEQ_BPM_TickGet();
+  seq_core_service_max_gap = 0;
+}
+
+// Peak ISR-tick gap between emission-task (SEQ_CORE_Handler) services since the last
+// reset. Folds in the gap that is STILL OPEN right now: during a full freeze the handler
+// never runs to record its own peak, so the live distance from the last service to the
+// current ISR tick is the only witness — without this fold-in a total stall would read 0.
+u32 SEQ_CORE_ServiceMaxGapGet(void)
+{
+  u32 pending = SEQ_BPM_TickGet() - seq_core_service_last_tick;
+  return (pending > seq_core_service_max_gap) ? pending : seq_core_service_max_gap;
+}
+
+
 s32 SEQ_CORE_Handler(void)
 {
+  // perf probe: record how many ISR ticks elapsed since this emission handler last ran
+  // (see seq_core_service_* statics above). Cheap; runs every TASK_MIDI service.
+  {
+    u32 now = SEQ_BPM_TickGet();
+    u32 gap = now - seq_core_service_last_tick;
+    if( gap > seq_core_service_max_gap )
+      seq_core_service_max_gap = gap;
+    seq_core_service_last_tick = now;
+  }
+
   // handle requests
 
   u8 num_loops = 0;
