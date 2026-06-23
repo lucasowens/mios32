@@ -376,12 +376,14 @@ GROOVE_STYLE_B = 2
 TRANSPOSE_OCT_A = 0
 TRANSPOSE_OCT_B = 3
 
-# A simple 4-step gate pattern: A has steps 0,1 on; B has steps 2,3 on.
-# After a max-throw morph, the live gate must match B exactly; pulled back to 0
-# it must restore A exactly (the gate crossfade is reversible).
-# We test only the first byte (steps 0..7) of track 0.
-GATE_A_BYTE = 0b00000011  # steps 0,1 on
-GATE_B_BYTE = 0b00001100  # steps 2,3 on
+# Gate patterns for the TENT (by-ear 2026-06-22): A and B differ on ALL 16 steps
+# (two trg bytes, every bit flips A<->B). The gate swap is per-step with a frozen
+# random threshold, so the center mix is non-deterministic — but with 16 differing
+# steps "some step leaks B at the center" is effectively certain (P(none) = 2^-16),
+# while the ENDS (pos 0 and pos MAX) re-cohere to A deterministically. We read both
+# bytes (steps 0..15) of track 0.
+GATE_A_BYTE = 0b10101010  # A: odd steps on
+GATE_B_BYTE = 0b01010101  # B: even steps on (every bit differs from A)
 
 
 def _build_loop_b_phrases(board: Board) -> dict:
@@ -398,7 +400,8 @@ def _build_loop_b_phrases(board: Board) -> dict:
     for step in range(4):
         board.track_par_set(0, VEL_LAYER, 0, step, VEL_B)
         board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_B)
-    board.trg_byte_set(0, 0, GATE_B_BYTE, trg_layer=0)  # first gate byte
+    board.trg_byte_set(0, 0, GATE_B_BYTE, trg_layer=0)  # gate bytes 0 and 1 (steps 0..15)
+    board.trg_byte_set(0, 1, GATE_B_BYTE, trg_layer=0)
     style_b = board.cc_get(0, CC.GROOVE_STYLE)
     oct_b = board.cc_get(0, CC.TRANSPOSE_OCT)
 
@@ -413,6 +416,7 @@ def _build_loop_b_phrases(board: Board) -> dict:
         board.track_par_set(0, VEL_LAYER, 0, step, VEL_A)
         board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_A)
     board.trg_byte_set(0, 0, GATE_A_BYTE, trg_layer=0)
+    board.trg_byte_set(0, 1, GATE_A_BYTE, trg_layer=0)
     style_a = board.cc_get(0, CC.GROOVE_STYLE)
     oct_a = board.cc_get(0, CC.TRANSPOSE_OCT)
 
@@ -493,28 +497,38 @@ def test_morph_loopb_velocity_endpoints_stopped(genv4):
 
 
 @pytest.mark.hardware
-def test_morph_loopb_gate_max_matches_b(genv4):
-    """Loop B pin: at pos MAX the gate must be exactly B's gate.
-    The frozen-threshold crossfade is deterministic at full throw — every step's
-    threshold (0..MAX-1) is < MAX, so every differing step shows B.  Verified via
-    the source trg buffer (layer_bytes from trg_byte_get)."""
+def test_morph_loopb_gate_tent_recoheres(genv4):
+    """Loop B gate TENT (by-ear 2026-06-22 — replaces the pre-tent "full throw = B").
+    The discrete gate swap "flips then unflips": morph_prox = MAX/2 - |pos - MAX/2|, so
+    a differing step shows B only when its frozen threshold < morph_prox. Therefore both
+    ENDS (pos 0 and pos MAX, morph_prox = 0) re-cohere to A exactly, and the CENTER shows
+    maximum B-leakage. Source trg buffer; 16 differing steps make the center check robust."""
     board = genv4
     board.reset(RESET_DEFAULT)
     _park(board)
     _build_loop_b_phrases(board)
 
-    # confirm live gate = A before arming
-    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
-    assert layer_bytes[0] == GATE_A_BYTE, (
-        f"preamble: live gate should be A ({GATE_A_BYTE:#010b}), got {layer_bytes[0]:#010b}"
-    )
+    def gate2():
+        layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=2)
+        return (layer_bytes[0], layer_bytes[1])
+
+    A = (GATE_A_BYTE, GATE_A_BYTE)
+    assert gate2() == A, f"preamble: live gate should be A {A}, got {gate2()}"
 
     assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
-    board.phrase_morph_set(PHRASE_MORPH_MAX)  # full throw -> all differing steps flip
 
-    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
-    assert layer_bytes[0] == GATE_B_BYTE, (
-        f"pos MAX gate should equal B ({GATE_B_BYTE:#010b}), got {layer_bytes[0]:#010b}"
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    assert gate2() == A, (
+        f"tent: pos MAX must RE-COHERE to A {A} (not land on B); got {gate2()}"
+    )
+
+    board.phrase_morph_set(0)
+    assert gate2() == A, f"tent: pos 0 is A {A}, got {gate2()}"
+
+    board.phrase_morph_set(MID)
+    assert gate2() != A, (
+        "tent: at the center the gate must leak B in (some differing steps flip); "
+        f"got {gate2()} == A"
     )
 
     _clean(board)
@@ -542,31 +556,40 @@ def test_morph_loopb_gate_zero_unchanged(genv4):
 
 @pytest.mark.hardware
 def test_morph_loopb_gate_reversible(genv4):
-    """Loop B pin: the gate crossfade is REVERSIBLE, not a one-way ratchet.
-    After a full-throw morph (gate == B), pulling pos back to 0 restores A exactly
-    — the frozen-threshold model makes the gate deterministic and reversible.
-    Verified via the source trg buffer."""
+    """Loop B gate TENT is REVERSIBLE and STABLE (not a one-way ratchet, no per-set
+    creep). The frozen-threshold model makes the center mix deterministic: entering the
+    center leaks B in, pulling back to 0 restores A exactly, and re-entering the center
+    reproduces the SAME mix (thresholds frozen at arm). Verified via the source trg buffer."""
     board = genv4
     board.reset(RESET_DEFAULT)
     _park(board)
     _build_loop_b_phrases(board)
 
+    def gate2():
+        layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=2)
+        return (layer_bytes[0], layer_bytes[1])
+
+    A = (GATE_A_BYTE, GATE_A_BYTE)
     assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
 
-    # full throw -> B
-    board.phrase_morph_set(PHRASE_MORPH_MAX)
-    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
-    assert layer_bytes[0] == GATE_B_BYTE, (
-        f"pos MAX gate should equal B ({GATE_B_BYTE:#010b}), got {layer_bytes[0]:#010b}"
+    # center leaks B in
+    board.phrase_morph_set(MID)
+    mid_gate = gate2()
+    assert mid_gate != A, f"center must leak B in, got {mid_gate} == A"
+
+    # pull back to 0 -> A restored exactly (NOT stuck at a B mix)
+    board.phrase_morph_set(0)
+    assert gate2() == A, f"reversible: pos 0 after center must restore A {A}, got {gate2()}"
+
+    # re-enter the center -> identical frozen mix (deterministic, no creep)
+    board.phrase_morph_set(MID)
+    assert gate2() == mid_gate, (
+        f"stable: re-entering the center must reproduce the frozen mix {mid_gate}, got {gate2()}"
     )
 
-    # pull back to 0 -> A restored exactly (NOT stuck at B)
-    board.phrase_morph_set(0)
-    layer_bytes, _ = board.trg_byte_get(0, trg_layer=0, step8_start=0, step8_count=1)
-    assert layer_bytes[0] == GATE_A_BYTE, (
-        f"reversible: pos 0 after MAX must restore A ({GATE_A_BYTE:#010b}), "
-        f"got {layer_bytes[0]:#010b}"
-    )
+    # full throw still re-coheres to A (the tent, not a ratchet to B)
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    assert gate2() == A, f"tent: full throw re-coheres to A {A}, got {gate2()}"
 
     _clean(board)
 
@@ -586,17 +609,22 @@ def test_morph_loopb_snap_cc_reversible(genv4):
 
     assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
 
-    # below MAX (incl. midpoint) = A; the snap only fires at full throw
-    board.phrase_morph_set(MID)
-    assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_a"], "mid: groove_style stays A"
-    assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_a"],   "mid: transpose_oct stays A"
+    # BELOW the midpoint = A (snap flips at pos >= MAX/2, by-ear 2026-06-22 — was full-throw)
+    board.phrase_morph_set(MID - 1)
+    assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_a"], "below midpoint: groove_style == A"
+    assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_a"],   "below midpoint: transpose_oct == A"
 
-    # full throw = B
+    # AT the midpoint = B (pos == MAX/2 satisfies >=)
+    board.phrase_morph_set(MID)
+    assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_b"], "midpoint: groove_style == B"
+    assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_b"],   "midpoint: transpose_oct == B"
+
+    # full throw = B (stays B in the top half)
     board.phrase_morph_set(PHRASE_MORPH_MAX)
     assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_b"], "MAX: groove_style == B"
     assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_b"],   "MAX: transpose_oct == B"
 
-    # reversible: pull back below MAX restores A
+    # reversible: pull back below the midpoint restores A
     board.phrase_morph_set(0)
     assert board.cc_get(0, CC.GROOVE_STYLE)  == vals["style_a"], "reversible: groove_style back to A"
     assert board.cc_get(0, CC.TRANSPOSE_OCT) == vals["oct_a"],   "reversible: transpose_oct back to A"
@@ -610,23 +638,23 @@ def _build_note_only_phrase(board: Board) -> None:
     output mirror (track_par_get == SEQ_PAR_Get) is not contaminated by a transpose
     or groove morph — the only thing that moves across the sweep is the note swap."""
     board.ui_track_set(0)
-    for step in range(4):
+    for step in range(16):  # all 16 steps differ -> robust center-leak check under the tent
         board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_B)
     assert board.phrase_capture(PHRASE_B), "note phrase capture should commit"
-    for step in range(4):
+    for step in range(16):
         board.track_par_set(0, NOTE_LAYER, 0, step, NOTE_A)
 
 
 @pytest.mark.hardware
-def test_morph_loopb_note_swap_reversible(genv4):
-    """Loop B Phase 1 pin: per-step NOTE swap.  pos 0 = A pitches, pos MAX = B
-    pitches, reversible (MAX->0 restores A).  At an intermediate pos every step is
-    EITHER A's pitch or B's pitch — a discrete swap, never an interpolated value
-    (that's the whole point: no off-scale glide).
+def test_morph_loopb_note_swap_tent(genv4):
+    """Loop B Phase 1 NOTE swap, now under the TENT (by-ear 2026-06-22 — replaces the
+    pre-tent "full throw = B pitches"). The per-step pitch swap "flips then unflips":
+    pos 0 AND pos MAX re-cohere to A's pitches; the center shows B-leakage. Each swapped
+    step is a DISCRETE jump to B's pitch — never an interpolated/off-scale value (the
+    whole point). Reversible + stable.
 
-    track_par_get reads the output mirror (transpose applied), so this phrase keeps
-    transpose constant A==B and asserts the swap against the OBSERVED endpoints —
-    robust to any fixed transpose/force-scale offset."""
+    track_par_get reads the output mirror (transpose applied); this phrase holds transpose
+    constant A==B so only the swap moves. 16 differing steps -> robust center check."""
     board = genv4
     board.reset(RESET_DEFAULT)
     _park(board)
@@ -634,28 +662,34 @@ def test_morph_loopb_note_swap_reversible(genv4):
 
     assert board.phrase_morph_arm(PHRASE_B), "arm should commit"
 
-    # observed endpoints (transpose is constant A==B; only the note swap moves)
+    # pos 0 -> A's observed pitches (all steps are NOTE_A, so one observed A level)
     board.phrase_morph_set(0)
-    a_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(4)]
-    board.phrase_morph_set(PHRASE_MORPH_MAX)
-    b_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(4)]
-    for s in range(4):
-        assert b_vals[s] != a_vals[s], (
-            f"pos MAX note step {s} must differ from A ({a_vals[s]}), got {b_vals[s]}"
-        )
+    a_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(16)]
+    a_observed = a_vals[0]
+    assert all(v == a_observed for v in a_vals), f"all A steps share one observed pitch: {a_vals}"
 
-    # midpoint: each step is discretely A or B (never an interpolated pitch)
+    # pos MAX -> RE-COHERE to A (tent), NOT B
+    board.phrase_morph_set(PHRASE_MORPH_MAX)
+    max_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(16)]
+    assert max_vals == a_vals, f"tent: pos MAX must re-cohere to A's pitches, got {max_vals}"
+
+    # center: a single discrete B pitch level leaks in (len==1 catches BOTH a vacuous
+    # no-swap AND an interpolated gradient — discreteness + non-vacuity in one assert)
     board.phrase_morph_set(MID)
-    for s in range(4):
-        v = board.track_par_get(0, NOTE_LAYER, 0, s)
-        assert v in (a_vals[s], b_vals[s]), (
-            f"midpoint note step {s} must be discrete A({a_vals[s]}) or B({b_vals[s]}), got {v}"
-        )
+    mid_vals = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(16)]
+    b_levels = {v for v in mid_vals if v != a_observed}
+    assert len(b_levels) == 1, (
+        f"center must show exactly ONE discrete B pitch level (no interpolation, no "
+        f"vacuous pass); got B-levels {b_levels} from {mid_vals}"
+    )
+    b_observed = b_levels.pop()
+    assert all(v in (a_observed, b_observed) for v in mid_vals), (
+        f"every center step is a discrete A({a_observed}) or B({b_observed}): {mid_vals}"
+    )
 
     # reversible: back to 0 restores A exactly
     board.phrase_morph_set(0)
-    for s in range(4):
-        v = board.track_par_get(0, NOTE_LAYER, 0, s)
-        assert v == a_vals[s], f"reversible: note step {s} back to A ({a_vals[s]}), got {v}"
+    back = [board.track_par_get(0, NOTE_LAYER, 0, s) for s in range(16)]
+    assert back == a_vals, f"reversible: pos 0 restores A, got {back}"
 
     _clean(board)

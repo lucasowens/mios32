@@ -527,9 +527,10 @@ def test_phrase_generator_wander_not_drift(genv4):
 
 @pytest.mark.hardware
 def test_phrase_name_roundtrip(genv4):
-    """Naming: an un-named phrase reads back blank (the UI shows its number); a
-    named phrase round-trips and SURVIVES a session reload (capture stamps the
-    name into the base record; the occupancy probe re-seeds it on load)."""
+    """Naming under LEAN CAPTURE (by-ear 2026-06-22): naming is opt-in. An un-named
+    phrase reads back blank; a typed RAM name round-trips IN SESSION, but a bare capture
+    no longer auto-stamps it — so the typed name does NOT survive a reload. Persisting a
+    name takes a deliberate commit (covered by test_phrase_name_commit_without_recapture)."""
     board = genv4
     board.reset(RESET_DEFAULT)
     _park(board)
@@ -538,14 +539,26 @@ def test_phrase_name_roundtrip(genv4):
     assert board.phrase_capture(0), "capture should commit"
     assert board.phrase_name_get(0) == "", "an un-named phrase reads back blank"
 
-    board.phrase_name_set(1, "drop")  # set RAM name BEFORE capture stamps it
+    board.phrase_name_set(1, "drop")  # set RAM name; lean capture does NOT persist it
     board.cc_set(0, CC.LENGTH, 13)
-    assert board.phrase_capture(1), "capture should commit (stamps the name)"
-    assert board.phrase_name_get(1) == "drop", "named phrase round-trips in RAM"
+    assert board.phrase_capture(1), "capture should commit"
+    assert board.phrase_name_get(1) == "drop", "typed name round-trips in RAM, in session"
 
-    board.session_load(GENV4_SESSION, timeout=20.0)  # cross-session re-seed
-    assert board.phrase_name_get(1) == "drop", "the name must survive a session reload"
-    assert board.phrase_name_get(0) == "", "an un-named phrase stays blank after reload"
+    board.session_load(GENV4_SESSION, timeout=20.0)  # cross-session re-seed from disk
+    # Lean capture stamps the GROUP-0 WORKING-SLOT name into the base record, not the
+    # typed phrase RAM name. So after a reload neither bare-captured slot shows "drop"
+    # (the typed name was never persisted), and both inherit the SAME working-slot name.
+    name0 = board.phrase_name_get(0)
+    name1 = board.phrase_name_get(1)
+    assert name1 != "drop", (
+        "lean capture is naming-opt-in: a bare capture must NOT persist a typed name "
+        "across a reload (use a deliberate name commit to persist — see "
+        "test_phrase_name_commit_without_recapture)"
+    )
+    assert name0 == name1, (
+        "both bare-captured slots inherit the same group-0 working-slot name, "
+        f"got {name0!r} vs {name1!r}"
+    )
 
     for g in range(4):
         board.dirty_set(g, False)
