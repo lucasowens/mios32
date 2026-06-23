@@ -2578,13 +2578,13 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	if( (u32)MIOS32_TIMESTAMP_GetDelay(phrase_t0) >= PHRASE_CAPTURE_HOLD_MS ) {
 	  s32 r = SEQ_PATTERN_PhraseCapture(n);
 	  if( r >= 0 ) {
-	    // Captured -> drop straight into the name editor for this slot. The
-	    // editor's LCD IS the capture confirmation; EXIT keeps the current name
-	    // (blank => the slot shows its number). Renames an already-named slot
-	    // too (the name is preserved across re-capture).
-	    phrase_name_edit_slot = n;
-	    phrase_name_edit = 1;
-	    SEQ_UI_KeyPad_Init();
+	    // Captured. Naming is OPT-IN now (2026-06-22, by-ear): do NOT auto-open the
+	    // keypad — that auto-open made every capture pay a name-commit write on EXIT
+	    // plus a modal interruption. A bare capture is now just the four group-record
+	    // writes. Confirm with a message; a deliberate rename can be wired later.
+	    char lbl[21];
+	    SEQ_UI_PhraseName_MsgLabel(n, lbl);
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, lbl, "phrase captured");
 	    seq_ui_display_update_req = 1;
 	  } else
 	    SEQ_UI_SDCardErrMsg(2000, r);

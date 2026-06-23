@@ -759,15 +759,10 @@ s32 SEQ_PATTERN_PhraseCapture(u8 n)
   s32 status = SEQ_PATTERN_SnapshotWrite(SEQ_FILE_B_PHRASE_BANK, 4 * n);
 
   if( status >= 0 ) {
-    // Stamp the phrase name into the base record so disk == RAM: SnapshotWrite
-    // (reusing PatternWrite) just wrote group-0's working-slot name there; a
-    // never-named slot's seq_phrase_name is blank, so an un-named phrase shows
-    // its number (not the inherited A-group name), and a re-capture preserves a
-    // name set earlier this session. Best-effort: a name-write failure doesn't
-    // fail the capture (the organism is already safely committed).
-    MUTEX_SDCARD_TAKE;
-    SEQ_FILE_B_PhraseWriteName(seq_file_session_name, n, seq_phrase_name[n]);
-    MUTEX_SDCARD_GIVE;
+    // Naming is opt-in now (2026-06-22): skip the extra name-write here — SnapshotWrite
+    // (via PatternWrite) already stamped group-0's working-slot name into the base
+    // record, so the slot shows that (or its number); a deliberate rename can rewrite
+    // it later. Saves one SD write per capture.
     phrase_present_mask |= (1 << n);
     last_recalled_phrase = n; // you just committed here -> this is "where you are"
     phrase_drift = 0;         // this IS now the committed reference — no drift since
@@ -845,6 +840,18 @@ s32 SEQ_PATTERN_PhraseRecall(u8 n)
 static void phrase_morph_apply(void)
 {
   u8 slot;
+  // proximity to the morph MIDPOINT: 0 at either end, MAX/2 at the center. Drives the
+  // notes/gates "flip then unflip" tent (by-ear 2026-06-22): a differing step shows B
+  // when its frozen random thresh (uniform 0..MAX-1) is < proximity, so ~50% of the
+  // differing steps are on B at the center and ALL re-cohere to A at both ends (pos 0
+  // and pos MAX). The lerped dims (vel / semitone / groove-amt / ext-CCs) still ride
+  // phrase_morph_pos straight A->B; only the discrete note/gate swaps use the tent.
+  s32 morph_prox;
+  {
+    s32 d = (s32)phrase_morph_pos - PHRASE_MORPH_MAX/2;
+    if( d < 0 ) d = -d;
+    morph_prox = PHRASE_MORPH_MAX/2 - d;
+  }
   for(slot=0; slot<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++slot) {
     u8 track = phrase_morph_group * SEQ_CORE_NUM_TRACKS_PER_GROUP + slot;
     u8 changed = 0;
@@ -879,15 +886,16 @@ static void phrase_morph_apply(void)
 	    SEQ_CC_Set(track, cc, (u8)lerped) >= 0 )
 	  changed = 1;
       }
-      // snap CCs: groove_style, transpose_oct (discrete — B at full throw, A
-      // below it). Reversible: pulling the dial back below MAX restores the
-      // arm-time A, matching the lerped CCs / velocity (a lerp would yield
-      // musically meaningless intermediate enum/octave values, hence the snap).
+      // snap CCs: groove_style, transpose_oct (discrete — B at/above the MIDPOINT,
+      // A below it; changed 2026-06-22 from full-throw to >= MAX/2 per by-ear request,
+      // so the bottom half of the throw is A and the top half is B). Reversible:
+      // pulling the dial back below the midpoint restores the arm-time A. (A lerp
+      // would yield musically meaningless intermediate enum/octave values, hence the snap.)
       {
 	static const u8 snap_ccs[] = { MORPH_CC_GROOVE_STYLE, MORPH_CC_TRANSPOSE_OCT };
 	for(ci=0; ci<2; ++ci) {
 	  u8 cc = snap_ccs[ci];
-	  u8 want = (phrase_morph_pos == PHRASE_MORPH_MAX)
+	  u8 want = (phrase_morph_pos >= PHRASE_MORPH_MAX/2)  // midpoint flip (was full-throw), by-ear 2026-06-22
 	            ? phrase_morph_main_b[slot][cc] : phrase_morph_main_a[slot][cc];
 	  if( want != (u8)SEQ_CC_Get(track, cc) &&
 	      SEQ_CC_Set(track, cc, want) >= 0 )
@@ -924,9 +932,12 @@ static void phrase_morph_apply(void)
     }
 
     // ---- Loop B: reversible per-step gate crossfade (non-drum, has_steps) ----
-    // Each step where A!=B carries a switchover threshold frozen at arm: it shows
-    // B when thresh < pos, else A.  Deterministic + reversible (pos->0 restores A)
-    // + stable at a held pos (no per-measure creep).  A==B steps never move.
+    // Each step where A!=B carries a switchover threshold frozen at arm.  TENT
+    // (by-ear 2026-06-22): it shows B when thresh < morph_prox (proximity to the
+    // midpoint), so differing gates "flip then unflip" — ~50% on B at the center,
+    // ALL back to A at both ends.  Deterministic + reversible (pos->0 OR pos->MAX
+    // both restore A) + stable at a held pos (no per-measure creep).  A==B steps
+    // never move.
     if( phrase_morph_has_steps[slot] &&
         SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE) != SEQ_EVENT_MODE_Drum ) {
       u16 p_size = phrase_morph_p_size[slot];
@@ -935,7 +946,7 @@ static void phrase_morph_apply(void)
 	u8 a_gate = (phrase_morph_gate_a[slot][step/8] >> (step%8)) & 1;
 	u8 b_gate = (phrase_morph_gate_b[slot][step/8] >> (step%8)) & 1;
 	if( a_gate != b_gate ) {
-	  u8 want = (phrase_morph_gate_thresh[slot][step] < phrase_morph_pos) ? b_gate : a_gate;
+	  u8 want = (phrase_morph_gate_thresh[slot][step] < morph_prox) ? b_gate : a_gate;
 	  u8 cur  = (seq_trg_layer_value[track][step/8] >> (step%8)) & 1;
 	  if( want != cur ) {
 	    if( want )
@@ -950,9 +961,10 @@ static void phrase_morph_apply(void)
     }
 
     // ---- Loop B: discrete per-step NOTE swap (non-drum, note layer present) --
-    // Shares the gate's frozen per-step threshold so each step commits to B as a
-    // unit: below thresh the step keeps A's pitch, above it B's pitch — a discrete
-    // swap (no off-scale interpolation), reversible (pos->0 restores A), stable.
+    // Shares the gate's frozen per-step threshold + the TENT (morph_prox): a step
+    // keeps A's pitch unless thresh < proximity-to-midpoint, then B's pitch — a
+    // discrete swap (no off-scale interpolation) that "flips then unflips" (~50% on
+    // B at the center, all back to A at both ends), reversible, stable.
     if( phrase_morph_has_steps[slot] &&
         phrase_morph_note_layer[slot] != 0xff &&
         SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE) != SEQ_EVENT_MODE_Drum ) {
@@ -963,7 +975,7 @@ static void phrase_morph_apply(void)
 	u16 idx = (u16)nl * p_size + step;
 	if( idx >= SEQ_PAR_MAX_BYTES )
 	  break;
-	u8 want = (phrase_morph_gate_thresh[slot][step] < phrase_morph_pos)
+	u8 want = (phrase_morph_gate_thresh[slot][step] < morph_prox)
 	          ? phrase_morph_note_b[slot][step] : phrase_morph_note_a[slot][step];
 	if( seq_par_layer_value[track][idx] != want ) {
 	  seq_par_layer_value[track][idx] = want;

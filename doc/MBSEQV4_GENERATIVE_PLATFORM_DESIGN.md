@@ -2731,6 +2731,40 @@ the flat-map. They split into **opposite** verdicts (the box handles recall; mor
   source's state, not a face the recall gesture picks). §5 Morphing's "candidate, not built" tag on
   phrase-posture morph was also stale (it shipped 2026-06-16) — corrected.
 
+**2026-06-22 (cont.) — by-ear morph-feel tuning + lean capture + the capture-while-performing
+freeze named (DECIDED; morph kept, on hardware).** Played the morph-on build; outcome: **phrase +
+phrase-morph are "the best they have been" — by-ear GO, committed to main.** The morph cut went the
+OTHER way once it was felt working — **morph KEPT** (default on), the `PHRASE_MORPH=0` cut flag stays
+as the RAM lever only.
+- **Morph feel retuned by ear.** (a) The snap CCs (octave-transpose, groove-style — can't lerp) now
+  flip at the **MIDPOINT** (`pos >= MAX/2`), not full throw, so the throw reads "bottom half = A,
+  top half = B." (An octave-transpose test first read as a "hard switch with no interpolation" —
+  it was the by-design snap; clarified, then moved to the midpoint.) (b) **Notes + gates now do a
+  TENT — "flip then unflip":** each differing step shows B when its frozen random threshold is below
+  the *proximity to the midpoint*, so ~50% are on B at the center (max scramble) and ALL re-cohere to
+  A at both ends. So full throw = **B's posture / dynamics / transpose over your A notes + rhythm**;
+  the center is the point of maximum note/rhythm disorder — a "departs and returns" character, not a
+  land-on-B for the discrete content. Lerped dims (velocity / semitone / groove-amount / ext-CCs)
+  still travel straight A→B. (`morph_prox` in `phrase_morph_apply`.)
+- **Lean capture (naming opt-in).** Phrase capture no longer auto-opens the keypad or writes a name
+  (dropped the capture-time `PhraseWriteName` *and* the EXIT-commit write). A bare capture = just the
+  four group records. Naming is deferred to a future deliberate gesture. (Was: capture froze longer
+  partly because naming added two SD writes on top of the four records.)
+- **Capture-while-performing freeze = a NAMED fundamental requirement (fix DEFERRED).** User: capturing
+  a whole-organism phrase *while playing* is fundamental, and the ~1.16 s clock freeze on capture is a
+  showstopper. **Root cause (source-verified):** every SD sector write ends in a busy-wait poll for the
+  card to finish programming (`mios32_sdcard.c:556`) and the app **never defines the DMA yield hook**
+  (`MIOS32_SDCARD_TASK_SUSPEND_HOOK`), so a 4-record capture spins the CPU ~1.16 s with no yield. **The
+  paradox:** preemption is on (`configUSE_PREEMPTION=1`), the clock task `SEQ_TASK_MIDI` takes only
+  `MUTEX_MIDIOUT` (never the SD mutex), and the spin is interrupts-on — so the higher-priority clock
+  task *should* preempt and keep running, yet it froze. The real trigger is a **device-level scheduling
+  subtlety** (likely a task-priority/attribution detail) that needs on-device confirmation. **Fix path:**
+  wire the SD task-yield (define the SUSPEND/RESUME hook + add a yield to the completion poll) so a long
+  write releases the CPU and the clock advances between sectors — benefits *all* SD writes (capture,
+  working-slot save, CHECKPOINT, recall-writeback). Deferred to commit the good morph state first;
+  this is the next bundle. (Incremental save is NOT the cure here — a fresh slot's first capture is
+  all-new data; the cure is the yield, then optionally chunk/RAM-stage for cross-tick consistency.)
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3015,21 +3049,21 @@ CCM. `CMD_RNG_SEED` 0x4d.
 → REFERENCE).** Per-group posture interpolation live→a target phrase, datawheel/GP-bar, SELECT+tap
 to arm; pos 0 = reversible pass-through. Loop A = ext-CC posture block (robotize / chord-mask /
 GRIP); Loop B = main-CC whitelist (groove/transpose) + per-step velocity lerp + reversible gate
-crossfade (threshold frozen at arm); note Phase 1 = discrete pitch swap sharing the gate threshold
-(land on B's rhythm AND notes). `CMD_PHRASE_MORPH` 0x4f; ~6.6 KB .bss. Makes "a set is a path"
-continuous — the morph is the transition, the bar-aligned recall the arrival.
+crossfade; note Phase 1 = discrete pitch swap sharing the gate threshold. `CMD_PHRASE_MORPH` 0x4f;
+~6.6 KB .bss. Makes "a set is a path" continuous — the morph is the transition, the bar-aligned
+recall the arrival. **Feel retuned by ear 2026-06-22 (§9): snap CCs (octave/groove-style) flip at the
+MIDPOINT not full throw; notes + gates do a TENT ("flip then unflip", ~50% scramble at the center,
+re-cohere to A at both ends) — so full throw = B's posture/dynamics/transpose over A's notes+rhythm.**
 - **Open follow-ons:** note Phase 2 (scale-quantized glide as a selectable per-track mode);
   generator-dial morph; length/clock-div morph; generators-during-morph.
-- **Keep/cut — CUT shipped as a compile flag (2026-06-22, §9).** Recorded-state morph (§5; bounce
-  A→B, window the seam, ~0 RAM) is now the canonical morph; this live posture-morph is gated behind
-  `SEQ_PHRASE_MORPH` (`make PHRASE_MORPH=0`, mirrors TESTCTRL; default ON). Build-verified: the cut
+- **Keep/cut — RESOLVED: morph KEPT (by-ear GO 2026-06-22, "best they've been").** Once it was felt
+  working, the cut reversed — the live posture-morph stays default-ON. The `SEQ_PHRASE_MORPH` compile
+  flag (`make PHRASE_MORPH=0`, mirrors TESTCTRL) survives **only as a RAM lever**: build-verified it
   reclaims a **measured 6680 B (~6.5 KB) main RAM** (free 9.06 → 15.59 KB; the "~7.7 KB" estimate is
-  corrected — the buffers are main-RAM, not CCM). The new model (recall = static grab; living-return
-  = a performed move) gives cheaper substitutes (soft-return / reseed); the only loss is continuous
-  A→B blend of two *live* engines. Default stays ON until the cut is blessed by ear in a real set;
-  flip the default (or fully remove) then. The open follow-ons above are likely moot if the cut
-  sticks. **CAVEAT:** windowing isn't built — the cut build has no live continuous morph at all (hard
-  cuts via recall + SWITCH-QUANTIZE still work); the recorded-state window gesture is the follow-on.
+  corrected — the buffers are main-RAM, not CCM), to pull if something on main RAM's critical path
+  ever needs it. Recorded-state morph (§5) remains the *cheaper alternative* model but is no longer
+  "the" canonical one — both coexist; the live morph is what's used. (Windowing for recorded-state
+  morph still isn't built — that gesture is a separate follow-on if ever wanted.)
 
 **Phrase-recall landing — true deferred clip-launch (follow-on; SHIPPED feel is the
 immediate variant, 2026-06-16).** Loop A's recall now lands clean (QUANTIZE = bar-aligned
