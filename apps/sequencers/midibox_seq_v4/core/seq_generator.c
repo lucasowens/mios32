@@ -53,18 +53,14 @@ u8 seq_generator_in_automutate = 0;
 // Sparse map: pool index per (track, instrument), 0xFF = unallocated.
 static u8 CCM_SECTION pool_index[SEQ_CORE_NUM_TRACKS][SEQ_GENERATOR_INSTRUMENTS];
 
-// One-deep global auto-undo: snapshot of the entire par buffer for whichever
-// track most recently saw a first-time ENGAGE. Restored by SEQ_GENERATOR_Undo.
-// (CCM_SECTION trails the variable name — placed between type and name it
-// applies to the struct *type*, which GCC ignores; placed after the name it
-// applies to the variable, which is what we want.)
-typedef struct {
-  u8 valid;
-  u8 track;
-  u8 par_snapshot[SEQ_PAR_MAX_BYTES];
-} seq_generator_undo_t;
-
-static seq_generator_undo_t CCM_SECTION undo_slot;
+// The generator one-deep auto-undo is now part of the unified action journal
+// (seq_core.c, §10(a2)): ENGAGE arms it via SEQ_CORE_JournalArm and the GP2
+// UNDO / disk-load invalidate route through SEQ_CORE_JournalUndo /
+// SEQ_CORE_JournalInvalidate. The journal snapshots the FULL track (incl. this
+// track's generators), a superset of the old par-only slot, so a generator
+// UNDO restores the pre-ENGAGE source AND disengages the seeded generators in
+// one shot (the journal_restore generator-restore subsumes the old explicit
+// disengage loop).
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -297,7 +293,6 @@ s32 SEQ_GENERATOR_Init(u32 mode)
   // also lets a runtime re-init (mode-1 reload) start clean.
   memset(pool, 0, sizeof(pool));
   memset(pool_index, 0xFF, sizeof(pool_index));
-  memset(&undo_slot, 0, sizeof(undo_slot));
   memset(last_seen_step, 0xFF, sizeof(last_seen_step));
   return 0;
 }
@@ -381,7 +376,9 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
     // Re-engage: keep loop content; adopt the (possibly new) cursor target so
     // cursor still wins; flip engaged on; force a rewrite so the current
-    // (possibly UNDO-restored or paused-out-of-sync) source matches.
+    // (possibly UNDO-restored or paused-out-of-sync) source matches. NOT armed:
+    // matches the pre-consolidation "first-ENGAGE only" undo so a resync
+    // double-tap doesn't consume the user's last undoable gesture.
     pool[ix].par_layer = par_layer;
     pool[ix].engaged = 1;
     write_loop_to_source(&pool[ix]);
@@ -389,7 +386,15 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   }
 
   seq_generator_t *g = alloc_slot();
-  if( g == NULL ) return -1;
+  if( g == NULL ) return -1;  // pool full — arms nothing (prior undo intact)
+
+  // Arm the unified undo net now that a NEW slot is committed: after the
+  // pool-full return (so a failed ENGAGE doesn't clobber the prior gesture's
+  // undo) and BEFORE g is marked in_use / its track is set, so the snapshot's
+  // generators EXCLUDE the one we're about to add (UNDO then restores the
+  // pre-ENGAGE source AND removes this seeded generator). Same placement as the
+  // pre-consolidation undo_slot arm.
+  SEQ_CORE_JournalArm(track);
 
   g->track          = track;
   g->instrument     = instrument;
@@ -421,11 +426,6 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
 
   pool_index[track][instrument] = (u8)(g - pool);
-
-  // Snapshot the track's par-buffer for one-deep auto-undo BEFORE we write.
-  undo_slot.track = track;
-  memcpy(undo_slot.par_snapshot, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
-  undo_slot.valid = 1;
 
   write_loop_to_source(g);
   return 0;
@@ -461,38 +461,26 @@ s32 SEQ_GENERATOR_Bounce(u8 track, u8 instrument)
 }
 
 
+// The generator page's GP2 UNDO. Routed to the unified journal: the full-track
+// restore puts the pre-ENGAGE source back AND restores the pre-ENGAGE
+// generators (removing the seeded one), so the old explicit par-memcpy +
+// disengage-loop is subsumed. Undo-only here (the global SELECT+CLEAR toggle
+// owns redo). Returns 0 / -1 to keep the GP2 caller's contract.
 s32 SEQ_GENERATOR_Undo(void)
 {
-  if( !undo_slot.valid ) return -1;
-
-  u8 track = undo_slot.track;
-  memcpy(seq_par_layer_value[track], undo_slot.par_snapshot, SEQ_PAR_MAX_BYTES);
-  seq_render_dirty[track] = 1;
-  SEQ_PATTERN_DirtySetTrack(track); // direct-memcpy writer bypasses the SEQ_PAR_Set chokepoint
-
-  // Disengage every generator on this track so the restored source isn't
-  // overwritten on the next measure.
-  u8 i;
-  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
-    if( pool[i].in_use && pool[i].track == track )
-      pool[i].engaged = 0;
-  }
-
-  undo_slot.valid = 0;
-  return 0;
+  return (SEQ_CORE_JournalUndo() >= 0) ? 0 : -1;
 }
 
 
-// Drop the one-deep auto-undo snapshot. Called by the disk-load paths
-// (SEQ_PATTERN_Load / SEQ_PATTERN_SnapshotRead): after a load replaces a track's
-// par-buffer from disk, the pre-load snapshot is stale — an UNDO would otherwise
-// clobber the freshly-loaded track with bytes from before the load. BOUNCE
-// deliberately preserves the slot (see the §3 live-safety note above), so it
-// does NOT call this.
+// Drop the undo snapshot. Called by the disk-load paths (SEQ_PATTERN_Load /
+// SEQ_PATTERN_SnapshotRead): after a load replaces a track's state from disk,
+// the pre-load snapshot is stale — an UNDO would otherwise clobber the
+// freshly-loaded track with pre-load bytes. Now invalidates the whole journal
+// (which subsumes the old generator slot). BOUNCE deliberately does NOT call
+// this (§3 live-safety net).
 s32 SEQ_GENERATOR_UndoInvalidate(void)
 {
-  undo_slot.valid = 0;
-  return 0;
+  return SEQ_CORE_JournalInvalidate();
 }
 
 

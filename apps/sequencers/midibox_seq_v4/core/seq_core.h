@@ -562,15 +562,25 @@ extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k);
 // success, negative on error (live track untouched on pre-write failures).
 extern s32 SEQ_CORE_LoadTrackFromSlot(u8 dst_track, u8 src_bank, u8 src_pattern, u8 src_slot_track);
 
-// One-deep track undo — the RECOMBINE keystone (extends the ENGAGE-undo
-// pattern to full track state: geometry, name, CC image 0x00..0x9f, robotize
-// anchors, par/trg sources, play_section). Most recent arm wins; restore is
-// one-shot and bar-aligned. kind: LIVE = victim was live RAM (the pull verb);
-// an SD-slot victim kind is reserved for the push-side arm.
-#define SEQ_CORE_TRACK_UNDO_KIND_LIVE 0
+// Track-grain arm + transactional-rollback restore, routed through the unified
+// action journal below. SnapLive arms `before` for the pull (RECOMBINE) verb;
+// Restore is the pull's one-shot rollback on a mid-bulk SD failure (NOT the
+// user undo — that is SEQ_CORE_JournalUndo).
 extern s32 SEQ_CORE_TrackUndoSnapLive(u8 track);
 extern s32 SEQ_CORE_TrackUndoRestore(void);
-extern s32 SEQ_CORE_TrackUndoInfoGet(u8 *valid, u8 *kind, u8 *track);
+
+// Unified action journal (the one-deep UNDO/REDO net, §10(a2)). One store
+// behind every deliberate track-grain gesture; SELECT+CLEAR toggles undo/redo.
+typedef enum {
+  SEQ_CORE_JRNL_EMPTY = 0,    // nothing to undo or redo
+  SEQ_CORE_JRNL_UNDOABLE,     // a gesture is undoable
+  SEQ_CORE_JRNL_REDOABLE      // an undo is redoable
+} seq_core_journal_state_t;
+extern s32 SEQ_CORE_JournalArm(u8 track);
+extern s32 SEQ_CORE_JournalUndo(void);
+extern s32 SEQ_CORE_JournalRedo(void);
+extern s32 SEQ_CORE_JournalInvalidate(void);
+extern s32 SEQ_CORE_JournalInfoGet(u8 *state, u8 *track);
 
 // Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
 // free region between `_eusrstack` and the current MSP at paint time with a

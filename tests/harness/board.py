@@ -66,6 +66,7 @@ from .sysex import (
     CMD_SESSION_CREATE,
     CMD_TRACK_LOAD,
     CMD_TRACK_UNDO,
+    CMD_TRACK_REDO,
     CMD_TRACK_UNDO_QUERY,
     CMD_DIRTY_QUERY,
     CMD_DIRTY_SET,
@@ -1095,9 +1096,11 @@ class Board:
         return payload[4] == CMD_STATUS_OK
 
     def track_undo(self, timeout: float = 2.0) -> int | None:
-        """One-shot restore of the track undo victim (most recent destructive
-        track-grain verb — e.g. a track_load). Returns the restored track
-        number, or None if no snapshot was armed."""
+        """Unified-journal UNDO (pure undo — leaves the journal REDOABLE so a
+        following track_redo() re-applies). Steps back the most recent
+        deliberate track-grain gesture (pull / utility clear / generator
+        ENGAGE / capture-to-track). Returns the restored track number, or None
+        if nothing was undoable."""
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_TRACK_UNDO, b""))
         payload = self.wait_for_sysex(CMD_TRACK_UNDO, timeout=timeout, since=since)
@@ -1109,10 +1112,27 @@ class Board:
             return None
         return payload[0]
 
-    def track_undo_query(self, timeout: float = 2.0) -> tuple[bool, int, int]:
-        """Non-consuming peek at the track undo slot.
+    def track_redo(self, timeout: float = 2.0) -> int | None:
+        """Unified-journal REDO — re-applies the gesture a track_undo() just
+        stepped back. Returns the redone track number, or None if nothing was
+        redoable."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_REDO, b""))
+        payload = self.wait_for_sysex(CMD_TRACK_REDO, timeout=timeout, since=since)
+        if len(payload) < 3:
+            raise RuntimeError(f"short TRACK_REDO reply: {payload!r}")
+        if payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"TRACK_REDO dispatch status {payload[2]:#04x}")
+        if payload[1] != CMD_STATUS_OK:
+            return None
+        return payload[0]
 
-        Returns (valid, kind, track); kind 0 = live-RAM victim."""
+    def track_undo_query(self, timeout: float = 2.0) -> tuple[bool, int, int]:
+        """Non-consuming peek at the unified action journal.
+
+        Returns (undo_available, journal_state, track) where journal_state is
+        JRNL_EMPTY / JRNL_UNDOABLE / JRNL_REDOABLE (sysex.py) and
+        undo_available == (state == JRNL_UNDOABLE)."""
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_TRACK_UNDO_QUERY, b""))
         payload = self.wait_for_sysex(CMD_TRACK_UNDO_QUERY, timeout=timeout, since=since)

@@ -21,7 +21,7 @@ import time
 import pytest
 
 from harness import Board, Button, CC
-from harness.sysex import RESET_UNMUTE_ALL
+from harness.sysex import RESET_UNMUTE_ALL, JRNL_UNDOABLE, JRNL_REDOABLE
 
 
 SETTLE = 0.15
@@ -162,10 +162,12 @@ def test_track_undo_restores_victim(board):
     assert board.cc_get(6, CC.LENGTH) == LENGTH_T0
     assert board.track_drum_par_get(6, 0, 0) == SEED_T0[0]
 
-    valid, kind, track = board.track_undo_query()
-    assert (valid, kind, track) == (True, 0, 6), (
-        f"after a pull the undo slot must hold a LIVE victim for track 6; "
-        f"got valid={valid} kind={kind} track={track}"
+    # The query's middle field is now the unified journal state (the old `kind`
+    # field is subsumed): a pull leaves the journal UNDOABLE for track 6.
+    valid, state, track = board.track_undo_query()
+    assert (valid, state, track) == (True, JRNL_UNDOABLE, 6), (
+        f"after a pull the journal must be UNDOABLE for track 6; "
+        f"got valid={valid} state={state} track={track}"
     )
 
     assert board.track_undo() == 6, "restore should return the victim's track"
@@ -186,10 +188,18 @@ def test_track_undo_restores_victim(board):
     # Unseeded victim step is 0 again (geometry re-init, not a partial merge).
     assert board.track_drum_par_get(6, 0, 1) == 0
 
-    # One-shot: the slot is consumed.
-    assert board.track_undo() is None, "second undo must report no snapshot"
-    valid, _, _ = board.track_undo_query()
-    assert not valid
+    # Not one-shot anymore: the undo leaves the journal REDOABLE (the
+    # 2026-06-23 net added redo). A second UNDO is a no-op (nothing UNDOABLE),
+    # but a REDO re-applies the pull.
+    assert board.track_undo() is None, "second undo must be a no-op (REDOABLE, not UNDOABLE)"
+    valid, state, _ = board.track_undo_query()
+    assert not valid and state == JRNL_REDOABLE
+    assert board.track_redo() == 6, "REDO must re-apply the pull"
+    time.sleep(SETTLE)
+    assert board.track_drum_par_get(6, 0, 0) == SEED_T0[0], "redo restores the pulled content"
+    # leave it undone so the victim's live GRIP doesn't leak into later suites.
+    assert board.track_undo() == 6
+    time.sleep(SETTLE)
 
     # Don't leak the victim's live GRIP on track 6 into later suites.
     board.cc_set(6, CC.TENSION_GRIP, 0)

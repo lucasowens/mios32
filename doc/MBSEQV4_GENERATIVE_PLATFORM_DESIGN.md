@@ -1111,14 +1111,15 @@ the elf is the worst case), but the system breaks at the two seams where the map
    abandoned on a recall?* This is a decision, not a build, and it gates which freeze cure
    is legal: yes → DRIFT-gated writeback (≈1 line; `phrase_drift` already exists, unused by
    writeback); no → incremental-save (own bundle; re-measure the ~290 ms cost first). **Highest leverage.**
-2. **Make the invisible modes visible** — persistent `sel_view` label; FREEZE shown on the
-   recall row (it silently re-defines *what recall sounds like* AND *how long it freezes*).
-   UI feedback only, ~0 RAM.
-3. **A panic UNDO/REDO net** — there is no physical UNDO button, and REVERT-hold can destroy
-   the live jam with no recovery. Fits, may *free* main RAM by collapsing the 5 one-deeps;
-   extend it to cover the capture-to-slot span (no undo today).
+2. **Make the invisible modes visible** — ~~persistent `sel_view` label; FREEZE on the recall
+   row~~. **DROPPED 2026-06-23** — recon found the `lso` rig already wires the FREEZE (METRONOME)
+   + sel_view select LEDs, so the premise (invisible) is false on the hardware (§9 2026-06-23).
+3. **A panic UNDO/REDO net** — **Stage 2a SHIPPED 2026-06-23** (by-ear GO + HIL 206/206 +
+   adversarial review; §9). One action journal consolidates the bespoke one-deeps + adds REDO,
+   SELECT+CLEAR toggle, covers the live capture grab; freed CCM. *(2b = REVERT-undoable, below.)*
 4. **Fix the hold-polarity reversal** — PHRASE hold = *create*, SELECT+BOOKMARK hold =
-   *destroy*, same 1000 ms. One mis-timed press loses the set.
+   *destroy*, same 1000 ms. One mis-timed press loses the set. **Resolution chosen: make REVERT
+   undoable** (fold into the #3 net, ORGANISM scope) — **Stage 2b, queued for a fresh session.**
 5. **Measure the all-16 live-input render worst case on device** — chord_mask/tension force a
    full re-render every tick; never measured; lands exactly on the GRAVITY/chord sweep.
 6. **Trigger generators — fold into the shared pool** (capability; gated on #1/#3).
@@ -2830,6 +2831,27 @@ dead for the whole capture) while the clock stayed at ~0.001.
   preventive hardening — correct by construction (a per-second task must not block the LCD on a long write),
   verified by HIL 197/197 + by-eye, not a measured before/after (the `ui_gap` probe watches the *regular*
   +2 task, not this one). +0 B/0 RAM (compiles to the same footprint). Committed alongside the main fix.
+
+**2026-06-23 (play-readiness safety net) — unified UNDO/REDO net, Stage 2a SHIPPED (§8 queue #3,
+part of #4).** Built the §10(a2) Tier-1 net: ONE global **action journal** `{state, before, after}`
+(CCM, ~4.7 KB) consolidating the three bespoke one-deeps (`track_undo`, generator `undo_slot`,
+utility buffers) behind `SEQ_CORE_JournalArm/Undo/Redo/Invalidate/InfoGet`, and **the REDO that
+never existed anywhere**. Lazy `after` (snapshot live at undo-time); **symmetric** redo (each
+direction re-snaps, so the one-deep is a reversible 2-way swap — nothing silently lost). Armed by
+all four deliberate track-grain verbs (pull / utility copy-paste-clear / generator first-ENGAGE /
+**capture** — both `CaptureToTrack` and the live `CaptureSpan` grab); wander can't pollute it (only
+deliberate verbs arm). Gesture = **SELECT+CLEAR toggle** (undo↔redo; no UNDO button on midiphy;
+EMPTY never destructively clears). >4-generator arm guard (refuse-leave-EMPTY) mirrors the
+capture-ring overflow cap. **by-ear GO** ("working great, gesture feels good") + **HIL 206/206** +
+a 5-lens adversarial review (22 confirmed findings) that caught 4 real defects the green suite
+missed (the live CaptureSpan gesture wasn't armed; pool-full/re-engage clobbered a valid undo;
+journal was in the wrong RAM region — main not CCM; redo was one-way). **§2 #8 discipline note:**
+HIL-green was NOT sufficient confidence on a 6-file consolidation — the adversarial diff review was
+load-bearing. Full trail + the 3 refuted + accepted-as-documented items in
+`doc/plans/2026-06-23-play-readiness-safety-net.md`. **Phase 1 (visible modes, #2) DROPPED** —
+recon found the `lso` rig already wires the FREEZE + sel_view LEDs (premise false on the hardware).
+**Stage 2b (REVERT-undoable, the rest of #4) + the REFERENCE/MANUAL fold are queued for a fresh
+session.**
 
 ---
 

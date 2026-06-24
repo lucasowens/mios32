@@ -51,6 +51,12 @@ CMD_BANK_CREATE = 0x6e
 CMD_TRACK_LOAD = 0x6f
 CMD_TRACK_UNDO = 0x70
 CMD_TRACK_UNDO_QUERY = 0x71
+CMD_TRACK_REDO = 0x47  # unified journal REDO (undo's partner)
+
+# seq_core_journal_state_t (keep in sync with seq_core.h)
+JRNL_EMPTY = 0
+JRNL_UNDOABLE = 1
+JRNL_REDOABLE = 2
 CMD_SESSION_CREATE = 0x72
 CMD_DIRTY_QUERY = 0x73
 CMD_DIRTY_SET = 0x74

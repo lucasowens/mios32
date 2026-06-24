@@ -1542,29 +1542,37 @@ static s32 SEQ_UI_Button_Clear(s32 depressed)
 
   seq_ui_button_state.CLEAR = depressed ? 0 : 1;
 
-  // SELECT+CLEAR = track undo (RECOMBINE): CLEAR destroys, SELECT+CLEAR
-  // un-destroys — one gesture back from the last pull (bar-aligned restore,
-  // armed by SEQ_CORE_LoadTrackFromSlot). The midiphy panel has no UNDO
-  // button, so this is the pull's performance-surface undo. SELECT+CLEAR
-  // NEVER falls through to a destructive clear — with nothing armed it just
-  // reports, so a slipped SELECT can't cost material.
+  // SELECT+CLEAR = the panic UNDO/REDO toggle (the unified action journal,
+  // §10(a2)): one gesture steps back the last deliberate track-grain verb
+  // (pull / utility copy-paste-clear / generator ENGAGE / capture-to-track),
+  // and pressing it again steps forward (redo). The midiphy panel has no UNDO
+  // button (BUTTON_UNDO unmapped), so this is the performance-surface net.
+  // SELECT+CLEAR NEVER falls through to a destructive clear — with nothing
+  // armed it just reports, so a slipped SELECT can't cost material.
   if( depressed && select_clear_fired ) {
     select_clear_fired = 0;
     return 0; // swallow the release of a SELECT+CLEAR press
   }
   if( !depressed && seq_ui_button_state.SELECT_PRESSED ) {
     select_clear_fired = 1;
-    u8 track_undo_valid = 0;
-    SEQ_CORE_TrackUndoInfoGet(&track_undo_valid, NULL, NULL);
-    if( track_undo_valid ) {
-      s32 t = SEQ_CORE_TrackUndoRestore();
+    u8 jstate = SEQ_CORE_JRNL_EMPTY;
+    SEQ_CORE_JournalInfoGet(&jstate, NULL);
+    if( jstate == SEQ_CORE_JRNL_UNDOABLE ) {
+      s32 t = SEQ_CORE_JournalUndo();
       if( t >= 0 ) {
         char msg[16];
-        sprintf(msg, "pull undone T%d", (int)t + 1);
+        sprintf(msg, "undone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+    } else if( jstate == SEQ_CORE_JRNL_REDOABLE ) {
+      s32 t = SEQ_CORE_JournalRedo();
+      if( t >= 0 ) {
+        char msg[16];
+        sprintf(msg, "redone T%d", (int)t + 1);
         SEQ_UI_Msg_Track(msg);
       }
     } else {
-      SEQ_UI_Msg_Track("no pull to undo");
+      SEQ_UI_Msg_Track("nothing to undo");
     }
     return 1;
   }
@@ -1650,58 +1658,48 @@ static s32 SEQ_UI_Button_Clear(s32 depressed)
 
 static s32 SEQ_UI_Button_Undo(s32 depressed)
 {
-  static seq_ui_page_t prev_page = SEQ_UI_PAGE_NONE;
-  static u8 track_undo_fired = 0;
+  static u8 undo_fired = 0;
 
   seq_ui_button_state.UNDO = depressed ? 0 : 1;
 
-  // Track undo first (RECOMBINE): if a pull armed the track-undo slot, the
-  // UNDO button restores that victim — the "one gesture back" of the pull
-  // (bar-aligned, runs the per-track fan). One-shot: once consumed, UNDO
-  // falls back to the mainline copy/paste undo below. Known arbitration gap
-  // (by-ear watch list): a copy/paste/clear edit made AFTER a pull still
-  // loses to the unconsumed pull victim.
-  if( depressed && track_undo_fired ) {
-    track_undo_fired = 0;
-    return 0; // swallow the release of a track-undo press
-  }
-  if( !depressed ) {
-    u8 track_undo_valid = 0;
-    SEQ_CORE_TrackUndoInfoGet(&track_undo_valid, NULL, NULL);
-    if( track_undo_valid ) {
-      track_undo_fired = 1;
-      s32 t = SEQ_CORE_TrackUndoRestore();
-      if( t >= 0 ) {
-        char msg[16];
-        sprintf(msg, "pull undone T%d", (int)t + 1);
-        SEQ_UI_Msg_Track(msg);
-      }
-      return 1;
-    }
-  }
-
+  // MIXER page keeps its own map undo (a separate subsystem, not the journal).
   if( ui_page == SEQ_UI_PAGE_MIXER ) {
     if( depressed ) return -1;
     SEQ_UI_MIXER_Undo();
     SEQ_UI_Msg_MixerMap("Undo applied");
     return 1;
-  } else {
-    if( !depressed ) {
-      prev_page = ui_page;
-      SEQ_UI_PageSet(SEQ_UI_PAGE_UTIL);
-    }
-
-    s32 status = SEQ_UI_UTIL_UndoButton(depressed);
-
-    if( depressed ) {
-      if( prev_page != SEQ_UI_PAGE_UTIL )
-	SEQ_UI_PageSet(prev_page);
-
-      SEQ_UI_Msg_Track("Undo applied");
-    }
-
-    return status;
   }
+
+  // Everywhere else this is the unified UNDO/REDO toggle — the same panic net
+  // as SELECT+CLEAR. BUTTON_UNDO is unmapped on midiphy; kept here (and routed
+  // through the journal, NOT the one-shot rollback) for rigs that map it.
+  if( depressed && undo_fired ) {
+    undo_fired = 0;
+    return 0; // swallow the release
+  }
+  if( !depressed ) {
+    undo_fired = 1;
+    u8 jstate = SEQ_CORE_JRNL_EMPTY;
+    SEQ_CORE_JournalInfoGet(&jstate, NULL);
+    if( jstate == SEQ_CORE_JRNL_UNDOABLE ) {
+      s32 t = SEQ_CORE_JournalUndo();
+      if( t >= 0 ) {
+        char msg[16];
+        sprintf(msg, "undone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+    } else if( jstate == SEQ_CORE_JRNL_REDOABLE ) {
+      s32 t = SEQ_CORE_JournalRedo();
+      if( t >= 0 ) {
+        char msg[16];
+        sprintf(msg, "redone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+    } else {
+      SEQ_UI_Msg_Track("nothing to undo");
+    }
+  }
+  return 1;
 }
 
 static s32 SEQ_UI_Button_Move(s32 depressed)

@@ -83,6 +83,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_TRACK_LOAD           0x6f
 #define CMD_TRACK_UNDO           0x70
 #define CMD_TRACK_UNDO_QUERY     0x71
+#define CMD_TRACK_REDO           0x47  // unified journal REDO (undo's partner)
 #define CMD_SESSION_CREATE       0x72
 #define CMD_DIRTY_QUERY          0x73
 #define CMD_DIRTY_SET            0x74
@@ -432,7 +433,8 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
     // Generator pool also persists across tests (engaged slots from a prior
     // test would otherwise transcribe loops into the next test's freshly-
     // loaded pattern on the first measure boundary). Re-init wipes pool +
-    // index map + undo + last-seen-step sentinels.
+    // index map + last-seen-step sentinels. (The undo is now the unified
+    // journal, dropped separately below via SEQ_CORE_JournalInvalidate.)
     SEQ_GENERATOR_Init(0);
   }
 
@@ -463,6 +465,10 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
   // normalizes UI state.
   SEQ_UI_GestureStateReset();
   seq_core_state.FREEZE = 0;
+
+  // Drop the unified action journal: a reset is a baseline, and a stale UNDO
+  // armed before it would otherwise restore pre-reset content.
+  SEQ_CORE_JournalInvalidate();
 
   // PHRASES: a harness reset is a baseline — clear session-scoped phrase
   // occupancy so a phrase captured by a prior test can't masquerade as present
@@ -1400,12 +1406,14 @@ static void cmd_track_load(mios32_midi_port_t port, const u8 *payload, u8 plen)
 // CMD_TRACK_UNDO payload: none.
 // Reply: [restored_track (0x7f = none), restored_ok, dispatch_status]
 //
-// One-shot restore of the track undo victim (most recent destructive
-// track-grain verb). RAM only, synchronous.
+// The unified journal UNDO (pure undo — sets the journal REDOABLE so a
+// following CMD_TRACK_REDO can re-apply). RAM only, synchronous. (The
+// SELECT+CLEAR *gesture* composes undo+redo into a toggle; these verbs are the
+// primitives so HIL can drive undo and redo deterministically.)
 static void cmd_track_undo(mios32_midi_port_t port)
 {
   u8 reply[3] = { 0x7f, 0x00, 0x01 };
-  s32 r = SEQ_CORE_TrackUndoRestore();
+  s32 r = SEQ_CORE_JournalUndo();
   if( r >= 0 ) {
     reply[0] = (u8)r & 0x7f;
     reply[1] = 0x01;
@@ -1414,13 +1422,33 @@ static void cmd_track_undo(mios32_midi_port_t port)
 }
 
 
+// CMD_TRACK_REDO payload: none.
+// Reply: [redone_track (0x7f = none), redone_ok, dispatch_status]
+//
+// The unified journal REDO — re-applies the gesture an UNDO just stepped back.
+static void cmd_track_redo(mios32_midi_port_t port)
+{
+  u8 reply[3] = { 0x7f, 0x00, 0x01 };
+  s32 r = SEQ_CORE_JournalRedo();
+  if( r >= 0 ) {
+    reply[0] = (u8)r & 0x7f;
+    reply[1] = 0x01;
+  }
+  send_reply(port, CMD_TRACK_REDO, reply, sizeof(reply));
+}
+
+
 // CMD_TRACK_UNDO_QUERY payload: none.
-// Reply: [valid, kind, track, dispatch_status] — non-consuming state peek.
+// Reply: [undo_available, journal_state, track, dispatch_status] — non-consuming
+// peek. undo_available = (state==UNDOABLE) for back-compat; journal_state is the
+// full seq_core_journal_state_t (0=EMPTY, 1=UNDOABLE, 2=REDOABLE) so HIL can
+// assert wander didn't pollute/invalidate the journal.
 static void cmd_track_undo_query(mios32_midi_port_t port)
 {
-  u8 valid = 0, kind = 0, track = 0;
-  SEQ_CORE_TrackUndoInfoGet(&valid, &kind, &track);
-  u8 reply[4] = { valid, kind, (u8)(track & 0x7f), 0x01 };
+  u8 state = 0, track = 0;
+  SEQ_CORE_JournalInfoGet(&state, &track);
+  u8 undo_available = (state == SEQ_CORE_JRNL_UNDOABLE) ? 1 : 0;
+  u8 reply[4] = { undo_available, state, (u8)(track & 0x7f), 0x01 };
   send_reply(port, CMD_TRACK_UNDO_QUERY, reply, sizeof(reply));
 }
 
@@ -2615,6 +2643,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRACK_UNDO:
             cmd_track_undo(port);
+            break;
+          case CMD_TRACK_REDO:
+            cmd_track_redo(port);
             break;
           case CMD_TRACK_UNDO_QUERY:
             cmd_track_undo_query(port);

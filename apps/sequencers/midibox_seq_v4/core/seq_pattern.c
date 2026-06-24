@@ -233,7 +233,8 @@ char *SEQ_PATTERN_NameGet(u8 group)
 // Marks the track's group dirty. Called from the source-write chokepoints
 // (SEQ_PAR_Set / SEQ_TRG_Set / SEQ_TRG_Set8 / SEQ_CC_Set — the render mirror
 // never passes through them, so per-tick rendering can't false-dirty) and
-// from direct-memcpy writers that bypass them (SEQ_GENERATOR_Undo). Loads
+// from direct-memcpy writers that bypass them (e.g. the pattern-clear trg
+// memset / the paste-clear helpers in seq_ui_util.c). Loads
 // re-clear at the end of SEQ_PATTERN_Load, so load paths that replay CCs
 // through SEQ_CC_Set don't leave a stale flag.
 // IRQ-guarded: the mask is a read-modify-write shared across tasks.

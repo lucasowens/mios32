@@ -48,12 +48,6 @@
 #define MOVE_BUFFER_OLD 1
 
 
-// saves some memory for LPC17 (tmp. check)
-#if defined(MIOS32_FAMILY_LPC17xx)
-# define UNDO_ENABLED 0
-#else
-# define UNDO_ENABLED 1
-#endif
 
 
 typedef enum {
@@ -97,19 +91,10 @@ static u8 copypaste_selected_par_layer;
 static u8 copypaste_selected_trg_layer;
 static u8 copypaste_selected_instrument;
 
-#if UNDO_ENABLED
-static u8 undo_buffer_filled = 0;
-static u8 undo_track = 0;
-static u8 undo_par_layer[SEQ_PAR_MAX_BYTES];
-static u8 undo_trg_layer[SEQ_TRG_MAX_BYTES];
-static u8 undo_cc[128];
-static u8 undo_trk_name[81];
-static u8 undo_par_layers;
-static u16 undo_par_steps;
-static u8 undo_trg_layers;
-static u16 undo_trg_steps;
-static u8 undo_num_instruments;
-#endif
+// The utility copy/paste/clear one-deep undo is now part of the unified action
+// journal (seq_core.c, §10(a2)): the arm sites call SEQ_UI_UTIL_UndoUpdate
+// (-> SEQ_CORE_JournalArm) and GP8 UNDO routes through SEQ_CORE_JournalUndo.
+// The old bespoke par/trg/cc/name buffers are gone (reclaimed main RAM).
 
 static s8 move_enc;
 static u8 move_par_layer[2][16];
@@ -922,73 +907,20 @@ static s32 CLEAR_Track(u8 track, paste_clear_mode_t paste_clear_mode)
 /////////////////////////////////////////////////////////////////////////////
 static s32 UNDO_Track(void)
 {
-#if UNDO_ENABLED
-  // exit if undo buffer not filled
-  if( !undo_buffer_filled )
-    return 0; // no error
-
-  SEQ_CC_Set(undo_track, SEQ_CC_MIDI_EVENT_MODE, undo_cc[SEQ_CC_MIDI_EVENT_MODE]);
-  SEQ_CC_LinkUpdate(undo_track);
-  SEQ_PAR_TrackInit(undo_track, undo_par_steps, undo_par_layers, undo_num_instruments);
-  SEQ_TRG_TrackInit(undo_track, undo_trg_steps, undo_trg_layers, undo_num_instruments);
-
-  // copy layers from buffer
-  memcpy((u8 *)&seq_par_layer_value[undo_track], (u8 *)undo_par_layer, SEQ_PAR_MAX_BYTES);
-  memcpy((u8 *)&seq_trg_layer_value[undo_track], (u8 *)undo_trg_layer, SEQ_TRG_MAX_BYTES);
-  SEQ_CORE_RenderDirtySet(undo_track);
-  SEQ_PATTERN_DirtySetTrack(undo_track); // direct memcpys bypass the Set chokepoints
-
-  // copy track name
-  memcpy((u8 *)seq_core_trk[undo_track].name, (u8 *)undo_trk_name, 81);
-
-  // copy CCs
-  if( seq_core_options.PASTE_CLR_ALL ) {
-    int i;
-
-    for(i=0; i<128; ++i)
-	SEQ_CC_Set(undo_track, i, undo_cc[i]);
-  }
-
-  // cancel sustain if there are no steps played by the track anymore.
-  SEQ_CORE_CancelSustainedNotes(undo_track);
-#endif
-
-  return 0; // no error
+  // GP8 UNDO on the UTIL page. Routed to the unified journal (undo-only here;
+  // the global SELECT+CLEAR toggle owns redo). The full-track restore covers
+  // what the old buffer did (geometry, par/trg, name, CCs, sustain cancel).
+  SEQ_CORE_JournalUndo();
+  return 0; // no error (a no-op when nothing is armed)
 }
 
 /////////////////////////////////////////////////////////////////////////////
-// Updates the UnDo buffer - can also be called from external (e.g. TRKRND)
+// Arms the unified undo journal before a destructive UTIL edit (copy/paste/
+// clear, layer edits). Also called from external pages (e.g. TRKRND).
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_UI_UTIL_UndoUpdate(u8 track)
 {
-  int i;
-
-#if UNDO_ENABLED
-  // store track in special variable, so that we restore to the right one later
-  undo_track = track;
-
-  // copy layers into buffer
-  memcpy((u8 *)undo_par_layer, (u8 *)&seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
-  memcpy((u8 *)undo_trg_layer, (u8 *)&seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
-
-  // copy track name
-  memcpy((u8 *)undo_trk_name, (u8 *)seq_core_trk[undo_track].name, 81);
-
-  // copy CCs
-  for(i=0; i<128; ++i)
-    undo_cc[i] = SEQ_CC_Get(track, i);
-
-  undo_par_layers = SEQ_PAR_NumLayersGet(track);
-  undo_par_steps = SEQ_PAR_NumStepsGet(track);
-  undo_trg_layers = SEQ_TRG_NumLayersGet(track);
-  undo_trg_steps = SEQ_TRG_NumStepsGet(track);
-  undo_num_instruments = SEQ_PAR_NumInstrumentsGet(track);
-
-  // notify that undo buffer is filled
-  undo_buffer_filled = 1;
-#endif
-
-  return 0; // no error
+  return SEQ_CORE_JournalArm(track);
 }
 
 /////////////////////////////////////////////////////////////////////////////

@@ -1852,16 +1852,22 @@ s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_patte
 // copy valid. The dst's generative CC is then reset so it plays the frozen
 // line without re-modulation.
 //
-// No UNDO snapshot yet: the UI trigger for this verb is deferred; when it lands
-// it must snapshot dst before calling here (UNDO is the live safety net). Per
-// the no-smart-default rule, dst is NOT gated on "empty" — the caller's pick is
-// deliberate. Runs in task context; RAM only, no mutex.
+// Arms the unified UNDO net internally (SEQ_CORE_JournalArm(dst) below) — a
+// caller must NOT snapshot dst itself or it double-arms. (Note: the live UI
+// CAPTURE gesture is SEQ_CORE_CaptureSpan, which arms separately; this verb is
+// reached only by the testctrl HIL path today.) Per the no-smart-default rule,
+// dst is NOT gated on "empty" — the caller's pick is deliberate. Runs in task
+// context; RAM only, no mutex.
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 {
   if( src_track >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( src_track == dst_track ) return -2; // in-place is the freeze verb
+
+  // Arm the unified undo net: capture-to-track overwrites dst's live state, so
+  // snapshot it first (this verb had no undo before the 2026-06-23 net).
+  SEQ_CORE_JournalArm(dst_track);
 
   // 1. Inherit src config + geometry onto dst so the layer copy is valid.
   u16 par_steps  = (u16)SEQ_PAR_NumStepsGet(src_track);
@@ -2128,6 +2134,12 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // (a) snapshot live state for a non-destructive borrow
   SEQ_CORE_CaptureSpanSnapshot(src);
 
+  // Arm the unified undo net for the DST track BEFORE PrepDst overwrites it — this
+  // is the live performance-surface CAPTURE gesture (UTILITY-hold grab), the most
+  // destructive live verb. Placed after every refusal return so a refused capture
+  // can't arm a bogus snapshot. (The Snapshot above borrows SRC; this snapshots DST.)
+  SEQ_CORE_JournalArm(dst);
+
   // (b) prepare dst: inherit src config/geometry, K-bar length, start empty (shared
   //     with the while-playing tape path so both stay identical)
   SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr);
@@ -2294,6 +2306,10 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
     u32 oldest_tick = seq_core_cap_tape[seq_core_cap_tape_head].tick;
     if( (s32)(oldest_tick - win_start) > 0 ) { MUTEX_MIDIOUT_GIVE; return -10; }
   }
+
+  // Arm the unified undo net for DST before PrepDst overwrites it — after the
+  // post-mutex eviction refusal (-10) above so a refused tape capture doesn't arm.
+  SEQ_CORE_JournalArm(dst);
 
   // prepare dst (shared with the re-sim path)
   SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr);
@@ -2502,13 +2518,10 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
 
 /////////////////////////////////////////////////////////////////////////////
 // Fork: one-deep track undo — the RECOMBINE keystone (design doc §9
-// 2026-06-11). Snapshot of one track's full persisted state, armed
-// automatically by destructive track-grain verbs before they overwrite the
-// victim. One-deep and global like the generator's ENGAGE undo: the most
-// recent arm wins, restore is one-shot. `kind` distinguishes a live-RAM
-// victim (the pull verb) from a future SD-slot victim (the push-side arm of
-// SEQ_CORE_CaptureToSlotTrack, restore = load-modify-save back to the slot);
-// only LIVE is implemented so far.
+// 2026-06-11). The snapshot buffer shape for one track's full persisted state
+// (geometry, name, CC image 0x00..0x9f, robotize anchors, par/trg sources,
+// play_section, generators). Used by the unified action journal below as both
+// the `before` and `after` snapshots.
 /////////////////////////////////////////////////////////////////////////////
 
 // full persisted CC image: base 0x00..0x7f + ext block range 0x80..0x9f
@@ -2516,7 +2529,6 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
 
 typedef struct {
   u8 valid;
-  u8 kind;          // SEQ_CORE_TRACK_UNDO_KIND_*
   u8 track;
   u8 play_section;  // runtime state, never in the pattern file
   u16 par_steps;
@@ -2536,86 +2548,100 @@ typedef struct {
   seq_generator_t gen[SEQ_GENERATOR_PERSIST_SLOTS];
 } seq_core_track_undo_t;   // ~2.4 KB
 
-static seq_core_track_undo_t CCM_SECTION track_undo;
+// Unified action journal (design §10(a2) / play-readiness safety net,
+// 2026-06-23): ONE global one-deep store behind every deliberate track-grain
+// gesture — pull (RECOMBINE), utility copy/paste/clear, generator ENGAGE,
+// capture-to-track. Replaces the three bespoke one-deeps (this `track_undo`,
+// the generator `undo_slot`, the utility buffers). Holds the pre-gesture state
+// (`before`) and, captured lazily at UNDO time from live, the post-gesture
+// state (`after`) — so one SELECT+CLEAR toggles back and forth (undo -> redo ->
+// undo) with no redo arm to track separately. CCM_SECTION: main SRAM is the
+// scarce, MSP-stack-gated region on this fork (§A5; ~6 KB free) while CCM has
+// ~2x the headroom — and both predecessor stores (track_undo, generator
+// undo_slot) lived in CCM. The journal is task-context RAM-only (never DMA), so
+// CCM is fine. The restore engine is geometry-safe (TrackInit re-applies the
+// snapshot's own geometry) so a stale restore can't tear par/trg; disk-load
+// paths still invalidate the journal via SEQ_CORE_JournalInvalidate so an UNDO
+// can't clobber a freshly-loaded track.
+typedef struct {
+  u8 state;                      // seq_core_journal_state_t
+  seq_core_track_undo_t before;
+  seq_core_track_undo_t after;
+} seq_core_action_journal_t;
+// CCM_SECTION between the (named) type and the variable applies to the variable
+// — the proven idiom (cf. the old `seq_core_track_undo_t CCM_SECTION track_undo`).
+// Placed on an anonymous `struct {}` it binds to the type and is silently ignored.
+static seq_core_action_journal_t CCM_SECTION action_journal;
 
-/////////////////////////////////////////////////////////////////////////////
-// Arm the track undo with dst_track's live state. Called by destructive
-// track-grain verbs immediately before they overwrite the track. RAM only,
-// no mutex; runs in task context.
-/////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CORE_TrackUndoSnapLive(u8 track)
+// Fill `u` with one track's full persisted live state. RAM only, task context.
+static s32 journal_snap(seq_core_track_undo_t *u, u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
 
-  track_undo.valid = 0; // invalidate while the snapshot is in flight
-  track_undo.kind = SEQ_CORE_TRACK_UNDO_KIND_LIVE;
-  track_undo.track = track;
-  track_undo.play_section = seq_core_trk[track].play_section;
-  track_undo.par_steps        = (u16)SEQ_PAR_NumStepsGet(track);
-  track_undo.par_layers       = (u8)SEQ_PAR_NumLayersGet(track);
-  track_undo.par_instruments  = (u8)SEQ_PAR_NumInstrumentsGet(track);
-  track_undo.trg_steps        = (u16)SEQ_TRG_NumStepsGet(track);
-  track_undo.trg_layers       = (u8)SEQ_TRG_NumLayersGet(track);
-  track_undo.trg_instruments  = (u8)SEQ_TRG_NumInstrumentsGet(track);
-  memcpy(track_undo.name, seq_core_trk[track].name, 81);
+  u->valid = 0; // invalidate while the snapshot is in flight
+  u->track = track;
+  u->play_section = seq_core_trk[track].play_section;
+  u->par_steps        = (u16)SEQ_PAR_NumStepsGet(track);
+  u->par_layers       = (u8)SEQ_PAR_NumLayersGet(track);
+  u->par_instruments  = (u8)SEQ_PAR_NumInstrumentsGet(track);
+  u->trg_steps        = (u16)SEQ_TRG_NumStepsGet(track);
+  u->trg_layers       = (u8)SEQ_TRG_NumLayersGet(track);
+  u->trg_instruments  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+  memcpy(u->name, seq_core_trk[track].name, 81);
 
   int i;
   for(i=0; i<TRACK_UNDO_CC_COUNT; ++i) {
     s32 v = SEQ_CC_Get(track, i);
-    track_undo.cc[i] = (v >= 0) ? (u8)v : 0;
+    u->cc[i] = (v >= 0) ? (u8)v : 0;
   }
-  memcpy(track_undo.anchors, seq_cc_trk[track].robotize_bar_anchors, sizeof(track_undo.anchors));
-  memcpy(track_undo.par, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
-  memcpy(track_undo.trg, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
-  track_undo.gen_count = SEQ_GENERATOR_TrackSnapshot(track, track_undo.gen, SEQ_GENERATOR_PERSIST_SLOTS);
+  memcpy(u->anchors, seq_cc_trk[track].robotize_bar_anchors, sizeof(u->anchors));
+  memcpy(u->par, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
+  memcpy(u->trg, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+  u->gen_count = SEQ_GENERATOR_TrackSnapshot(track, u->gen, SEQ_GENERATOR_PERSIST_SLOTS);
 
-  track_undo.valid = 1;
+  u->valid = 1;
   return 0;
 }
 
-/////////////////////////////////////////////////////////////////////////////
-// Restore the track undo victim — one gesture back from a destructive
-// track-grain verb. One-shot (consumes the snapshot). Mirrors the TrackRead
-// write path: CC replay through SEQ_CC_Set (which re-syncs the processor
-// slots), TrackInit with the victim geometry, bulk par/trg, name/anchors/
-// play_section. The restore is itself a live gesture: sustain cancelled,
-// bar-aligned drop. Returns the restored track (>=0), -1 if no snapshot.
-/////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CORE_TrackUndoRestore(void)
+// Restore one track from `u`. Mirrors the TrackRead write path: CC replay
+// through SEQ_CC_Set (re-syncs processor slots), TrackInit with the snapshot
+// geometry, bulk par/trg, name/anchors/play_section, generator restore. The
+// restore is itself a live gesture: sustain cancelled, bar-aligned drop. Does
+// NOT touch journal.state (the caller owns the undo/redo state machine).
+// Returns the restored track (>=0), -1 if the buffer is empty.
+static s32 journal_restore(const seq_core_track_undo_t *u)
 {
-  if( !track_undo.valid )
+  if( !u->valid )
     return -1;
 
-  u8 track = track_undo.track;
-  track_undo.valid = 0; // one-shot
+  u8 track = u->track;
 
   // RAM-only write phase under tick exclusion (fast — no SD I/O): a tick
   // between the CC replay and the bulk memcpys would render/emit torn state.
   portENTER_CRITICAL();
 
-  memcpy(seq_core_trk[track].name, track_undo.name, 81);
+  memcpy(seq_core_trk[track].name, u->name, 81);
 
   int i;
   for(i=0; i<TRACK_UNDO_CC_COUNT; ++i)
-    SEQ_CC_Set(track, i, track_undo.cc[i]);
+    SEQ_CC_Set(track, i, u->cc[i]);
 
-  SEQ_PAR_TrackInit(track, track_undo.par_steps, track_undo.par_layers, track_undo.par_instruments);
-  memcpy(seq_par_layer_value[track], track_undo.par, SEQ_PAR_MAX_BYTES);
+  SEQ_PAR_TrackInit(track, u->par_steps, u->par_layers, u->par_instruments);
+  memcpy(seq_par_layer_value[track], u->par, SEQ_PAR_MAX_BYTES);
 
-  SEQ_TRG_TrackInit(track, track_undo.trg_steps, track_undo.trg_layers, track_undo.trg_instruments);
-  memcpy(seq_trg_layer_value[track], track_undo.trg, SEQ_TRG_MAX_BYTES);
+  SEQ_TRG_TrackInit(track, u->trg_steps, u->trg_layers, u->trg_instruments);
+  memcpy(seq_trg_layer_value[track], u->trg, SEQ_TRG_MAX_BYTES);
 
-  memcpy(seq_cc_trk[track].robotize_bar_anchors, track_undo.anchors, sizeof(track_undo.anchors));
-  seq_core_trk[track].play_section = track_undo.play_section;
+  memcpy(seq_cc_trk[track].robotize_bar_anchors, u->anchors, sizeof(u->anchors));
+  seq_core_trk[track].play_section = u->play_section;
 
   SEQ_CORE_RenderDirtySet(track);
   SEQ_CC_LinkUpdate(track);
 
-  // Stage B: put the victim's organisms back (and kill whatever the
-  // destructive verb seeded — e.g. the pulled track's generator). After
-  // TrackInit/LinkUpdate so the par-layer validation sees the restored
-  // geometry.
-  SEQ_GENERATOR_TrackRestore(track, track_undo.gen, track_undo.gen_count);
+  // Put the snapshot's generators back (and kill whatever a destructive verb
+  // seeded). After TrackInit/LinkUpdate so the par-layer validation sees the
+  // restored geometry.
+  SEQ_GENERATOR_TrackRestore(track, u->gen, u->gen_count);
 
   portEXIT_CRITICAL();
 
@@ -2625,10 +2651,10 @@ s32 SEQ_CORE_TrackUndoRestore(void)
   seq_render_dirty[track] = 1;
   SEQ_CORE_RenderTrack(track);
 
-  // The restore is itself a track-grain load — mirror the pull verb's
-  // external fan rows, or the rig stays on the PULLED track's program/bank
-  // and the latches still describe the pulled track's layer assignments.
-  // (The UNMUTE row stays out: an undo must not change mute state.)
+  // The restore is itself a track-grain load — mirror the pull verb's external
+  // fan rows, or the rig stays on the prior track's program/bank and the
+  // latches still describe the prior layer assignments. (UNMUTE stays out: an
+  // undo must not change mute state.)
   SEQ_CORE_CancelSustainedNotes(track);
 
   if( !seq_core_options.PATTERN_CHANGE_DONT_RESET_LATCHED_PC )
@@ -2640,22 +2666,130 @@ s32 SEQ_CORE_TrackUndoRestore(void)
 
   SEQ_CORE_ManualSynchToMeasure(1 << track);
 
-  // an UNDO restored this track's CCs out-of-band -> stale any morph armed on its
-  // group (same stale-A class as the pull/switch it usually reverts).
+  // a restore wrote this track's CCs out-of-band -> stale any morph armed on
+  // its group (same stale-A class as the pull/switch it usually reverts).
   SEQ_PATTERN_PhraseMorphInvalidateGroup(track / SEQ_CORE_NUM_TRACKS_PER_GROUP);
 
   return track;
 }
 
 /////////////////////////////////////////////////////////////////////////////
-// Track undo state peek (UI LED / harness pin). Any out pointer may be NULL.
+// Action journal — the unified one-deep UNDO/REDO net (§10(a2)).
+//
+// ARM: every deliberate track-grain gesture (pull, utility copy/paste/clear,
+// generator ENGAGE, capture-to-track) calls SEQ_CORE_JournalArm BEFORE it
+// overwrites the track — snapshots `before`, clears the redo arm, state =
+// UNDOABLE. Only deliberate verbs (task context) arm; generator auto-mutate
+// never does, so ambient wander can't pollute the journal.
+//
+// UNDO: snapshot `after` <- live (so REDO can re-apply the gesture's result),
+// restore `before`, state = REDOABLE.
+// REDO: snapshot `before` <- live (so UNDO can step back a REDO that clobbered
+// work done after the undo), restore `after`, state = UNDOABLE.
+//
+// SYMMETRIC 2-way swap: each direction captures live before restoring, so the
+// one-deep toggle never silently loses work — a REDO over hand-edits made after
+// an UNDO is itself undoable. A fresh ARM overwrites `before` and re-arms.
+// RAM only, no mutex; runs in task context (same contract as the old undo).
 /////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CORE_TrackUndoInfoGet(u8 *valid, u8 *kind, u8 *track)
+s32 SEQ_CORE_JournalArm(u8 track)
 {
-  if( valid ) *valid = track_undo.valid;
-  if( kind )  *kind  = track_undo.kind;
-  if( track ) *track = track_undo.track;
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  // The snapshot caps generators at SEQ_GENERATOR_PERSIST_SLOTS (the same cap
+  // every persistence boundary uses — bank save, capture frame, pull). If the
+  // track carries MORE engaged generators than that, a restore would silently
+  // delete the overflow, so refuse to arm (leave the journal EMPTY: no undo
+  // offered) rather than offer a destructive one. Mirrors the capture-ring
+  // overflow guard. TrackEngagedCount uses the same predicate TrackSnapshot
+  // copies with, so this detects truncation exactly.
+  if( SEQ_GENERATOR_TrackEngagedCount(track) > SEQ_GENERATOR_PERSIST_SLOTS ) {
+    SEQ_CORE_JournalInvalidate();
+    return -2;
+  }
+
+  s32 r = journal_snap(&action_journal.before, track);
+  if( r < 0 ) {
+    SEQ_CORE_JournalInvalidate();
+    return r;
+  }
+  action_journal.after.valid = 0;        // a new gesture clears the redo arm
+  action_journal.state = SEQ_CORE_JRNL_UNDOABLE;
   return 0;
+}
+
+s32 SEQ_CORE_JournalUndo(void)
+{
+  if( action_journal.state != SEQ_CORE_JRNL_UNDOABLE || !action_journal.before.valid )
+    return -1;
+
+  // capture the post-gesture (live) state so REDO can re-apply it
+  journal_snap(&action_journal.after, action_journal.before.track);
+
+  s32 r = journal_restore(&action_journal.before);
+  if( r < 0 ) return r;
+
+  action_journal.state = SEQ_CORE_JRNL_REDOABLE;
+  return r;
+}
+
+s32 SEQ_CORE_JournalRedo(void)
+{
+  if( action_journal.state != SEQ_CORE_JRNL_REDOABLE || !action_journal.after.valid )
+    return -1;
+
+  // Symmetric with UNDO: re-capture live into `before` first, so any work done
+  // on the track between the undo and this redo is preserved and a following
+  // UNDO steps back to it (the toggle is a true reversible 2-way swap, never a
+  // silent clobber). before.track == after.track, so this re-snaps the same track.
+  journal_snap(&action_journal.before, action_journal.after.track);
+
+  s32 r = journal_restore(&action_journal.after);
+  if( r < 0 ) return r;
+
+  action_journal.state = SEQ_CORE_JRNL_UNDOABLE;
+  return r;
+}
+
+// Drop the journal. Called by disk-load paths so an UNDO can't clobber a
+// freshly-loaded track with pre-load bytes (the generator undo had the same
+// guard; the journal subsumes it).
+s32 SEQ_CORE_JournalInvalidate(void)
+{
+  action_journal.state = SEQ_CORE_JRNL_EMPTY;
+  action_journal.before.valid = 0;
+  action_journal.after.valid = 0;
+  return 0;
+}
+
+// State peek (UI gesture / harness pin). Any out pointer may be NULL.
+s32 SEQ_CORE_JournalInfoGet(u8 *state, u8 *track)
+{
+  if( state ) *state = action_journal.state;
+  if( track ) *track = action_journal.before.track;
+  return 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Backward-compat wrappers — the deliberate verbs and the pull's transactional
+// rollback keep their names; they route through the unified journal.
+/////////////////////////////////////////////////////////////////////////////
+
+// Arm site for the destructive track-grain verbs (pull etc.).
+s32 SEQ_CORE_TrackUndoSnapLive(u8 track)
+{
+  return SEQ_CORE_JournalArm(track);
+}
+
+// One-shot consume: restore `before` and EMPTY the journal (no redo). This is
+// the pull verb's transactional rollback on a mid-bulk SD failure — a failed
+// pull must NOT leave a "redo the failed pull" arm. The user-facing undo goes
+// through SEQ_CORE_JournalUndo (which arms redo).
+s32 SEQ_CORE_TrackUndoRestore(void)
+{
+  s32 r = journal_restore(&action_journal.before);
+  SEQ_CORE_JournalInvalidate();
+  return r;
 }
 
 

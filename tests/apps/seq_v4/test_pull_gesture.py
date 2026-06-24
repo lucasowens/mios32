@@ -18,7 +18,7 @@ import time
 import pytest
 
 from harness import Board, Button, CC
-from harness.sysex import RESET_UNMUTE_ALL
+from harness.sysex import RESET_UNMUTE_ALL, JRNL_UNDOABLE, JRNL_REDOABLE
 
 
 SETTLE = 0.15
@@ -89,9 +89,10 @@ def test_pull_gesture_cross_column(board):
             f"track 6 step {step}: expected section-1 byte {note}, got {v}"
         )
 
-    valid, kind, track = board.track_undo_query()
-    assert (valid, kind, track) == (True, 0, 6), (
-        "the gesture commit must arm the track undo for the held track"
+    # Middle field is now the unified journal state (UNDOABLE after a pull).
+    valid, state, track = board.track_undo_query()
+    assert (valid, state, track) == (True, JRNL_UNDOABLE, 6), (
+        "the gesture commit must arm the journal (UNDOABLE) for the held track"
     )
     # Stock release-select fired: the cursor followed the transfusion target.
     assert board.ui_track_get() == 6, (
@@ -146,20 +147,24 @@ def test_pull_gesture_select_clear_undo(board):
         board.button(Button.SELECT, depressed=True)
     time.sleep(SETTLE)
     assert board.track_drum_par_get(6, 0, 0) == 96, (
-        "SELECT+CLEAR must restore the pull victim"
+        "SELECT+CLEAR must restore the pull victim (undo)"
     )
-    valid, _, _ = board.track_undo_query()
-    assert not valid, "the gesture restore must consume the track-undo slot"
+    # The unified journal makes SELECT+CLEAR a TOGGLE: undo leaves it REDOABLE,
+    # not consumed (the 2026-06-23 net added the missing redo).
+    valid, state, _ = board.track_undo_query()
+    assert not valid, "after the undo the slot is no longer UNDOABLE"
+    assert state == JRNL_REDOABLE, "undo must leave the gesture REDOABLE"
 
-    # With the slot consumed, SELECT+CLEAR must be harmless (no clear!).
+    # Press again: SELECT+CLEAR now REDOES the pull (re-applies the victim's
+    # replacement). It NEVER falls through to a destructive clear.
     board.button(Button.SELECT, depressed=False)
     try:
         board.press(Button.CLEAR)
     finally:
         board.button(Button.SELECT, depressed=True)
     time.sleep(SETTLE)
-    assert board.track_drum_par_get(6, 0, 0) == 96, (
-        "SELECT+CLEAR with nothing armed must never clear the track"
+    assert board.track_drum_par_get(6, 0, 0) == SEED_T1[0], (
+        "second SELECT+CLEAR must REDO the pull (and never clear the track)"
     )
 
 
