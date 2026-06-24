@@ -624,8 +624,14 @@ void SEQ_TASK_Period1S(void)
       return;
   }
 
-  // check if SD Card connected
-  MUTEX_SDCARD_TAKE;
+  // check if SD Card connected.
+  // NON-BLOCKING take: this low-priority per-second task holds MUTEX_SDCARD across the SD
+  // health check + any pending format/backup/save-all. A blocking take would park the
+  // low-prio task — and thus the LCD — behind a long SD write (e.g. a phrase capture that
+  // holds the mutex for ~1 s). If the card is busy, skip this second and retry next second:
+  // the check is periodic and the format/backup/save-all request flags are sticky.
+  if( !MUTEX_SDCARD_TRYTAKE )
+    return;
 
   s32 status = FILE_CheckSDCard();
 

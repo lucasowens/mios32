@@ -37,15 +37,21 @@ extern "C" {
 #endif
 
 // this mutex should be used by all tasks which are accessing the SD Card
+// MUTEX_SDCARD_TRYTAKE: non-blocking acquire, evaluates to non-zero if the mutex was taken
+// (must still be released with MUTEX_SDCARD_GIVE). Use it from low-priority periodic tasks
+// that must NOT block behind a long SD write (e.g. a phrase capture) — skip the work and
+// retry next time instead of parking on the mutex.
 #ifdef MIOS32_FAMILY_EMULATION
   extern void TASKS_SDCardSemaphoreTake(void);
   extern void TASKS_SDCardSemaphoreGive(void);
 # define MUTEX_SDCARD_TAKE { TASKS_SDCardSemaphoreTake(); }
 # define MUTEX_SDCARD_GIVE { TASKS_SDCardSemaphoreGive(); }
+# define MUTEX_SDCARD_TRYTAKE ( TASKS_SDCardSemaphoreTake(), 1 )
 #else
   extern xSemaphoreHandle xSDCardSemaphore;
 # define MUTEX_SDCARD_TAKE { while( xSemaphoreTakeRecursive(xSDCardSemaphore, (portTickType)1) != pdTRUE ); }
 # define MUTEX_SDCARD_GIVE { xSemaphoreGiveRecursive(xSDCardSemaphore); }
+# define MUTEX_SDCARD_TRYTAKE ( xSemaphoreTakeRecursive(xSDCardSemaphore, (portTickType)0) == pdTRUE )
 #endif
 
 

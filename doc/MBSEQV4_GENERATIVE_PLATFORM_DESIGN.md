@@ -2822,10 +2822,14 @@ dead for the whole capture) while the clock stayed at ~0.001.
   `mios32_config.h`, mirroring the existing `MIOS32_SDCARD_MUTEX_TAKE`/`SUSPEND_HOOK` idiom. +104 B text,
   ~0 RAM. Full HIL **197/197** (many pins do real SD I/O — the regression net for the shared edit); new
   permanent pin `test_capture_while_playing_keeps_control_surface_live` (ui_freeze ≤ 0.30).
-- **Known residual (small, not built):** the LCD is driven by the *low-prio* +2 task, which once per second
-  runs `SEQ_TASK_Period1S` → `FILE_CheckSDCard` under `MUTEX_SDCARD`; if that lands mid-capture it can still
-  briefly block the LCD specifically (the `ui_gap` probe is on the *regular* +2 task and shows ~1 %). Cure
-  if ever wanted: a non-blocking try-take so the per-second SD check skips a busy card. Deferred.
+- **LCD residual — HARDENED (follow-on, same session).** The LCD is driven by the *low-prio* +2 task,
+  which once per second runs `SEQ_TASK_Period1S` → `FILE_CheckSDCard` under `MUTEX_SDCARD`; a blocking take
+  there parks that task (and the LCD) behind a ~1 s capture. Fixed with a non-blocking `MUTEX_SDCARD_TRYTAKE`
+  (new macro in `tasks.h`): if the card is busy the per-second housekeeping skips this second and retries
+  next (the check is periodic; the format/backup/save-all request flags are sticky → nothing lost). This is
+  preventive hardening — correct by construction (a per-second task must not block the LCD on a long write),
+  verified by HIL 197/197 + by-eye, not a measured before/after (the `ui_gap` probe watches the *regular*
+  +2 task, not this one). +0 B/0 RAM (compiles to the same footprint). Committed alongside the main fix.
 
 ---
 
