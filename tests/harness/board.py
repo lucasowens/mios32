@@ -1453,9 +1453,13 @@ class Board:
           - ok:          capture succeeded
           - running:     transport was running at probe time (gap is meaningless if not)
           - wall_ticks:  bpm_tick advance across the capture = capture duration in ISR ticks
-          - max_gap:     peak emission-task service gap during the capture, in ISR ticks
+          - max_gap:     peak emission-task (+4) service gap during the capture, in ISR ticks
           - freeze_fraction: max_gap / wall_ticks — ~1.0 = clock dead the whole capture,
-                             ~0.0 = clock stayed alive. The metric the fix must drive down.
+                             ~0.0 = clock stayed alive. The metric the clock-fix must drive down.
+          - ui_gap:      peak UI-task (+2) service gap during the capture, in ISR ticks (the
+                         control-surface hang: LEDs/LCD/buttons). 0 from pre-17B firmware.
+          - ui_freeze_fraction: ui_gap / wall_ticks — ~1.0 = surface dead the whole capture,
+                             ~0.0 = surface stayed live. The metric the SD-poll-yield drives down.
         Generous timeout: the lazy file-create + 4 SD writes can take >1s on current fw."""
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_CAPTURE_PERF, bytes([n & 0x7f])))
@@ -1466,12 +1470,18 @@ class Board:
             raise RuntimeError(f"CAPTURE_PERF status {payload[0]:#04x}: {payload!r}")
         wall = payload[2] | (payload[3] << 7) | (payload[4] << 14) | (payload[5] << 21) | (payload[6] << 28)
         gap = payload[7] | (payload[8] << 7) | (payload[9] << 14) | (payload[10] << 21) | (payload[11] << 28)
+        # ui_gap is a 17-byte-reply addition; older firmware omits it (reads as 0 = unknown).
+        ui_gap = 0
+        if len(payload) >= 17:
+            ui_gap = payload[12] | (payload[13] << 7) | (payload[14] << 14) | (payload[15] << 21) | (payload[16] << 28)
         return {
             "ok": payload[0] == CMD_STATUS_OK,
             "running": bool(payload[1]),
             "wall_ticks": wall,
             "max_gap": gap,
             "freeze_fraction": (gap / wall) if wall else 0.0,
+            "ui_gap": ui_gap,
+            "ui_freeze_fraction": (ui_gap / wall) if wall else 0.0,
         }
 
     def capture_ring_query(self, timeout: float = 1.0) -> dict:

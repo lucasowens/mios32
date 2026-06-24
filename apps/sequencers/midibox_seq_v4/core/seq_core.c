@@ -503,6 +503,13 @@ static u32 bpm_tick_prefetched;
 static u32 seq_core_service_last_tick;  // bpm_tick at the last SEQ_CORE_Handler entry
 static u32 seq_core_service_max_gap;    // peak inter-service gap (ISR ticks) since reset
 
+// Same probe, but for the +2 UI task (SEQ_TASK_Period1mS — LED/LCD/button scan). The
+// +4 emission task preempts a +3 SD write so the audible clock survives; the +2 UI task
+// is BELOW the writer and gets fully starved during a write (the ~640 ms control-surface
+// hang). This pair measures that starvation the same way: peak gap between UI-task runs.
+static u32 seq_core_ui_service_last_tick; // bpm_tick at the last SEQ_TASK_Period1mS entry
+static u32 seq_core_ui_service_max_gap;   // peak inter-service gap (ISR ticks) since reset
+
 static float seq_core_bpm_target;
 static float seq_core_bpm_sweep_inc;
 
@@ -3005,6 +3012,32 @@ u32 SEQ_CORE_ServiceMaxGapGet(void)
 {
   u32 pending = SEQ_BPM_TickGet() - seq_core_service_last_tick;
   return (pending > seq_core_service_max_gap) ? pending : seq_core_service_max_gap;
+}
+
+// +2 UI-task starvation probe (control-surface hang during SD writes). Same shape as the
+// emission pair above; the mark runs at the top of SEQ_TASK_Period1mS (app.c).
+void SEQ_CORE_UIServiceGapReset(void)
+{
+  seq_core_ui_service_last_tick = SEQ_BPM_TickGet();
+  seq_core_ui_service_max_gap = 0;
+}
+
+u32 SEQ_CORE_UIServiceMaxGapGet(void)
+{
+  u32 pending = SEQ_BPM_TickGet() - seq_core_ui_service_last_tick;
+  return (pending > seq_core_ui_service_max_gap) ? pending : seq_core_ui_service_max_gap;
+}
+
+// Record how long the +2 UI task was starved since it last ran. Called at the top of
+// SEQ_TASK_Period1mS. Cheap; the UI task only advances this when it actually gets to run,
+// so during a starving SD write the gap is left open and read back via the pending fold-in.
+void SEQ_CORE_UIServiceGapMark(void)
+{
+  u32 now = SEQ_BPM_TickGet();
+  u32 gap = now - seq_core_ui_service_last_tick;
+  if( gap > seq_core_ui_service_max_gap )
+    seq_core_ui_service_max_gap = gap;
+  seq_core_ui_service_last_tick = now;
 }
 
 

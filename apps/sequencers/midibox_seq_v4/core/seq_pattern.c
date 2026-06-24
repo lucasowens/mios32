@@ -1317,6 +1317,20 @@ s32 SEQ_PATTERN_Handler(void)
   u8 group;
   u8 any_pattern_loaded = 0;
 
+  // Fast path: this runs every 1 mS from the +2 UI task, but only a PENDING switch request
+  // needs the SD mutex + critical section below. Checking the (sticky) request flags WITHOUT
+  // the mutex here keeps the UI task from blocking on MUTEX_SDCARD on every tick — so the
+  // control surface (LEDs/buttons) stays live while a lower-rate SD writer (e.g. a phrase
+  // capture) holds the mutex for ~1 s. This handler is the only place that clears REQ, so a
+  // request set just after the check is simply serviced on the next tick (never lost).
+  {
+    u8 any_req = 0;
+    for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group)
+      if( seq_pattern_req[group].REQ ) { any_req = 1; break; }
+    if( !any_req )
+      return 0; // nothing pending -> don't touch the SD mutex
+  }
+
 #if LED_PERFORMANCE_MEASURING
   MIOS32_BOARD_LED_Set(0x00000001, 1);
 #endif

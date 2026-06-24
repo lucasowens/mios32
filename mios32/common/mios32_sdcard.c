@@ -59,6 +59,23 @@
 #endif
 
 
+// Optional CPU-yield hook for the sector-write completion poll (see MIOS32_SDCARD_SectorWrite).
+// The card programs a sector autonomously (~ms) after we hand off the data; without this the
+// driver busy-spins the CPU polling its busy line. An app that defines MIOS32_SDCARD_WAIT_HOOK
+// (e.g. a scheduler-guarded vTaskDelay) can have the poll yield instead, freeing lower-priority
+// tasks (UI/LEDs) while the write finishes. Undefined by default -> byte-identical busy-wait.
+//   WAIT_POLL_INTERVAL: how often (poll iterations, power of 2) to invoke the hook.
+//   WAIT_MAX_YIELDS:    max hook invocations before a still-busy card is declared stuck. Once
+//                       the poll can sleep, the raw iteration bound is no longer a sane timeout,
+//                       so this is the real fail-fast (e.g. WAIT_MAX_YIELDS x 1ms sleep).
+#ifndef MIOS32_SDCARD_WAIT_POLL_INTERVAL
+#define MIOS32_SDCARD_WAIT_POLL_INTERVAL 256
+#endif
+#ifndef MIOS32_SDCARD_WAIT_MAX_YIELDS
+#define MIOS32_SDCARD_WAIT_MAX_YIELDS 1024
+#endif
+
+
 // SPI prescaler used for fast transfers
 #ifndef MIOS32_SDCARD_SPI_PRESCALER
 #if MIOS32_SYS_CPU_FREQUENCY < 80000000
@@ -440,7 +457,7 @@ s32 MIOS32_SDCARD_SectorRead(u32 sector, u8 *buffer)
 {
   s32 status = 0;
   int i;
-  if (!(CardType & CT_BLOCK)) 
+  if (!(CardType & CT_BLOCK))
 	sector *= 512;
 
   MIOS32_SDCARD_MUTEX_TAKE;
@@ -553,10 +570,29 @@ s32 MIOS32_SDCARD_SectorWrite(u32 sector, u8 *buffer)
   }
 
   // wait for write completion
+  // The card programs the sector autonomously after the data hand-off; this loop polls its
+  // busy line (returns 0x00 while busy). By default it busy-spins (and any app without the
+  // hook sees byte-identical behavior). If MIOS32_SDCARD_WAIT_HOOK is defined, we invoke it
+  // every WAIT_POLL_INTERVAL polls so a FreeRTOS app can yield the CPU to lower-priority
+  // tasks (UI/LEDs) while the card finishes — polling while asleep doesn't slow the write,
+  // it just frees the core. A separate yield budget fails a genuinely stuck card fast (once
+  // the poll can sleep, the i<32*65536 spin bound would be a multi-second wall-clock timeout).
+#ifdef MIOS32_SDCARD_WAIT_HOOK
+  u32 wait_yields = 0;
+#endif
   for(i=0; i<32*65536; ++i) { // TODO: check if sufficient
     u8 ret = MIOS32_SPI_TransferByte(MIOS32_SDCARD_SPI, 0xff);
     if( ret != 0x00 )
       break;
+#ifdef MIOS32_SDCARD_WAIT_HOOK
+    if( (i & (MIOS32_SDCARD_WAIT_POLL_INTERVAL-1)) == (MIOS32_SDCARD_WAIT_POLL_INTERVAL-1) ) {
+      MIOS32_SDCARD_WAIT_HOOK();
+      if( ++wait_yields >= MIOS32_SDCARD_WAIT_MAX_YIELDS ) {
+	status= -258; // card still busy after the yield budget -> treat as stuck
+	goto error;
+      }
+    }
+#endif
   }
   if( i == 32*65536 ) {
 

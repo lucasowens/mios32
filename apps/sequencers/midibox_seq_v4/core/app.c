@@ -518,6 +518,11 @@ void APP_AIN_NotifyChange(u32 pin, u32 pin_value)
 /////////////////////////////////////////////////////////////////////////////
 void SEQ_TASK_Period1mS(void)
 {
+  // perf probe: record how long this +2 UI task was starved since it last ran. A +3 SD
+  // write hangs the control surface (LEDs/LCD/buttons) here while the +4 emission task
+  // keeps the music playing — CMD_CAPTURE_PERF reads this back. Cheap; runs every service.
+  SEQ_CORE_UIServiceGapMark();
+
 #if MEASURE_IDLE_CTR == 0
   // pattern switching if not in sync mode
   if( !seq_core_options.SYNCHED_PATTERN_CHANGE || SEQ_SONG_ActiveGet() ) {

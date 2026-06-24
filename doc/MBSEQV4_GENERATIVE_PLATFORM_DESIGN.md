@@ -2798,6 +2798,35 @@ that one would freeze emission; it isn't the phrase-capture path.)
   to A at full throw, and lean capture is **naming-opt-in** — a bare capture no longer persists a typed
   phrase name).
 
+**2026-06-23 (cont.) — the ~640 ms control-surface hang FIXED; root cause was NOT (only) the SD poll
+(BUILT + by-eye GO + HIL 197/197).** Took the parked polish above and built it diagnostic-first, which
+overturned the predicted fix-path. Built a **+2 UI-task service-gap probe** (mirror of the emission probe:
+`SEQ_CORE_UIServiceGapReset/MaxGapGet/Mark`, marked at the top of `SEQ_TASK_Period1mS`; `CMD_CAPTURE_PERF`
+now also reports `ui_gap`) and confirmed the control-surface starvation: `ui_freeze_fraction = 1.00` (UI
+dead for the whole capture) while the clock stayed at ~0.001.
+- **The poll-yield alone did NOT work** (`ui_freeze` 1.00 → 0.989). A driver census (temporary counters)
+  showed the hook fired **1197×** — the CPU *was* being yielded — yet the +2 task still never ran. So the
+  hang is **lock contention, not CPU starvation**: `SEQ_PATTERN_Handler` (the first callee in the +2 UI
+  task, every 1 ms) takes `MUTEX_SDCARD` + a critical section *unconditionally*, just to poll for a pending
+  pattern-switch request. During a capture the +3 task holds `MUTEX_SDCARD` for ~1 s, so the UI marks its
+  gap (first line) then immediately **parks on the mutex** and never reaches the LED/menu/button work.
+- **The fix is two complementary parts** (`ui_freeze` 1.00 → **0.011**): (a) a **lock-free pre-check** in
+  `SEQ_PATTERN_Handler` — scan the (sticky) `seq_pattern_req[].REQ` flags WITHOUT the mutex and return early
+  if none pending (this handler is the only place that clears REQ, so a request set just after is serviced
+  the next tick — never lost), so the UI stops contending for the SD mutex every tick; and (b) the
+  **poll-yield** (`MIOS32_SDCARD_WAIT_HOOK` → scheduler-guarded `vTaskDelay(1)` in `TASKS_SDCardPollYield`,
+  fired every 256 completion-polls with a 1024-yield stuck-card fail-fast), which frees the CPU so the
+  now-unblocked +2 task actually gets to run while the card programs. Neither alone suffices.
+- **Platform-code discipline:** the driver change (`mios32/common/mios32_sdcard.c`) is a new *optional*
+  hook macro defaulting to a no-op — every other MIOS32 app is byte-identical; only SEQ V4 opts in via
+  `mios32_config.h`, mirroring the existing `MIOS32_SDCARD_MUTEX_TAKE`/`SUSPEND_HOOK` idiom. +104 B text,
+  ~0 RAM. Full HIL **197/197** (many pins do real SD I/O — the regression net for the shared edit); new
+  permanent pin `test_capture_while_playing_keeps_control_surface_live` (ui_freeze ≤ 0.30).
+- **Known residual (small, not built):** the LCD is driven by the *low-prio* +2 task, which once per second
+  runs `SEQ_TASK_Period1S` → `FILE_CheckSDCard` under `MUTEX_SDCARD`; if that lands mid-capture it can still
+  briefly block the LCD specifically (the `ui_gap` probe is on the *regular* +2 task and shows ~1 %). Cure
+  if ever wanted: a non-blocking try-take so the per-second SD check skips a busy card. Deferred.
+
 ---
 
 ## 10. Open questions (unresolved forks)

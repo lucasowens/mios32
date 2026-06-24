@@ -590,4 +590,10 @@ extern u32 SEQ_CORE_MSPPaintHi(void);          // absolute address of paint ceil
 extern void SEQ_CORE_ServiceGapReset(void);    // zero the peak, anchor "last service" to now
 extern u32  SEQ_CORE_ServiceMaxGapGet(void);   // peak ISR-tick gap between emission services since reset
 
+// +2 UI-task (SEQ_TASK_Period1mS) starvation probe — the control-surface hang during an
+// SD write. Same shape as the emission pair; the mark runs at the top of the UI task.
+extern void SEQ_CORE_UIServiceGapReset(void);  // zero the peak, anchor "last UI service" to now
+extern u32  SEQ_CORE_UIServiceMaxGapGet(void); // peak ISR-tick gap between UI-task services since reset
+extern void SEQ_CORE_UIServiceGapMark(void);   // call at the top of SEQ_TASK_Period1mS each run
+
 #endif /* _SEQ_CORE_H */

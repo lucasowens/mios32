@@ -260,4 +260,11 @@ extern void TASKS_J16SemaphoreGive(void);
 #define MIOS32_ENC28J60_MUTEX_TAKE { TASKS_J16SemaphoreTake(); }
 #define MIOS32_ENC28J60_MUTEX_GIVE { TASKS_J16SemaphoreGive(); }
 
+// Yield the CPU during the SD card sector-write completion poll (mios32_sdcard.c) so the
+// busy-wait doesn't starve the +2 UI task (LEDs/LCD/buttons) for the whole write while the
+// card programs. TASKS_SDCardPollYield() is scheduler-guarded (no-op before the scheduler
+// starts, e.g. boot config-load). Benefits every SD write on this app, not just captures.
+extern void TASKS_SDCardPollYield(void);
+#define MIOS32_SDCARD_WAIT_HOOK() { TASKS_SDCardPollYield(); }
+
 #endif /* _MIOS32_CONFIG_H */

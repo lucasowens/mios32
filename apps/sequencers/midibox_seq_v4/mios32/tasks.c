@@ -195,6 +195,22 @@ void TASKS_J16SemaphoreGive(void)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// CPU-yield hook for the SD card sector-write completion poll (mios32_sdcard.c,
+// via MIOS32_SDCARD_WAIT_HOOK -> see mios32_config.h). Without it the busy-wait
+// spins the CPU while the card programs, starving the lower-priority UI task
+// (LEDs/LCD/buttons) for the whole write. vTaskDelay (a real sleep), NOT taskYIELD:
+// the UI task is BELOW the writer's priority, so only a sleep lets it run; the card
+// programs in parallel so this doesn't slow the write. Guarded to be a no-op before
+// the scheduler starts — SectorWrite also runs during the boot-time config load.
+/////////////////////////////////////////////////////////////////////////////
+void TASKS_SDCardPollYield(void)
+{
+  if( xTaskGetSchedulerState() == taskSCHEDULER_RUNNING )
+    vTaskDelay(1 / portTICK_RATE_MS);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // functions to access MIDI IN/Out Mutex
 // see also mios32_config.h
 /////////////////////////////////////////////////////////////////////////////
