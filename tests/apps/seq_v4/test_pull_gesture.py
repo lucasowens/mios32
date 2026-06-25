@@ -90,7 +90,7 @@ def test_pull_gesture_cross_column(board):
         )
 
     # Middle field is now the unified journal state (UNDOABLE after a pull).
-    valid, state, track = board.track_undo_query()
+    valid, state, track, _ = board.track_undo_query()
     assert (valid, state, track) == (True, JRNL_UNDOABLE, 6), (
         "the gesture commit must arm the journal (UNDOABLE) for the held track"
     )
@@ -151,7 +151,7 @@ def test_pull_gesture_select_clear_undo(board):
     )
     # The unified journal makes SELECT+CLEAR a TOGGLE: undo leaves it REDOABLE,
     # not consumed (the 2026-06-23 net added the missing redo).
-    valid, state, _ = board.track_undo_query()
+    valid, state, _, _ = board.track_undo_query()
     assert not valid, "after the undo the slot is no longer UNDOABLE"
     assert state == JRNL_REDOABLE, "undo must leave the gesture REDOABLE"
 

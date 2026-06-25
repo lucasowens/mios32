@@ -576,11 +576,21 @@ typedef enum {
   SEQ_CORE_JRNL_UNDOABLE,     // a gesture is undoable
   SEQ_CORE_JRNL_REDOABLE      // an undo is redoable
 } seq_core_journal_state_t;
+// What the armed gesture restores (Stage 2b). TRACK = one track via the RAM
+// before/after snapshots (the default for pull/utility/generator/capture).
+// ORGANISM = a whole-organism REVERT — undo/redo re-read the pre-revert jam and
+// the checkpoint from fixed anchor-bank SD slots (SEQ_PATTERN owns those; the
+// journal holds no RAM buffers for this scope, just the state machine).
+typedef enum {
+  SEQ_CORE_JRNL_TRACK = 0,
+  SEQ_CORE_JRNL_ORGANISM
+} seq_core_journal_scope_t;
 extern s32 SEQ_CORE_JournalArm(u8 track);
+extern s32 SEQ_CORE_JournalArmOrganism(void);
 extern s32 SEQ_CORE_JournalUndo(void);
 extern s32 SEQ_CORE_JournalRedo(void);
 extern s32 SEQ_CORE_JournalInvalidate(void);
-extern s32 SEQ_CORE_JournalInfoGet(u8 *state, u8 *track);
+extern s32 SEQ_CORE_JournalInfoGet(u8 *state, u8 *track, u8 *scope);
 
 // Phase D.0 — MSP/handler-stack high-water measurement (§10 gating). Paints the
 // free region between `_eusrstack` and the current MSP at paint time with a

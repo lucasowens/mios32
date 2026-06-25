@@ -438,6 +438,14 @@ s32 SEQ_PATTERN_Checkpoint(void)
 {
   s32 status = SEQ_PATTERN_SnapshotWrite(SEQ_FILE_B_ANCHOR_BANK, 0);
 
+  // A fresh checkpoint sets a new baseline: drop any pending UNDO/REDO. Without
+  // this, an ORGANISM arm left by a prior REVERT would keep pointing at the
+  // anchor slots — and CHECKPOINT just rewrote slot 0 (the REDO target), so a
+  // later REDO would restore the NEW checkpoint, not the reverted state. Only
+  // on a committed write (a failed checkpoint changed nothing).
+  if( status >= 0 )
+    SEQ_CORE_JournalInvalidate();
+
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] CHECKPOINT status %d", SEQ_BPM_TickGet(), status);
 
@@ -611,14 +619,67 @@ static s32 SEQ_PATTERN_SnapshotRead(u8 bank, u8 base_pattern, u8 writeback_dirty
   return status;
 }
 
+// REVERT-undoable (Stage 2b): the live organism is stashed into a pre-revert
+// block in the SAME anchor bank (slots 4..7) before REVERT overwrites live with
+// the checkpoint (slots 0..3), so a mis-fired REVERT is recoverable via the
+// unified UNDO net. 4 is free in the anchor bank (num_patterns=64; CHECKPOINT
+// only writes base 0) and mirrors the phrase 4*n block layout. The anchor file
+// always exists here — REVERT runs only when AnchorPresent — so the write
+// extends slots 0..3 contiguously.
+#define SEQ_PATTERN_PREREVERT_BASE 4
+// The pre-revert block (PREREVERT_BASE..+NUM_GROUPS-1) MUST NOT overlap the
+// checkpoint block (0..NUM_GROUPS-1) — an overlap would make the stash corrupt
+// the very checkpoint it lets you fall back to. 4 == today's NUM_GROUPS; this
+// guard fails the build if the group count ever grows past the gap.
+#if SEQ_PATTERN_PREREVERT_BASE < SEQ_CORE_NUM_GROUPS
+# error "SEQ_PATTERN_PREREVERT_BASE overlaps the checkpoint block — raise it past SEQ_CORE_NUM_GROUPS"
+#endif
+
 s32 SEQ_PATTERN_Revert(void)
 {
+  // Stash live -> the pre-revert block FIRST so a mis-fired REVERT is
+  // recoverable via the unified UNDO net. The ~1 s write (same cost as a
+  // CHECKPOINT) is acceptable for a rare panic gesture; the control surface
+  // stays live across it (2026-06-23 SD-write fix).
+  //
+  // EXCEPT when a REVERT is already the undoable gesture (ORGANISM/UNDOABLE):
+  // live is already the checkpoint (nothing new to lose), and re-stashing would
+  // OVERWRITE the pre-revert jam with the checkpoint — so a double-tap REVERT
+  // would destroy the very state the undo is meant to recover. Skip the write
+  // and keep the existing slot-4 jam undoable (stash stays 0 = success).
+  u8 jstate = 0, jscope = 0;
+  SEQ_CORE_JournalInfoGet(&jstate, NULL, &jscope);
+  s32 stash = ( jscope == SEQ_CORE_JRNL_ORGANISM && jstate == SEQ_CORE_JRNL_UNDOABLE )
+              ? 0
+              : SEQ_PATTERN_SnapshotWrite(SEQ_FILE_B_ANCHOR_BANK, SEQ_PATTERN_PREREVERT_BASE);
+
   s32 status = SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0, 0, 0); // REVERT = immediate hard restore
 
+  // SnapshotRead just invalidated the journal (a whole-organism restore stales
+  // any track undo). Arm the ORGANISM-scope undo whenever the pre-revert jam is
+  // safely stashed — EVEN IF the revert read failed (status < 0): a torn/failed
+  // revert is then still recoverable back to the clean stashed jam via UNDO.
+  if( stash >= 0 )
+    SEQ_CORE_JournalArmOrganism();
+
   if( seq_pattern_log_load_time )
-    DEBUG_MSG("[SEQ_PATTERN:%d] REVERT status %d", SEQ_BPM_TickGet(), status);
+    DEBUG_MSG("[SEQ_PATTERN:%d] REVERT status %d stash %d", SEQ_BPM_TickGet(), status, stash);
 
   return status;
+}
+
+// UNDO of REVERT (ORGANISM scope): restore the pre-revert jam stashed above. The
+// SnapshotRead invalidates the journal as it lands; SEQ_CORE_JournalUndo re-arms
+// it REDOABLE on return.
+s32 SEQ_PATTERN_RevertUndoRead(void)
+{
+  return SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, SEQ_PATTERN_PREREVERT_BASE, 0, 0);
+}
+
+// REDO of REVERT (ORGANISM scope): re-restore the checkpoint (slot 0).
+s32 SEQ_PATTERN_RevertRedoRead(void)
+{
+  return SEQ_PATTERN_SnapshotRead(SEQ_FILE_B_ANCHOR_BANK, 0, 0, 0);
 }
 
 

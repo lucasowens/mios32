@@ -1127,20 +1127,21 @@ class Board:
             return None
         return payload[0]
 
-    def track_undo_query(self, timeout: float = 2.0) -> tuple[bool, int, int]:
+    def track_undo_query(self, timeout: float = 2.0) -> tuple[bool, int, int, int]:
         """Non-consuming peek at the unified action journal.
 
-        Returns (undo_available, journal_state, track) where journal_state is
-        JRNL_EMPTY / JRNL_UNDOABLE / JRNL_REDOABLE (sysex.py) and
-        undo_available == (state == JRNL_UNDOABLE)."""
+        Returns (undo_available, journal_state, track, scope) where
+        journal_state is JRNL_EMPTY / JRNL_UNDOABLE / JRNL_REDOABLE and scope is
+        JRNL_TRACK / JRNL_ORGANISM (sysex.py); undo_available == (state ==
+        JRNL_UNDOABLE). `track` is meaningful only for JRNL_TRACK scope."""
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_TRACK_UNDO_QUERY, b""))
         payload = self.wait_for_sysex(CMD_TRACK_UNDO_QUERY, timeout=timeout, since=since)
-        if len(payload) < 4:
+        if len(payload) < 5:
             raise RuntimeError(f"short TRACK_UNDO_QUERY reply: {payload!r}")
-        if payload[3] != CMD_STATUS_OK:
-            raise RuntimeError(f"TRACK_UNDO_QUERY dispatch status {payload[3]:#04x}")
-        return (payload[0] == 1, payload[1], payload[2])
+        if payload[4] != CMD_STATUS_OK:
+            raise RuntimeError(f"TRACK_UNDO_QUERY dispatch status {payload[4]:#04x}")
+        return (payload[0] == 1, payload[1], payload[2], payload[3])
 
     def dirty_query(self, timeout: float = 2.0) -> tuple[int, int]:
         """FEARLESS SWITCHING diagnostics: returns (dirty_mask, writeback_count).

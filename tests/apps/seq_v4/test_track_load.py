@@ -164,7 +164,7 @@ def test_track_undo_restores_victim(board):
 
     # The query's middle field is now the unified journal state (the old `kind`
     # field is subsumed): a pull leaves the journal UNDOABLE for track 6.
-    valid, state, track = board.track_undo_query()
+    valid, state, track, _ = board.track_undo_query()
     assert (valid, state, track) == (True, JRNL_UNDOABLE, 6), (
         f"after a pull the journal must be UNDOABLE for track 6; "
         f"got valid={valid} state={state} track={track}"
@@ -192,7 +192,7 @@ def test_track_undo_restores_victim(board):
     # 2026-06-23 net added redo). A second UNDO is a no-op (nothing UNDOABLE),
     # but a REDO re-applies the pull.
     assert board.track_undo() is None, "second undo must be a no-op (REDOABLE, not UNDOABLE)"
-    valid, state, _ = board.track_undo_query()
+    valid, state, _, _ = board.track_undo_query()
     assert not valid and state == JRNL_REDOABLE
     assert board.track_redo() == 6, "REDO must re-apply the pull"
     time.sleep(SETTLE)

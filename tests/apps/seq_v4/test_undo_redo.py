@@ -28,6 +28,8 @@ from harness.sysex import (
     JRNL_EMPTY,
     JRNL_UNDOABLE,
     JRNL_REDOABLE,
+    JRNL_TRACK,
+    JRNL_ORGANISM,
     DIAL_DEPTH,
     DIAL_RATE,
     DIAL_RANGE_MAX,
@@ -109,21 +111,21 @@ def test_undo_redo_byte_exact(board):
     assert after != before
 
     # journal armed by the capture
-    undo_available, state, _ = board.track_undo_query()
+    undo_available, state, _, _ = board.track_undo_query()
     assert undo_available and state == JRNL_UNDOABLE
 
     # UNDO -> dst byte-exact pre-capture
     assert board.track_undo() == DST
     time.sleep(SETTLE)
     assert _note_fp(board, DST) == before, "UNDO must restore dst byte-exact"
-    _, state, _ = board.track_undo_query()
+    _, state, _, _ = board.track_undo_query()
     assert state == JRNL_REDOABLE
 
     # REDO -> dst byte-exact post-capture
     assert board.track_redo() == DST
     time.sleep(SETTLE)
     assert _note_fp(board, DST) == after, "REDO must re-apply the capture byte-exact"
-    _, state, _ = board.track_undo_query()
+    _, state, _, _ = board.track_undo_query()
     assert state == JRNL_UNDOABLE
 
     # UNDO again -> back to before (one-deep toggle)
@@ -168,7 +170,7 @@ def test_select_clear_empty_never_clears(board):
     time.sleep(SETTLE)
     fp = _note_fp(board, TRK)
 
-    _, state, _ = board.track_undo_query()
+    _, state, _, _ = board.track_undo_query()
     assert state == JRNL_EMPTY, "reset must leave the journal empty"
 
     _select_clear(board)
@@ -207,7 +209,7 @@ def test_wander_between_undo_and_redo_does_not_pollute(board):
     # Inject wander on WANDER while the DST entry sits REDOABLE.
     for _ in range(8):
         board.generator_tick_force(WANDER, 0)
-    _, state, _ = board.track_undo_query()
+    _, state, _, _ = board.track_undo_query()
     assert state == JRNL_REDOABLE, (
         "ambient generator wander must not pollute/invalidate the journal"
     )
@@ -305,12 +307,12 @@ def test_pattern_load_invalidates_journal(board):
     board.track_drum_init(0)
     _seed_note(board, 1, base=40)
     assert board.capture_to_track(1, 0), "capture should arm the journal"
-    _, state, _ = board.track_undo_query()
+    _, state, _, _ = board.track_undo_query()
     assert state == JRNL_UNDOABLE
 
     board.pattern_load(0, 0, 0)               # raw load of group 0 -> invalidate
     time.sleep(SETTLE)
-    _, state, _ = board.track_undo_query()
+    _, state, _, _ = board.track_undo_query()
     assert state == JRNL_EMPTY, "a pattern load must invalidate the journal"
     assert board.track_undo() is None, "no undo across a load (would clobber loaded bytes)"
 
@@ -326,11 +328,11 @@ def test_cross_gesture_one_deep_clobber(board):
     time.sleep(SETTLE)
 
     assert board.capture_to_track(SRC, A), "first gesture (-> A) commits"
-    _, _, track = board.track_undo_query()
+    _, _, track, _ = board.track_undo_query()
     assert track == A
 
     assert board.capture_to_track(SRC, B), "second gesture (-> B) commits"
-    valid, state, track = board.track_undo_query()
+    valid, state, track, _ = board.track_undo_query()
     assert valid and state == JRNL_UNDOABLE and track == B, (
         "the second gesture must own the one-deep slot"
     )
@@ -382,9 +384,9 @@ def test_capture_span_gesture_is_undoable(board):
     # The live grab (re-sim path, K=1) — overwrites DST.
     assert board.capture_span(SRC, 1, DST) == 0x01, "capture-span (K=1) should commit"
     time.sleep(SETTLE)
-    _, state, track = board.track_undo_query()
-    assert state == JRNL_UNDOABLE and track == DST, (
-        "the live CAPTURE gesture must arm the journal for the dst track"
+    _, state, track, scope = board.track_undo_query()
+    assert state == JRNL_UNDOABLE and track == DST and scope == JRNL_TRACK, (
+        "the live CAPTURE gesture must arm the journal for the dst track (TRACK scope)"
     )
 
     # UNDO restores the pre-capture dst byte-exact (the grab is reversible).

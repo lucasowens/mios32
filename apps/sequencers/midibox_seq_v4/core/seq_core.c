@@ -2565,6 +2565,7 @@ typedef struct {
 // can't clobber a freshly-loaded track.
 typedef struct {
   u8 state;                      // seq_core_journal_state_t
+  u8 scope;                      // seq_core_journal_scope_t (TRACK | ORGANISM)
   seq_core_track_undo_t before;
   seq_core_track_undo_t after;
 } seq_core_action_journal_t;
@@ -2691,6 +2692,14 @@ static s32 journal_restore(const seq_core_track_undo_t *u)
 // one-deep toggle never silently loses work — a REDO over hand-edits made after
 // an UNDO is itself undoable. A fresh ARM overwrites `before` and re-arms.
 // RAM only, no mutex; runs in task context (same contract as the old undo).
+//
+// ORGANISM scope (Stage 2b): REVERT arms via SEQ_CORE_JournalArmOrganism — no
+// RAM snapshot, since the pre-revert jam and the checkpoint live in fixed
+// anchor-bank SD slots that SEQ_PATTERN owns. UNDO/REDO re-read those slots
+// (SEQ_PATTERN_RevertUndoRead / _RevertRedoRead). Those reads go through
+// SnapshotRead, which invalidates the journal as a side effect (a whole-organism
+// restore stales any track undo) — so each organism UNDO/REDO RE-ARMS the journal
+// state afterwards. A fresh TRACK-grain ARM supersedes an organism arm.
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CORE_JournalArm(u8 track)
 {
@@ -2713,14 +2722,42 @@ s32 SEQ_CORE_JournalArm(u8 track)
     SEQ_CORE_JournalInvalidate();
     return r;
   }
+  action_journal.scope = SEQ_CORE_JRNL_TRACK; // a track gesture supersedes any organism arm
   action_journal.after.valid = 0;        // a new gesture clears the redo arm
+  action_journal.state = SEQ_CORE_JRNL_UNDOABLE;
+  return 0;
+}
+
+// Arm the whole-organism (REVERT) undo. No RAM snapshot: the pre-revert jam and
+// the checkpoint live in fixed anchor-bank SD slots, so UNDO/REDO just re-read
+// them. Called by SEQ_PATTERN_Revert AFTER its SnapshotRead has already
+// invalidated any stale track-grain journal. RAM only, task context.
+s32 SEQ_CORE_JournalArmOrganism(void)
+{
+  action_journal.scope = SEQ_CORE_JRNL_ORGANISM;
+  action_journal.before.valid = 0;       // organism scope uses SD slots, not the RAM buffers
+  action_journal.after.valid = 0;
   action_journal.state = SEQ_CORE_JRNL_UNDOABLE;
   return 0;
 }
 
 s32 SEQ_CORE_JournalUndo(void)
 {
-  if( action_journal.state != SEQ_CORE_JRNL_UNDOABLE || !action_journal.before.valid )
+  if( action_journal.state != SEQ_CORE_JRNL_UNDOABLE )
+    return -1;
+
+  if( action_journal.scope == SEQ_CORE_JRNL_ORGANISM ) {
+    // Restore the pre-revert jam. SnapshotRead invalidates the journal on its
+    // way out (it stales any track undo), so re-establish the organism arm as
+    // REDOABLE afterwards — SELECT+CLEAR again re-reverts to the checkpoint.
+    s32 r = SEQ_PATTERN_RevertUndoRead();
+    if( r < 0 ) return r;
+    action_journal.scope = SEQ_CORE_JRNL_ORGANISM;
+    action_journal.state = SEQ_CORE_JRNL_REDOABLE;
+    return r;
+  }
+
+  if( !action_journal.before.valid )
     return -1;
 
   // capture the post-gesture (live) state so REDO can re-apply it
@@ -2735,7 +2772,24 @@ s32 SEQ_CORE_JournalUndo(void)
 
 s32 SEQ_CORE_JournalRedo(void)
 {
-  if( action_journal.state != SEQ_CORE_JRNL_REDOABLE || !action_journal.after.valid )
+  if( action_journal.state != SEQ_CORE_JRNL_REDOABLE )
+    return -1;
+
+  if( action_journal.scope == SEQ_CORE_JRNL_ORGANISM ) {
+    // Re-apply the REVERT: re-read the checkpoint. Like UNDO, SnapshotRead
+    // invalidates the journal, so re-arm UNDOABLE afterwards. (Unlike the TRACK
+    // scope this is a fixed 2-way swap between two SD slots, NOT symmetric
+    // against hand-edits made after an undo — a REDO of REVERT means "revert
+    // again", so discarding the post-undo live state is the gesture's intent. A
+    // fresh deliberate track gesture re-arms a TRACK-grain undo instead.)
+    s32 r = SEQ_PATTERN_RevertRedoRead();
+    if( r < 0 ) return r;
+    action_journal.scope = SEQ_CORE_JRNL_ORGANISM;
+    action_journal.state = SEQ_CORE_JRNL_UNDOABLE;
+    return r;
+  }
+
+  if( !action_journal.after.valid )
     return -1;
 
   // Symmetric with UNDO: re-capture live into `before` first, so any work done
@@ -2757,16 +2811,19 @@ s32 SEQ_CORE_JournalRedo(void)
 s32 SEQ_CORE_JournalInvalidate(void)
 {
   action_journal.state = SEQ_CORE_JRNL_EMPTY;
+  action_journal.scope = SEQ_CORE_JRNL_TRACK;
   action_journal.before.valid = 0;
   action_journal.after.valid = 0;
   return 0;
 }
 
-// State peek (UI gesture / harness pin). Any out pointer may be NULL.
-s32 SEQ_CORE_JournalInfoGet(u8 *state, u8 *track)
+// State peek (UI gesture / harness pin). Any out pointer may be NULL. `track` is
+// meaningful only for TRACK scope (organism leaves before.valid = 0).
+s32 SEQ_CORE_JournalInfoGet(u8 *state, u8 *track, u8 *scope)
 {
   if( state ) *state = action_journal.state;
   if( track ) *track = action_journal.before.track;
+  if( scope ) *scope = action_journal.scope;
   return 0;
 }
 

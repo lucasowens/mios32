@@ -67,6 +67,14 @@ extern s32 SEQ_PATTERN_AnchorPresent(void);
 extern s32 SEQ_PATTERN_Checkpoint(void);
 extern s32 SEQ_PATTERN_Revert(void);
 
+// REVERT-undoable (Stage 2b): the unified journal's ORGANISM scope drives these.
+// SEQ_PATTERN_Revert stashes the live jam into a pre-revert anchor-bank slot
+// before restoring the checkpoint; RevertUndoRead restores that stashed jam,
+// RevertRedoRead re-restores the checkpoint. Both go through SnapshotRead (which
+// invalidates the journal — SEQ_CORE re-arms its state afterwards).
+extern s32 SEQ_PATTERN_RevertUndoRead(void);
+extern s32 SEQ_PATTERN_RevertRedoRead(void);
+
 // PHRASES — the snapshot library (capture/recall generalize CHECKPOINT/REVERT)
 extern s32 SEQ_PATTERN_PhraseCapture(u8 n);
 extern s32 SEQ_PATTERN_PhraseRecall(u8 n);

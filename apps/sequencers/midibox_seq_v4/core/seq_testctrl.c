@@ -1439,16 +1439,18 @@ static void cmd_track_redo(mios32_midi_port_t port)
 
 
 // CMD_TRACK_UNDO_QUERY payload: none.
-// Reply: [undo_available, journal_state, track, dispatch_status] — non-consuming
-// peek. undo_available = (state==UNDOABLE) for back-compat; journal_state is the
-// full seq_core_journal_state_t (0=EMPTY, 1=UNDOABLE, 2=REDOABLE) so HIL can
-// assert wander didn't pollute/invalidate the journal.
+// Reply: [undo_available, journal_state, track, scope, dispatch_status] —
+// non-consuming peek. undo_available = (state==UNDOABLE) for back-compat;
+// journal_state is the full seq_core_journal_state_t (0=EMPTY, 1=UNDOABLE,
+// 2=REDOABLE) so HIL can assert wander didn't pollute/invalidate the journal;
+// scope is seq_core_journal_scope_t (0=TRACK, 1=ORGANISM) so HIL can tell a
+// track-grain undo from a whole-organism REVERT undo (Stage 2b).
 static void cmd_track_undo_query(mios32_midi_port_t port)
 {
-  u8 state = 0, track = 0;
-  SEQ_CORE_JournalInfoGet(&state, &track);
+  u8 state = 0, track = 0, scope = 0;
+  SEQ_CORE_JournalInfoGet(&state, &track, &scope);
   u8 undo_available = (state == SEQ_CORE_JRNL_UNDOABLE) ? 1 : 0;
-  u8 reply[4] = { undo_available, state, (u8)(track & 0x7f), 0x01 };
+  u8 reply[5] = { undo_available, state, (u8)(track & 0x7f), scope, 0x01 };
   send_reply(port, CMD_TRACK_UNDO_QUERY, reply, sizeof(reply));
 }
 

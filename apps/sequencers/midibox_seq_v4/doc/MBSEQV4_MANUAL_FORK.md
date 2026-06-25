@@ -548,6 +548,14 @@ checkpoint), so it deliberately takes the *hold* — a quick fumble can only eve
 CHECKPOINT, never wipe your jam. If you REVERT before ever blessing a point,
 nothing happens and the LCD says `no checkpoint yet`.
 
+**REVERT is undoable.** Reverted by mistake, or want the jam back to compare?
+Tap `SELECT+CLEAR` — the same undo gesture as the Pull — and the rig snaps back
+to exactly what you had right before the REVERT (`REVERT undone`). Tap it again
+to re-revert to the checkpoint (`REVERT redone`); it toggles. (A double-tap of
+the REVERT hold is safe too — your jam is still one `SELECT+CLEAR` away.) Note
+that once you bless a new CHECKPOINT, the undo clears — the new safe point is the
+baseline now.
+
 One checkpoint is kept at a time (per session): a new CHECKPOINT overwrites the
 last one, REVERT always returns to the most recent. After a REVERT the rig is
 "dirty" against its slots, so the next switch writes the reverted state into

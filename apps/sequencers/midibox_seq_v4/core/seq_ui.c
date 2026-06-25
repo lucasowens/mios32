@@ -1536,6 +1536,42 @@ static s32 SEQ_UI_Button_Paste(s32 depressed)
 }
 
 
+// Shared SELECT+CLEAR / UNDO-button dispatch: toggle the unified action journal
+// and post a scope-aware message. Both buttons drive the same net, so this lives
+// in one place to keep them from drifting (a stale message split is exactly the
+// kind of divergence the unified journal was built to eliminate).
+static void SEQ_UI_JournalToggleDispatch(void)
+{
+  u8 jstate = SEQ_CORE_JRNL_EMPTY, jscope = SEQ_CORE_JRNL_TRACK;
+  SEQ_CORE_JournalInfoGet(&jstate, NULL, &jscope);
+  if( jstate == SEQ_CORE_JRNL_UNDOABLE ) {
+    s32 t = SEQ_CORE_JournalUndo();
+    if( t >= 0 ) {
+      if( jscope == SEQ_CORE_JRNL_ORGANISM ) {
+        SEQ_UI_Msg_Track("REVERT undone");  // whole organism back to the pre-revert jam
+      } else {
+        char msg[16];
+        sprintf(msg, "undone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+    }
+  } else if( jstate == SEQ_CORE_JRNL_REDOABLE ) {
+    s32 t = SEQ_CORE_JournalRedo();
+    if( t >= 0 ) {
+      if( jscope == SEQ_CORE_JRNL_ORGANISM ) {
+        SEQ_UI_Msg_Track("REVERT redone");  // re-reverted to the checkpoint
+      } else {
+        char msg[16];
+        sprintf(msg, "redone T%d", (int)t + 1);
+        SEQ_UI_Msg_Track(msg);
+      }
+    }
+  } else {
+    SEQ_UI_Msg_Track("nothing to undo");
+  }
+}
+
+
 static s32 SEQ_UI_Button_Clear(s32 depressed)
 {
   static u8 select_clear_fired = 0;
@@ -1555,25 +1591,7 @@ static s32 SEQ_UI_Button_Clear(s32 depressed)
   }
   if( !depressed && seq_ui_button_state.SELECT_PRESSED ) {
     select_clear_fired = 1;
-    u8 jstate = SEQ_CORE_JRNL_EMPTY;
-    SEQ_CORE_JournalInfoGet(&jstate, NULL);
-    if( jstate == SEQ_CORE_JRNL_UNDOABLE ) {
-      s32 t = SEQ_CORE_JournalUndo();
-      if( t >= 0 ) {
-        char msg[16];
-        sprintf(msg, "undone T%d", (int)t + 1);
-        SEQ_UI_Msg_Track(msg);
-      }
-    } else if( jstate == SEQ_CORE_JRNL_REDOABLE ) {
-      s32 t = SEQ_CORE_JournalRedo();
-      if( t >= 0 ) {
-        char msg[16];
-        sprintf(msg, "redone T%d", (int)t + 1);
-        SEQ_UI_Msg_Track(msg);
-      }
-    } else {
-      SEQ_UI_Msg_Track("nothing to undo");
-    }
+    SEQ_UI_JournalToggleDispatch();
     return 1;
   }
 
@@ -1679,25 +1697,7 @@ static s32 SEQ_UI_Button_Undo(s32 depressed)
   }
   if( !depressed ) {
     undo_fired = 1;
-    u8 jstate = SEQ_CORE_JRNL_EMPTY;
-    SEQ_CORE_JournalInfoGet(&jstate, NULL);
-    if( jstate == SEQ_CORE_JRNL_UNDOABLE ) {
-      s32 t = SEQ_CORE_JournalUndo();
-      if( t >= 0 ) {
-        char msg[16];
-        sprintf(msg, "undone T%d", (int)t + 1);
-        SEQ_UI_Msg_Track(msg);
-      }
-    } else if( jstate == SEQ_CORE_JRNL_REDOABLE ) {
-      s32 t = SEQ_CORE_JournalRedo();
-      if( t >= 0 ) {
-        char msg[16];
-        sprintf(msg, "redone T%d", (int)t + 1);
-        SEQ_UI_Msg_Track(msg);
-      }
-    } else {
-      SEQ_UI_Msg_Track("nothing to undo");
-    }
+    SEQ_UI_JournalToggleDispatch();
   }
   return 1;
 }

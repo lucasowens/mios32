@@ -622,13 +622,47 @@ existed; track-load didn't).
   not a switch). Finally a **forced full quiet render** (`touched_ms=0; dirty=1;
   RenderTrack`) — `RenderDirtySet` alone can be consumed by a sweep-regime tick
   that refreshed only a window, and the mirror is the emission source.
-- **Track undo** — one-deep global victim snapshot in CCM (~1.65 KB: geometry,
-  name[81], full CC image 0x00..0x9f, robotize anchors, par/trg sources,
-  play_section; `kind` field reserves an SD-slot-victim variant for a future
-  push-side arm). `SnapLive` armed inside every pull; `Restore` is one-shot,
-  write phase under `portENTER_CRITICAL`, then the same external fan rows
-  (latch reset + PC/bank send — without them the rig stays on the pulled track's
-  program after an undo) + forced render + bar-aligned drop. CCM 52.9 → 54.4/64 KB.
+- **Unified action journal (UNDO/REDO panic net, Stage 2a 2026-06-23 + Stage 2b
+  2026-06-24, design §10(a2)).** ONE global one-deep `seq_core_action_journal_t
+  {state, scope, before, after}` in **CCM** replaces the three bespoke one-deeps
+  (the old `track_undo`, the generator `undo_slot`, the utility buffers) and adds
+  the REDO that never existed. `state ∈ {EMPTY, UNDOABLE, REDOABLE}`. **Lazy
+  `after`**: a deliberate gesture only ARMs (`before`←live snapshot); UNDO snaps
+  `after`←live then restores `before`; REDO snaps `before`←live then restores
+  `after` — a **symmetric 2-way swap** that never silently loses work (the TRACK
+  scope). `before`/`after` are full `seq_core_track_undo_t` (geometry, name[81],
+  CC image 0x00..0x9f, robotize anchors, par/trg sources, play_section, gen[4]).
+  API in [seq_core.c](../core/seq_core.c): `SEQ_CORE_JournalArm(track)` /
+  `JournalUndo` / `JournalRedo` / `JournalInvalidate` / `JournalInfoGet(state,
+  track,scope)`. Armed by the four deliberate track-grain verbs — pull
+  (`TrackUndoSnapLive`), utility copy/paste/clear (`SEQ_UI_UTIL_UndoUpdate`),
+  generator **first**-ENGAGE (after `alloc_slot` success, before the new slot is
+  in_use — so pool-full/re-engage can't clobber), and capture (`CaptureToTrack`
+  AND the live `CaptureSpan` grab). `>SEQ_GENERATOR_PERSIST_SLOTS(4)`-gen arm
+  guard refuses-to-EMPTY rather than truncate. `journal_restore` runs the write
+  phase under `portENTER_CRITICAL`, then the external fan rows (latch reset +
+  PC/bank send — else the rig stays on the pulled track's program) + forced
+  render + bar-aligned drop. Invalidated on every disk load (`SEQ_PATTERN_Load`
+  tail, `SnapshotRead` via `SEQ_GENERATOR_UndoInvalidate`) + harness reset.
+- **ORGANISM scope (Stage 2b — REVERT-undoable).** `scope ∈ {TRACK, ORGANISM}`.
+  REVERT joins the net: before restoring the checkpoint, `SEQ_PATTERN_Revert`
+  stashes the live organism to a **pre-revert block** (anchor-bank slots 4..7,
+  `SEQ_PATTERN_PREREVERT_BASE 4`; compile-asserted `>= NUM_GROUPS` so it can't
+  overlap the checkpoint block 0..3), then `JournalArmOrganism` (no RAM buffers —
+  the SD slots ARE the storage). UNDO = `RevertUndoRead` (re-read slot 4 = the
+  jam), REDO = `RevertRedoRead` (re-read slot 0 = the checkpoint) — a **fixed**
+  2-way swap, NOT symmetric (a REDO-of-REVERT discards post-undo edits by intent;
+  a fresh track gesture re-arms TRACK scope instead). Both reads route through
+  `SnapshotRead`, which invalidates the journal as a side effect, so each organism
+  UNDO/REDO **re-arms** its state on return. **Arm on `stash>=0` alone** (even a
+  torn revert is recoverable to the clean jam). **Double-tap guard:** REVERT skips
+  the re-stash when already ORGANISM/UNDOABLE (live is the checkpoint — re-stashing
+  would overwrite the jam), so a double-tap can't destroy the recoverable jam.
+  **CHECKPOINT invalidates the journal** on a committed write (new baseline drops
+  any stale undo/redo, incl. an organism redo whose slot-0 target it just rewrote).
+  RAM: journal in CCM (named type so `CCM_SECTION` binds the var); Stage 2a
+  reclaimed main 6088→10768 B free / CCM 12160→7480; Stage 2b +0 RAM (stash on SD,
+  scope byte in CCM padding).
 - **Gestures** ([seq_ui.c](../core/seq_ui.c)) — the pull intercepts live beside
   the PATTERN-hold capture intercepts (same `button_state` stuck-bit maintenance):
   hold select-row = destination (its own press/release flows through stock, so
@@ -637,16 +671,19 @@ existed; track-load didn't).
   held); GP1-8 letter, GP9-16 commit; LCD overlay gated on the first aim input.
   `SEQ_UI_Button_Pattern`'s press disarms a live pull hold (its select-row
   intercept would otherwise eat the release → phantom pulls). **SELECT+CLEAR =
-  track undo** (user-picked; every shipped hwcfg maps `BUTTON_UNDO 0 0`); it
-  never falls through to a destructive clear. The unmapped-UNDO-button handler
-  also prefers the track undo (for hwcfgs that map it); known arbitration gap:
-  an armed-but-unconsumed pull victim wins over a copy/paste edit made after it.
-- **testctrl**: `TRACK_LOAD 0x6f`, `TRACK_UNDO 0x70`, `TRACK_UNDO_QUERY 0x71`,
-  `SESSION_CREATE 0x72` (makes /SESSIONS/<name>, arms the async format; host
-  polls `SESSION_NAME_GET`, then waits ~6 s for `load_sd_content`'s SD I/O).
-  Host: `Board.track_load/track_undo/track_undo_query/session_create`; rigs:
-  `recombine` (builds the PULLJAM jam session). Pins: `test_track_load.py` (5),
-  `test_pull_gesture.py` (4).
+  the UNDO/REDO toggle** (`SEQ_UI_JournalToggleDispatch`, shared with the unmapped
+  UNDO button so the two can't drift): press once = undo, again = redo; from EMPTY
+  it reports "nothing to undo" and never falls through to a destructive clear
+  (every shipped hwcfg maps `BUTTON_UNDO 0 0`). The message is scope-aware
+  ("undone T%d" vs "REVERT undone/redone"). The old pull-vs-edit arbitration gap is
+  gone — one shared one-deep, the most recent deliberate gesture is the undoable one.
+- **testctrl**: `TRACK_LOAD 0x6f`, `TRACK_UNDO 0x70`, `TRACK_UNDO_QUERY 0x71`
+  (reply `[undo_available, journal_state, track, scope, dispatch_status]`),
+  `TRACK_REDO 0x47`, `SESSION_CREATE 0x72` (makes /SESSIONS/<name>, arms the async
+  format; host polls `SESSION_NAME_GET`, then waits ~6 s for `load_sd_content`'s SD
+  I/O). Host: `Board.track_load/track_undo/track_redo/track_undo_query/session_create`;
+  rigs: `recombine` (builds the PULLJAM jam session). Pins: `test_track_load.py` (5),
+  `test_pull_gesture.py` (5), `test_undo_redo.py` (9).
 
 ### FEARLESS SWITCHING — auto-writeback + gen-state + CHECKPOINT/REVERT (the save-model inversion, 2026-06-13)
 
@@ -696,12 +733,18 @@ in three stages; by-ear hard GO 2026-06-13, HIL 135/135.
   reverted state into the working slot). Refuses cleanly when no anchor exists.
   *Accepted POC cost:* a mid-op SD failure can leave a partial anchor (parity with
   the working-slot writeback's power-loss exposure); atomic temp+rename is the fix.
+- **REVERT-undoable (Stage 2b 2026-06-24).** REVERT now stashes the live organism
+  to a pre-revert block (anchor slots 4..7) before the restore and arms the unified
+  journal's ORGANISM scope — so SELECT+CLEAR brings the jam back (see the action-
+  journal entry above for the full mechanism, the double-tap guard, and CHECKPOINT
+  invalidating the journal). REVERT stays Tier-2/SD; only its dispatch joined the
+  Tier-1 net.
 - **Gesture** ([seq_ui.c](../core/seq_ui.c) `SEQ_UI_Button_Bookmark`):
   **SELECT+BOOKMARK tap = CHECKPOINT, hold ≥1 s = REVERT** (`MIOS32_TIMESTAMP`
   ms-accurate; armed only if SELECT is down at BOOKMARK press; measured at
   release; swallows press+release so the bookmarks view never flips). The
   destructive verb gets the deliberate hold — mirrors SELECT+CLEAR=undo; midiphy
-  maps SAVE/UNDO to no key.
+  maps SAVE/UNDO to no key. A mis-fired REVERT is recoverable via SELECT+CLEAR.
 - **testctrl**: `CHECKPOINT 0x77`, `REVERT 0x78`, `ANCHOR_PRESENT 0x79` (reply
   `[ok/present, status]`; REVERT status `0x03` = clean no-anchor refuse, distinct
   from an I/O fail). Stage A added `DIRTY_QUERY 0x73`/`DIRTY_SET 0x74`/`PATTERN_CHANGE

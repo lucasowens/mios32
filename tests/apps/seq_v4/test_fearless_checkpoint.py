@@ -37,7 +37,16 @@ import time
 import pytest
 
 from harness import Board, Button, CC, Page
-from harness.sysex import DIAL_DEPTH, DIAL_RATE, RESET_DEFAULT
+from harness.sysex import (
+    DIAL_DEPTH,
+    DIAL_RATE,
+    RESET_DEFAULT,
+    JRNL_EMPTY,
+    JRNL_UNDOABLE,
+    JRNL_REDOABLE,
+    JRNL_TRACK,
+    JRNL_ORGANISM,
+)
 
 
 # The genv4 / noanchor fixtures may CREATE a session on first use — an async SD
@@ -246,6 +255,155 @@ def test_anchor_survives_working_slot_writeback(genv4):
         "REVERT should restore the checkpointed state — the working-slot "
         "writeback must not have touched the anchor file"
     )
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_revert_is_undoable(genv4):
+    """Stage 2b — REVERT joins the unified UNDO net (ORGANISM scope, design
+    §10(a2)). Before restoring the checkpoint, REVERT stashes the live jam into a
+    pre-revert anchor block (slots 4..7); the journal arms ORGANISM/UNDOABLE.
+    track_undo (SELECT+CLEAR on the panel) then brings the jam back, and a REDO
+    re-reverts to the checkpoint — a fixed 2-way swap between two SD slots. The
+    journal reports ORGANISM scope across the whole cycle so the UI can label it
+    'REVERT undone/redone' instead of a track number. CC.LENGTH is the witness:
+    the pre-revert stash uses the same serializer CHECKPOINT/REVERT already prove
+    round-trips faithfully (above), so the marker is enough to pin the wiring."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    # Bless a marker as the checkpoint.
+    board.cc_set(0, CC.LENGTH, LEN_CHECKPOINT)
+    assert board.checkpoint(), "checkpoint should commit"
+
+    # Jam: diverge the marker — this is the live state UNDO must recover.
+    board.cc_set(0, CC.LENGTH, LEN_JAM)
+    assert board.cc_get(0, CC.LENGTH) == LEN_JAM, "the jam edit should be live"
+
+    # REVERT -> the checkpoint, and the journal is armed ORGANISM/UNDOABLE.
+    assert board.revert(), "revert should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_CHECKPOINT, "REVERT lands on the checkpoint"
+    _, state, _, scope = board.track_undo_query()
+    assert state == JRNL_UNDOABLE and scope == JRNL_ORGANISM, (
+        f"REVERT must arm a whole-organism undo; got state={state} scope={scope}"
+    )
+
+    # UNDO -> the pre-revert jam comes back; journal flips REDOABLE (still ORGANISM).
+    assert board.track_undo(timeout=12.0) is not None, "UNDO of REVERT should dispatch"
+    time.sleep(SETTLE)
+    assert board.cc_get(0, CC.LENGTH) == LEN_JAM, (
+        "UNDO of REVERT must restore the pre-revert jam from the stash slot"
+    )
+    _, state, _, scope = board.track_undo_query()
+    assert state == JRNL_REDOABLE and scope == JRNL_ORGANISM, (
+        f"after UNDO the organism revert must be REDOABLE; got state={state} scope={scope}"
+    )
+
+    # REDO -> re-revert to the checkpoint; journal UNDOABLE again (the toggle).
+    assert board.track_redo(timeout=12.0) is not None, "REDO of REVERT should dispatch"
+    time.sleep(SETTLE)
+    assert board.cc_get(0, CC.LENGTH) == LEN_CHECKPOINT, (
+        "REDO of REVERT must re-revert to the checkpoint"
+    )
+    _, state, _, scope = board.track_undo_query()
+    assert state == JRNL_UNDOABLE and scope == JRNL_ORGANISM
+
+    # And the swap is repeatable: a second UNDO brings the jam back once more.
+    assert board.track_undo(timeout=12.0) is not None, "second UNDO should dispatch"
+    time.sleep(SETTLE)
+    assert board.cc_get(0, CC.LENGTH) == LEN_JAM, "the ORGANISM undo/redo is a repeatable 2-way swap"
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_track_gesture_supersedes_organism_undo(genv4):
+    """A deliberate TRACK-grain gesture after a REVERT re-arms a TRACK-scope
+    undo, superseding the organism arm (JournalArm resets scope to TRACK). The
+    pre-revert SD stash is abandoned — the most recent gesture owns the one-deep,
+    matching the cross-gesture clobber contract for the track scope."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CHECKPOINT)
+    assert board.checkpoint(), "checkpoint should commit"
+    board.cc_set(0, CC.LENGTH, LEN_JAM)
+    assert board.revert(), "revert should commit"
+    _, _, _, scope = board.track_undo_query()
+    assert scope == JRNL_ORGANISM, "REVERT arms organism scope"
+
+    # A capture-to-track is a deliberate track gesture -> re-arms TRACK scope.
+    board.track_drum_init(1)
+    assert board.capture_to_track(1, 0), "capture-to-track should commit + re-arm"
+    valid, state, track, scope = board.track_undo_query()
+    assert valid and state == JRNL_UNDOABLE and scope == JRNL_TRACK and track == 0, (
+        f"a track gesture must supersede the organism arm; "
+        f"got state={state} scope={scope} track={track}"
+    )
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_double_revert_preserves_jam(genv4):
+    """A double-tap REVERT (a plausible fat-finger on a panic button) must NOT
+    destroy the recoverable jam. The 2nd REVERT finds the journal already
+    ORGANISM/UNDOABLE — live is the checkpoint, nothing new to lose — so it skips
+    the pre-revert stash and keeps the original jam in slot 4. UNDO still brings
+    the jam back. (Review fix: re-stashing would have overwritten the jam with
+    the checkpoint, making the 2nd tap silently unrecoverable.)"""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CHECKPOINT)
+    assert board.checkpoint(), "checkpoint should commit"
+    board.cc_set(0, CC.LENGTH, LEN_JAM)            # the jam to protect
+
+    assert board.revert(), "first revert should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_CHECKPOINT
+    assert board.revert(), "second (double-tap) revert should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_CHECKPOINT, "still on the checkpoint"
+
+    # UNDO must recover the ORIGINAL jam, not the checkpoint the 2nd revert saw.
+    assert board.track_undo(timeout=12.0) is not None, "UNDO after a double revert should dispatch"
+    time.sleep(SETTLE)
+    assert board.cc_get(0, CC.LENGTH) == LEN_JAM, (
+        "a double-tap REVERT must not destroy the pre-revert jam"
+    )
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_checkpoint_invalidates_pending_undo(genv4):
+    """A fresh CHECKPOINT sets a new baseline and must drop any pending UNDO/REDO.
+    Without it, an ORGANISM arm left by a prior REVERT keeps pointing at the
+    anchor slots — and CHECKPOINT just rewrote slot 0 (the REDO target), so the
+    swap would land somewhere the user never reverted to. (Review fix.)"""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    board.cc_set(0, CC.LENGTH, LEN_CHECKPOINT)
+    assert board.checkpoint(), "first checkpoint should commit"
+    board.cc_set(0, CC.LENGTH, LEN_JAM)
+    assert board.revert(), "revert should commit + arm an organism undo"
+    _, state, _, scope = board.track_undo_query()
+    assert state == JRNL_UNDOABLE and scope == JRNL_ORGANISM, "REVERT arms organism undo"
+
+    # A new CHECKPOINT establishes a new baseline -> the journal must go EMPTY.
+    assert board.checkpoint(), "second checkpoint should commit"
+    _, state, _, _ = board.track_undo_query()
+    assert state == JRNL_EMPTY, "a CHECKPOINT must invalidate the pending undo/redo"
+    assert board.track_undo() is None, "nothing to undo after a fresh checkpoint baseline"
 
     for g in range(4):
         board.dirty_set(g, False)

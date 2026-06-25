@@ -57,6 +57,9 @@ CMD_TRACK_REDO = 0x47  # unified journal REDO (undo's partner)
 JRNL_EMPTY = 0
 JRNL_UNDOABLE = 1
 JRNL_REDOABLE = 2
+# seq_core_journal_scope_t (keep in sync with seq_core.h)
+JRNL_TRACK = 0
+JRNL_ORGANISM = 1
 CMD_SESSION_CREATE = 0x72
 CMD_DIRTY_QUERY = 0x73
 CMD_DIRTY_SET = 0x74

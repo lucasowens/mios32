@@ -403,8 +403,9 @@ performable** — see §8 + `doc/plans/2026-06-21-system-flatmap.md`.*
 | Retroactive CAPTURE (ring + re-sim + live tape + precise gate) | shipped (first cuts) | §10 |
 | FREEZE (master mutation switch) | shipped | §3, §5.6, §11 |
 | **Recall-freeze cure** (#1 — decide recall semantics, then cure) | **OPEN — next move** | §8, §10 |
-| Make invisible modes visible (#2); panic UNDO/REDO (#3); hold-polarity (#4) | queued (play-readiness) | §8 |
-| Unified UNDO/REDO | queued / design-ahead | §10(a2) |
+| Panic UNDO/REDO (#3) + hold-polarity/REVERT-undoable (#4) | **shipped — by-ear GO 2026-06-24** | §8, §9, §10(a2) |
+| Make invisible modes visible (#2) | dropped (rig already wires the LEDs) | §8, §9 |
+| Unified UNDO/REDO | **built (Stage 2a+2b)** | §9, §10(a2) |
 | SET durable baseline | queued / design-ahead | §6, §9, §10(a) |
 | Trigger generators (don't fit as twin pool) | queued — needs redesign | §8, §10(b) |
 | Self-bus (self-modulation CC + note-grain) | queued / design-ahead | §6, §10(c) |
@@ -1114,12 +1115,12 @@ the elf is the worst case), but the system breaks at the two seams where the map
 2. **Make the invisible modes visible** — ~~persistent `sel_view` label; FREEZE on the recall
    row~~. **DROPPED 2026-06-23** — recon found the `lso` rig already wires the FREEZE (METRONOME)
    + sel_view select LEDs, so the premise (invisible) is false on the hardware (§9 2026-06-23).
-3. **A panic UNDO/REDO net** — **Stage 2a SHIPPED 2026-06-23** (by-ear GO + HIL 206/206 +
-   adversarial review; §9). One action journal consolidates the bespoke one-deeps + adds REDO,
-   SELECT+CLEAR toggle, covers the live capture grab; freed CCM. *(2b = REVERT-undoable, below.)*
+3. **A panic UNDO/REDO net** — **SHIPPED (Stage 2a 2026-06-23 + Stage 2b 2026-06-24; by-ear GO +
+   HIL 210/210 + adversarial review; §9).** One action journal consolidates the bespoke one-deeps
+   + adds REDO, SELECT+CLEAR toggle, covers the live capture grab; freed CCM.
 4. **Fix the hold-polarity reversal** — PHRASE hold = *create*, SELECT+BOOKMARK hold =
-   *destroy*, same 1000 ms. One mis-timed press loses the set. **Resolution chosen: make REVERT
-   undoable** (fold into the #3 net, ORGANISM scope) — **Stage 2b, queued for a fresh session.**
+   *destroy*, same 1000 ms. One mis-timed press loses the set. **RESOLVED: REVERT is undoable**
+   (Stage 2b, ORGANISM scope folded into #3 — a mis-fired REVERT is one SELECT+CLEAR back; §9).
 5. **Measure the all-16 live-input render worst case on device** — chord_mask/tension force a
    full re-render every tick; never measured; lands exactly on the GRAVITY/chord sweep.
 6. **Trigger generators — fold into the shared pool** (capability; gated on #1/#3).
@@ -2850,8 +2851,27 @@ HIL-green was NOT sufficient confidence on a 6-file consolidation — the advers
 load-bearing. Full trail + the 3 refuted + accepted-as-documented items in
 `doc/plans/2026-06-23-play-readiness-safety-net.md`. **Phase 1 (visible modes, #2) DROPPED** —
 recon found the `lso` rig already wires the FREEZE + sel_view LEDs (premise false on the hardware).
-**Stage 2b (REVERT-undoable, the rest of #4) + the REFERENCE/MANUAL fold are queued for a fresh
-session.**
+
+**2026-06-24 (play-readiness safety net cont.) — Stage 2b: REVERT-undoable SHIPPED; the bundle
+closes (§8 queue #3 + #4 done, #2 dropped).** REVERT joined the Tier-1 net via a new ORGANISM
+journal scope: `SEQ_PATTERN_Revert` stashes the live organism to a pre-revert anchor block (slots
+4..7) *before* restoring the checkpoint, then arms `SEQ_CORE_JournalArmOrganism` — so SELECT+CLEAR
+brings the jam back (`RevertUndoRead` re-reads slot 4), and a REDO re-reverts (`RevertRedoRead`
+re-reads slot 0). A **fixed** 2-way swap (NOT symmetric like TRACK scope — a REDO-of-REVERT discards
+post-undo edits by intent; a fresh track gesture re-arms TRACK scope). The reads route through
+`SnapshotRead` (which invalidates the journal), so each organism undo/redo re-arms its state on
+return. **by-ear GO** + **HIL 210/210**, and again the adversarial review (8 angles) was
+load-bearing — HIL was green at 208 yet it caught three real data-loss/staleness holes on the panic
+path, all fixed before commit: (a) **CHECKPOINT didn't invalidate the journal** → a checkpoint after
+a revert left a stale organism redo pointing at the slot it just rewrote (now invalidates on a
+committed checkpoint); (b) **double-tap REVERT destroyed the recoverable jam** → the 2nd revert
+re-stashed live (== the checkpoint) over the jam (now skips the re-stash when already
+ORGANISM/UNDOABLE, and arms on `stash>=0` alone so even a torn revert is recoverable); (c) magic
+pre-revert base `4` vs `NUM_GROUPS` → compile-time assert. Plus a cleanup the review flagged: the
+duplicated UNDO/REDO button-dispatch block extracted to `SEQ_UI_JournalToggleDispatch`. +0 RAM
+(stash on SD, scope byte in CCM padding); +48 B flash. §10(a2) is now fully built; codebase facts
+folded into REFERENCE (action-journal + FEARLESS sections) + MANUAL (CHECKPOINT/REVERT). Plan
+`doc/plans/2026-06-23-play-readiness-safety-net.md` retired.
 
 ---
 
@@ -3003,18 +3023,16 @@ the generative freeze/bounce law); the actionable build sketches live here.
     I/O runs in task context with **no port-critical held** (the recall-freeze mutex-ordering class:
     take `MUTEX_SDCARD` before any `portENTER_CRITICAL`).
 
-- **(a2) Unified UNDO/REDO (Tier 1) — design settled.** A small global **action journal**:
-  each *deliberate* gesture pushes {scope, before-state, after-state} onto a shallow ring; UNDO
-  restores the before-state, REDO re-applies the after-state; any new deliberate gesture clears
-  the redo arm. Reuse the existing snapshot stores rather than inventing new ones — `track_undo`
-  (`seq_core.c`), the generator `undo_slot` (`seq_generator.c`), the utility buffers
-  (`seq_ui_util.c`) consolidate behind one store / one dispatcher. **Gate pushes on
-  `!seq_generator_in_automutate`** (the same flag that drives `phrase_drift`) so ambient wander
-  never lands on the stack. One UNDO + one REDO gesture (provisional / by-ear — today
-  SELECT+CLEAR = track, GP2 = generator, GP8 = utility consolidate). RAM: shallow, largely
-  *reuses* the ~5 KB the three one-deeps already cost; keep off the scarce CCM if it grows.
-  HIL: edit→UNDO→REDO byte-exact round-trip, and injected generator wander between UNDO and
-  REDO must NOT pollute or invalidate the stack.
+- **(a2) Unified UNDO/REDO (Tier 1) — BUILT (Stage 2a 2026-06-23 + Stage 2b 2026-06-24, §9).**
+  Shipped as designed: ONE global **action journal** `{state, scope, before, after}` in CCM
+  consolidating the three bespoke one-deeps (`track_undo`, generator `undo_slot`, utility buffers)
+  behind `SEQ_CORE_JournalArm/Undo/Redo/Invalidate/InfoGet` + the new REDO. Lazy `after`, symmetric
+  2-way swap (TRACK scope); ORGANISM scope (Stage 2b) folds REVERT in via a pre-revert SD stash.
+  Only deliberate verbs arm (wander can't pollute — the `!seq_generator_in_automutate` invariant is
+  structural, not an explicit gate). SELECT+CLEAR toggle. See §9 (2026-06-23 / 2026-06-24) for the
+  shipped detail and the adversarial-review fixes; REFERENCE for the codebase facts. *Original
+  settled-design sketch (now realized): a shallow ring per deliberate gesture; the implementation
+  landed it as one-deep, in CCM (main was the scarce region), reusing the existing snapshot stores.*
 
 - **(b) Trigger generators — render-stack-native rhythm/gate Turing generators.** Generators
   are pitch-only today; this adds rhythm. Mirror the pitch generator (`seq_generator.c`): a
