@@ -82,6 +82,7 @@ CMD_CAPTURE_SPAN = 0x4c  # CAPTURE: grab last K bars of visible track -> static 
 CMD_TRANSPORT = 0x4a  # genuinely start/stop the master transport (play-button path) — while-playing HIL
 CMD_TRACK_NOTE_INIT = 0x49  # build a melodic Note track w/ Note/Vel/Length/Roll layers (precise-gate HIL)
 CMD_CAPTURE_PERF = 0x48  # capture-while-performing freeze probe — fire phrase capture, report emission-task stall
+CMD_RENDER_PERF = 0x46  # all-16 force-dirty render-cost probe — DWT-timed per-track render, report duty + emission gap
 
 # CMD_RNG_SEED sub-ops — keep in sync with seq_testctrl.c
 RNG_SEED_GEN_GET = 0x00

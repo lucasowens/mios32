@@ -150,6 +150,23 @@ u32 seq_render_touched_ms[SEQ_CORE_NUM_TRACKS];
 // active directly (no flip; tearing during knob motion is acceptable).
 u8 seq_render_active_buf[SEQ_CORE_NUM_TRACKS];
 
+// Phase D — sweep/quiet change-detection (play-readiness #5). The force-dirty
+// processors (CHORD_MASK / TENSION / live PITCH) depend on inputs that can change
+// between two ticks WITHOUT touching the source dirty flag: the held chord on a
+// bus (SEQ_MIDI_IN — never dirties), the live transposer note, and the global
+// GRAVITY / scale / root. The old code re-rendered every armed track EVERY tick to
+// catch them (~95% render duty at 16 gripped GRAVITY tracks → the lowest-priority
+// +2 UI task starves, the control surface goes dark). Instead, fold every such
+// live input into a per-track u32 signature; a track only re-renders when its
+// signature changes (a dial sweep / chord change / transposer move). A static field
+// is signature-stable and costs nothing — UI stays alive with all 16 gripped.
+// Source edits / generator mutation / capture still dirty through the existing flag
+// (SEQ_CORE_RenderTouched on source writes), so the signature covers ONLY the live
+// inputs that don't otherwise dirty. Stored = the signature as of the last render
+// (see SEQ_CORE_RenderTracks). Zero-init OK: the first render of any armed track is
+// driven by the slot-sync dirty, and stores the fresh signature.
+static u32 seq_render_live_sig[SEQ_CORE_NUM_TRACKS];
+
 // Phase B render cache: per-track processor stack. Empty in phase B
 // (zero-init → every slot has id == SEQ_PROCESSOR_ID_NONE), so the renderer
 // iteration is a no-op and output stays identical to source. Phase C wires
@@ -513,6 +530,39 @@ static u32 seq_core_ui_service_max_gap;   // peak inter-service gap (ISR ticks) 
 static float seq_core_bpm_target;
 static float seq_core_bpm_sweep_inc;
 
+// All-16 force-dirty render-cost probe (play-readiness #5). chord_mask / tension /
+// live-pitch slots force a FULL per-track re-render every tick — memcpy(SEQ_PAR_MAX_BYTES)
+// + memcpy(SEQ_TRG_MAX_BYTES) + a processor sweep over up to num_p_steps — bypassing the
+// sweep/quiet fast path. With 16 tracks armed (e.g. GRAVITY GRIP on all) that is the
+// all-sweeping worst case the design never measured: if it eats too much of a tick the
+// +4 emission task (which runs this very render in its prologue) falls behind and the
+// audible clock slips. We time each render with the Cortex-M4 DWT cycle counter, NOT
+// MIOS32_STOPWATCH — TIM6 is already owned by SEQ_STATISTICS and brackets this handler,
+// so a nested stopwatch Reset/ValueGet would corrupt both readings (see seq_pattern.c).
+// This fork's CMSIS core_cm4.h omits the DWT register block, so we map the trace unit's
+// architecturally-fixed Cortex-M4 addresses directly (identical on every CM3/CM4):
+// DEMCR.TRCENA enables the trace subsystem, DWT_CTRL.CYCCNTENA the free-running cycle
+// counter, read with a single load. Enabled once in SEQ_CORE_Init. Accumulators are
+// main-RAM statics like the service-gap pair above, read/zeroed via CMD_RENDER_PERF.
+// Total is accumulated in microseconds (u32; the per-tick divide is by a compile-time
+// constant); the peak cycle counts convert to us only at readout.
+#define SEQ_CORE_DWT_CTRL    (*(volatile u32 *)0xE0001000)
+#define SEQ_CORE_DWT_CYCCNT  (*(volatile u32 *)0xE0001004)
+#define SEQ_CORE_SCB_DEMCR   (*(volatile u32 *)0xE000EDFC)
+#define SEQ_CORE_DWT_CTRL_CYCCNTENA  (1u << 0)
+#define SEQ_CORE_SCB_DEMCR_TRCENA    (1u << 24)
+#define SEQ_CORE_DWT_CYC_PER_US      (MIOS32_SYS_CPU_FREQUENCY / 1000000)  // 168 on STM32F407
+static u32 seq_core_render_total_us;      // summed render time (us) across the window
+static u32 seq_core_render_max_tick_cyc;  // peak total render of one RenderTracks pass (cycles, all dirty tracks summed)
+static u32 seq_core_render_max_track_cyc; // peak single-track render (cycles)
+static u32 seq_core_render_tick_count;    // RenderTracks passes that rendered >=1 track since reset
+static u8  seq_core_render_last_dirty;    // tracks rendered on the most recent pass (sanity: == 16 at full stress)
+static u8  seq_core_render_max_dirty;     // PEAK tracks rendered in one pass over the window — race-free
+                                          // "how many were armed and re-rendered together" (== 16 when a
+                                          // live-input change dirties all gripped tracks; stays 0 in a
+                                          // truly-static window where change-detection renders nothing)
+static u32 seq_core_render_reset_ms;      // MIOS32_TIMESTAMP at last reset (window denominator)
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Initialisation
@@ -521,6 +571,22 @@ static float seq_core_bpm_sweep_inc;
 s32 SEQ_CORE_Init(u32 mode)
 {
   int i;
+
+  // Enable the DWT cycle counter once for the render-cost probe (SEQ_CORE_RenderTracks).
+  // Free-running at the core clock, read with a single load — conflict-free vs the TIM6
+  // MIOS32_STOPWATCH that SEQ_STATISTICS already brackets this handler with. The enables
+  // are idempotent OR-sets; we deliberately do NOT zero CYCCNT — the probe only reads
+  // wrap-safe deltas, and clearing a free-running counter here (Init runs on every
+  // new-session create) could underflow a render in flight on the +4 task.
+  SEQ_CORE_SCB_DEMCR |= SEQ_CORE_SCB_DEMCR_TRCENA;
+  SEQ_CORE_DWT_CTRL |= SEQ_CORE_DWT_CTRL_CYCCNTENA;
+  seq_core_render_total_us = 0;
+  seq_core_render_max_tick_cyc = 0;
+  seq_core_render_max_track_cyc = 0;
+  seq_core_render_tick_count = 0;
+  seq_core_render_last_dirty = 0;
+  seq_core_render_max_dirty = 0;
+  seq_core_render_reset_ms = (u32)MIOS32_TIMESTAMP_Get();
 
   seq_core_trk_muted = 0;
   seq_core_slaveclk_mute = SEQ_CORE_SLAVECLK_MUTE_Off;
@@ -585,6 +651,7 @@ s32 SEQ_CORE_Init(u32 mode)
         seq_processor_stack[track][slot].bus       = 0;
         seq_processor_stack[track][slot].drum_mask = 0xFFFF;
       }
+      seq_render_live_sig[track] = 0;  // change-detection baseline (first render stores fresh)
     }
   }
 
@@ -1034,6 +1101,7 @@ static void limit_render_range(u8 track, const seq_processor_slot_t *p,
   // no_fx trg assignment: 0 = none, else layer index + 1 (SEQ_TRG_NoFxGet).
   u8 nofx_asg = tcc->trg_assignments.no_fx;
   u16 num_t_step8 = (u16)(SEQ_TRG_NumStepsGet(track) / 8);
+  u8  num_t_layers = SEQ_TRG_NumLayersGet(track);  // bound the no_fx layer: OOB ⇒ no escape
 
   u8 par_layer;
   for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
@@ -1045,11 +1113,13 @@ static void limit_render_range(u8 track, const seq_processor_slot_t *p,
       u8 note = base[step];
       if( !note )
         continue; // rest
-      if( nofx_asg && num_t_step8 ) {
+      // no_fx escape: bound the assignment to the track's real trg layers (SEQ_TRG_Get
+      // parity). An OOB layer would index the stale [used,MAX) tail of the rendered trg
+      // buffer (the render refreshes only the used region), so treat it as "no escape",
+      // not garbage. The layer bound keeps ix < used <= MAX.
+      if( nofx_asg && num_t_step8 && (u8)(nofx_asg - 1) < num_t_layers ) {
         u32 ix = (u32)(nofx_asg - 1) * num_t_step8 + (step >> 3);
-        // bounds guard (SEQ_TRG_Get parity): the 4-bit assignment can point
-        // past the allocated trg layers — treat OOB as "no escape", not garbage
-        if( ix < SEQ_TRG_MAX_BYTES && (trg_buf[ix] & (1 << (step & 7))) )
+        if( trg_buf[ix] & (1 << (step & 7)) )
           continue; // per-step no-fx escapes the fold (emission parity)
       }
       base[step] = (u8)SEQ_CORE_TrimNote(note, lower, upper);
@@ -1336,6 +1406,24 @@ static void sweep_window_render(u8 track)
   }
 }
 
+// Bytes a track actually occupies in its par / trg layer buffer (instr*layers*steps). The
+// per-tick quiet render and the capture primitive copy only this region, not the whole MAX
+// buffer — a 16-step 1-layer track uses ~16 of 1024 par bytes. Clamped to MAX (the layout
+// invariant keeps used <= MAX; the clamp guarantees we never copy past the buffer).
+static u32 par_used_bytes(u8 track)
+{
+  u32 used = (u32)SEQ_PAR_NumInstrumentsGet(track) * SEQ_PAR_NumLayersGet(track)
+           * SEQ_PAR_NumStepsGet(track);
+  return (used > SEQ_PAR_MAX_BYTES) ? SEQ_PAR_MAX_BYTES : used;
+}
+
+static u32 trg_used_bytes(u8 track)
+{
+  u32 used = (u32)SEQ_TRG_NumInstrumentsGet(track) * SEQ_TRG_NumLayersGet(track)
+           * (((u32)SEQ_TRG_NumStepsGet(track) + 7) / 8);
+  return (used > SEQ_TRG_MAX_BYTES) ? SEQ_TRG_MAX_BYTES : used;
+}
+
 void SEQ_CORE_RenderTrack(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
@@ -1350,15 +1438,23 @@ void SEQ_CORE_RenderTrack(u8 track)
     return;
   }
 
-  // Quiet regime — full render into the inactive half, then atomic flip.
+  // Quiet regime — full render into the inactive half, then atomic flip. Copy only the
+  // bytes this track actually uses (instr*layers*steps), NOT the whole MAX buffer: a
+  // 16-step 1-layer track uses ~16 of 1024 par bytes, yet this copy runs EVERY tick for
+  // force-dirty (gravity/chord_mask/live-pitch) tracks — the full-MAX copy was the bulk
+  // of the all-16 render cost that pegs the CPU and starves the lower-priority +2 UI task
+  // (UI goes dark under a heavy GRAVITY field). Reads (SEQ_PAR_Get / SEQ_TRG_Get) never
+  // index past the used region, so the stale tail left in the inactive buffer is never
+  // observed; the processor passes below also stay within [0, num_p_steps). Clamp to MAX
+  // defensively (the layout invariant keeps used <= MAX, but never copy past the buffer).
+  u16 num_p_steps = (u16)SEQ_PAR_NumStepsGet(track);
   u8 *par_buf = SEQ_PAR_OutputInactive(track);
   u8 *trg_buf = SEQ_TRG_OutputInactive(track);
-  memcpy(par_buf, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
-  memcpy(trg_buf, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
+  memcpy(par_buf, seq_par_layer_value[track], par_used_bytes(track));
+  memcpy(trg_buf, seq_trg_layer_value[track], trg_used_bytes(track));
 
   // Iterate processor stack on the inactive half. Empty/disabled slots
   // short-circuit; ordering within a track is slot index.
-  u16 num_p_steps = (u16)SEQ_PAR_NumStepsGet(track);
   u8 slot;
   for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
     const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
@@ -1669,13 +1765,25 @@ s32 SEQ_CORE_CaptureTrackOutput(u8 track, u8 *par_dst, u8 *trg_dst)
   if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( par_dst == NULL || trg_dst == NULL ) return -1;
 
-  // Full quiet render → OutputActive current across the whole buffer.
+  // Full quiet render → OutputActive current across the track's used region.
   seq_render_touched_ms[track] = 0;
   seq_render_dirty[track] = 1;
   SEQ_CORE_RenderTrack(track);
 
-  memcpy(par_dst, SEQ_PAR_OutputActive(track), SEQ_PAR_MAX_BYTES);
-  memcpy(trg_dst, SEQ_TRG_OutputActive(track), SEQ_TRG_MAX_BYTES);
+  // The render refreshes only [0, used); the [used, MAX) tail is unused by any track read
+  // (reads are bounded to the layout). Snapshot the fresh rendered region from the output
+  // mirror, then fill the tail from the SOURCE so a whole-buffer snapshot is byte-identical
+  // to the historical full-output copy (back when the render mirrored the whole buffer).
+  // When par_dst IS the track's own source (in-place ProcessorBounce) the tail is already
+  // correct, so the guarded copy skips it (and dodges a self-overlapping memcpy).
+  u32 pu = par_used_bytes(track);
+  u32 tu = trg_used_bytes(track);
+  memcpy(par_dst, SEQ_PAR_OutputActive(track), pu);
+  memcpy(trg_dst, SEQ_TRG_OutputActive(track), tu);
+  if( pu < SEQ_PAR_MAX_BYTES && par_dst != seq_par_layer_value[track] )
+    memcpy(par_dst + pu, &seq_par_layer_value[track][pu], SEQ_PAR_MAX_BYTES - pu);
+  if( tu < SEQ_TRG_MAX_BYTES && trg_dst != seq_trg_layer_value[track] )
+    memcpy(trg_dst + tu, &seq_trg_layer_value[track][tu], SEQ_TRG_MAX_BYTES - tu);
   return 0;
 }
 
@@ -2950,31 +3058,144 @@ s32 SEQ_CORE_LoadTrackFromSlot(u8 dst_track, u8 src_bank, u8 src_pattern, u8 src
 }
 
 
+// Phase D change-detection signature (see seq_render_live_sig). Folds every live
+// input that a force-dirty processor reads at render time into one u32, so a track
+// re-renders only when an input ACTUALLY changes (dial sweep / held-chord change /
+// transposer move) rather than unconditionally every tick. *has_live is set if the
+// track carries any CHORD_MASK / TENSION / live-PITCH slot (the only processors
+// whose output depends on per-tick live inputs); the returned sig is meaningful
+// only then. A rolling multiply-add mixes the inputs (collisions are astronomically
+// unlikely over these small ranges); a per-id tag decorrelates the slots.
+//
+// CORRECTNESS (the whole risk): EVERY live input a force-dirty processor reads MUST
+// be folded in here, or that track renders stale = wrong pitches (silent, hard to
+// notice). Over-inclusion only costs an occasional extra render. Inputs that also
+// dirty through another path (slot-sync CC writes; the global-scale RenderDirtySetAll
+// sites) are folded in anyway so the signature is self-sufficient and does not depend
+// on auditing every writer.
+#define SEQ_RENDER_SIG_PRIME 2654435761u
+static inline u32 render_sig_mix(u32 sig, u32 v) { return sig * SEQ_RENDER_SIG_PRIME + v; }
+
+static u32 render_live_sig(u8 track, u8 *has_live)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  u32 sig = 0;
+  u8 live = 0;
+  u8 slot;
+  for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
+    const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
+    if( !p->enabled )
+      continue;
+    switch( p->id ) {
+      case SEQ_PROCESSOR_ID_CHORD_MASK:
+        // Live: the held chord PC-set on the slot's bus (SEQ_MIDI_IN — never dirties;
+        // the ONLY thing that catches a held-chord change). bus/strength/drum_mask
+        // change via SEQ_CORE_ChordMaskSlotSync (which dirties) — folded for safety.
+        live = 1;
+        sig = render_sig_mix(sig, 0x01u);
+        sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_BusPCSetGet(p->bus));
+        sig = render_sig_mix(sig, ((u32)p->bus << 8) | (u32)p->strength);
+        sig = render_sig_mix(sig, (u32)p->drum_mask);
+        break;
+
+      case SEQ_PROCESSOR_ID_TENSION:
+        // Live: GRAVITY (cockpit dial / RESOLVE ramp) AND the held chord on the bus —
+        // SEQ_CORE_TensionBandMask reads BOTH the chord PC-set (L2c) AND the bass note
+        // (BusLowestNoteGet → L0/root), plus the global scale/root the band is built
+        // from. GRIP(strength)/bus/drum_mask change via SEQ_CORE_TensionSlotSync.
+        live = 1;
+        sig = render_sig_mix(sig, 0x02u);
+        sig = render_sig_mix(sig, (u32)(u8)seq_core_tension_gravity);
+        sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_BusPCSetGet(p->bus));
+        sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_BusLowestNoteGet(p->bus));
+        sig = render_sig_mix(sig, ((u32)p->bus << 8) | (u32)p->strength);
+        sig = render_sig_mix(sig, (u32)p->drum_mask);
+        sig = render_sig_mix(sig, ((u32)seq_core_global_scale << 16)
+                                | ((u32)seq_core_global_scale_root_selection << 8)
+                                | (u32)seq_core_keyb_scale_root);
+        break;
+
+      case SEQ_PROCESSOR_ID_PITCH:
+        // PITCH joins the force-dirty set only while its input is live (Transpose
+        // playmode / global transpose) — static transpose+FTS render on events, so a
+        // non-live PITCH slot is NOT in the signature (and not force-dirtied). Live:
+        // the transposer note (SEQ_MIDI_IN — never dirties) + the FTS scale/root
+        // globals (FORCE_SCALE path). transpose/playmode/flags change via
+        // SEQ_CORE_PitchSlotSync — folded for safety (trkmode_flags.ALL covers
+        // FORCE_SCALE/HOLD/FIRST_NOTE in one byte).
+        if( !pitch_slot_live(track) )
+          break;
+        live = 1;
+        sig = render_sig_mix(sig, 0x03u);
+        sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_TransposerNoteGet(
+                                        p->bus, tcc->trkmode_flags.HOLD,
+                                        tcc->trkmode_flags.FIRST_NOTE));
+        sig = render_sig_mix(sig, ((u32)tcc->transpose_oct << 4) | (u32)tcc->transpose_semi);
+        sig = render_sig_mix(sig, ((u32)tcc->playmode << 8) | (u32)tcc->trkmode_flags.ALL);
+        sig = render_sig_mix(sig, (u32)seq_core_global_transpose_enabled);
+        sig = render_sig_mix(sig, ((u32)seq_core_global_scale << 16)
+                                | ((u32)seq_core_global_scale_root_selection << 8)
+                                | (u32)seq_core_keyb_scale_root);
+        sig = render_sig_mix(sig, (u32)p->bus);
+        break;
+
+      default:
+        break;
+    }
+  }
+  *has_live = live;
+  return sig;
+}
+
 void SEQ_CORE_RenderTracks(void)
 {
+  u32 tick_cyc = 0;   // total render cycles this pass (all dirty tracks)
+  u8  tick_dirty = 0; // tracks actually rendered this pass
   u8 track;
   for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
-    // chord_mask + tension depend on live inputs (the bus PC-set / the global
-    // GRAVITY dial), not just source state — force a re-render every tick on any
-    // track carrying an enabled chord_mask or tension slot, so the next emitted
-    // note reflects the current held chord / knob. PITCH joins them only while
-    // its own input is live (transposer bus / global transpose — see
-    // pitch_slot_live); static transpose/FTS render on events. Phase D will
-    // optimize via sweep/quiet detection.
-    u8 slot;
-    for(slot=0; slot<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++slot) {
-      const seq_processor_slot_t *p = &seq_processor_stack[track][slot];
-      if( !p->enabled )
-        continue;
-      if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK || p->id == SEQ_PROCESSOR_ID_TENSION
-          || (p->id == SEQ_PROCESSOR_ID_PITCH && pitch_slot_live(track)) ) {
-        seq_render_dirty[track] = 1;
-        break;
-      }
-    }
-    if( seq_render_dirty[track] )
+    // Phase D sweep/quiet change-detection. chord_mask / tension / live-pitch depend
+    // on live inputs (the held chord on a bus, the global GRAVITY dial, the transposer
+    // note) that can change between ticks WITHOUT a source dirty — but re-rendering
+    // every armed track every tick pegs the CPU (the +2 UI task starves, control
+    // surface dark). Compute a signature of those live inputs and dirty the track only
+    // when it changes: a static field is sig-stable → no render → UI alive even with
+    // all 16 gripped; a sweep changes the sig → re-renders during the sweep only.
+    u8 has_live = 0;
+    u32 sig = render_live_sig(track, &has_live);
+    if( has_live && sig != seq_render_live_sig[track] )
+      seq_render_dirty[track] = 1;
+
+    if( seq_render_dirty[track] ) {
+      // Render-cost probe: bracket only the real render. The counter is u32 and the
+      // subtraction is wrap-safe; a render that gets preempted by an IRQ counts that
+      // time too (wall-clock occupancy — which is exactly what starves emission).
+      u32 c0 = SEQ_CORE_DWT_CYCCNT;
       SEQ_CORE_RenderTrack(track);
+      u32 dc = SEQ_CORE_DWT_CYCCNT - c0;
+      tick_cyc += dc;
+      ++tick_dirty;
+      if( dc > seq_core_render_max_track_cyc )
+        seq_core_render_max_track_cyc = dc;
+
+      // Store the live-input signature we just rendered, so the next tick re-renders
+      // only if a live input changed since. Recorded regardless of which path set
+      // dirty (a source edit renders the live inputs too), so the stored value always
+      // reflects the rendered output. A live input that changes DURING the render is
+      // caught next tick (sig differs) — one extra render, self-correcting, never stale.
+      if( has_live )
+        seq_render_live_sig[track] = sig;
+    }
   }
+
+  if( tick_dirty ) {
+    if( tick_cyc > seq_core_render_max_tick_cyc )
+      seq_core_render_max_tick_cyc = tick_cyc;
+    if( tick_dirty > seq_core_render_max_dirty )
+      seq_core_render_max_dirty = tick_dirty;
+    seq_core_render_total_us += tick_cyc / SEQ_CORE_DWT_CYC_PER_US;
+    ++seq_core_render_tick_count;
+  }
+  seq_core_render_last_dirty = tick_dirty;
 }
 
 
@@ -3229,6 +3450,34 @@ void SEQ_CORE_UIServiceGapMark(void)
   if( gap > seq_core_ui_service_max_gap )
     seq_core_ui_service_max_gap = gap;
   seq_core_ui_service_last_tick = now;
+}
+
+// All-16 render-cost probe (play-readiness #5). Reset zeroes the accumulators and anchors
+// the window. Get reports the window in microseconds (cycles converted here so the hot path
+// stays divide-free). Drive with the transport running (or step the clock) after arming the
+// tracks, then read back. See CMD_RENDER_PERF.
+void SEQ_CORE_RenderCostReset(void)
+{
+  seq_core_render_total_us = 0;
+  seq_core_render_max_tick_cyc = 0;
+  seq_core_render_max_track_cyc = 0;
+  seq_core_render_tick_count = 0;
+  seq_core_render_last_dirty = 0;
+  seq_core_render_max_dirty = 0;
+  seq_core_render_reset_ms = (u32)MIOS32_TIMESTAMP_Get();
+}
+
+void SEQ_CORE_RenderCostGet(u32 *total_us, u32 *max_tick_us, u32 *max_track_us,
+                            u32 *tick_count, u8 *last_dirty, u32 *elapsed_ms,
+                            u8 *max_dirty)
+{
+  if( total_us )     *total_us     = seq_core_render_total_us;
+  if( max_tick_us )  *max_tick_us  = seq_core_render_max_tick_cyc / SEQ_CORE_DWT_CYC_PER_US;
+  if( max_track_us ) *max_track_us = seq_core_render_max_track_cyc / SEQ_CORE_DWT_CYC_PER_US;
+  if( tick_count )   *tick_count   = seq_core_render_tick_count;
+  if( last_dirty )   *last_dirty   = seq_core_render_last_dirty;
+  if( elapsed_ms )   *elapsed_ms   = (u32)MIOS32_TIMESTAMP_GetDelay(seq_core_render_reset_ms);
+  if( max_dirty )    *max_dirty    = seq_core_render_max_dirty;
 }
 
 

@@ -168,6 +168,13 @@ s32 SEQ_TRG_Get(u8 track, u16 step, u8 trg_layer, u8 trg_instrument)
 {
   u8 num_t_layers = trg_layer_num_layers[track];
   u8 num_t_steps8 = trg_layer_num_steps8[track];
+  // A 4-bit assignment nibble can point past the track's real layers/instruments (a loaded
+  // pattern or a direct CC write — the UI clamps, those don't). Treat OOB as "trigger not
+  // set": the render refreshes only the used region of the output mirror, so its [used,MAX)
+  // tail can hold stale bytes; bounding by the actual layer/instrument count (not just MAX)
+  // keeps the long-standing "OOB layer ⇒ 0" guarantee independent of buffer contents.
+  if( trg_layer >= num_t_layers || trg_instrument >= trg_layer_num_instruments[track] )
+    return 0;
   u16 step_ix = (trg_instrument * num_t_layers * num_t_steps8) + (trg_layer * num_t_steps8) + (step/8);
   if( step_ix >= SEQ_TRG_MAX_BYTES )
     return 0; // invalid step position: return 0 (trigger not set)

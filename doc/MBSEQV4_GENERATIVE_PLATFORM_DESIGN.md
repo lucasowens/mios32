@@ -1121,8 +1121,12 @@ the elf is the worst case), but the system breaks at the two seams where the map
 4. **Fix the hold-polarity reversal** — PHRASE hold = *create*, SELECT+BOOKMARK hold =
    *destroy*, same 1000 ms. One mis-timed press loses the set. **RESOLVED: REVERT is undoable**
    (Stage 2b, ORGANISM scope folded into #3 — a mis-fired REVERT is one SELECT+CLEAR back; §9).
-5. **Measure the all-16 live-input render worst case on device** — chord_mask/tension force a
-   full re-render every tick; never measured; lands exactly on the GRAVITY/chord sweep.
+5. **The all-16 live-input render worst case — MEASURED then FIXED. ✓ SHIPPED 2026-06-26 (§9).**
+   chord_mask/tension/live-pitch forced a full re-render every tick; measured ~95% duty / UI-dead
+   at 16 full-buffer tracks (locked up at ~6 on the user's set). Cured by per-track live-input
+   **change-detection** (`render_live_sig`): static field → zero renders, sweep → renders only on
+   change. by-ear GO + HIL 2/2; real-set all-16 + echo/robotize/humanize = CPU ~27%, no lockup.
+   *Exposed the next ceiling: ~8-track emission/port-buffer limit (scheduler drops = 0), parked.*
 6. **Trigger generators — fold into the shared pool** (capability; gated on #1/#3).
 7. **Atomic snapshot writes + the SET durable baseline** (reliability; reuse the SET layer's
    proven temp+rename for `SnapshotWrite`).
@@ -1714,7 +1718,8 @@ Append-only-ish; revise an entry only with a dated note.
       carrying an enabled chord_mask slot, inside `SEQ_CORE_RenderTracks`.
       Cheap brute-force (1.25 KB memcpy + walking only note-bearing layers ≤
       ~16 × 32 bytes per track); phase D's sweep/quiet detection will
-      optimize. Bus-dirty-signal approach considered and rejected for phase C
+      optimize *(DONE 2026-06-26 — `render_live_sig` change-detection; §9)*.
+      Bus-dirty-signal approach considered and rejected for phase C
       (would touch `seq_midi_in.c` push/pop paths; overkill until measured
       need).
     - **TRKMODE UX migration:** kept as a shortcut → slot bridge.
@@ -2872,6 +2877,48 @@ duplicated UNDO/REDO button-dispatch block extracted to `SEQ_UI_JournalToggleDis
 (stash on SD, scope byte in CCM padding); +48 B flash. §10(a2) is now fully built; codebase facts
 folded into REFERENCE (action-journal + FEARLESS sections) + MANUAL (CHECKPOINT/REVERT). Plan
 `doc/plans/2026-06-23-play-readiness-safety-net.md` retired.
+
+**2026-06-26 — render change-detection SHIPPED; the all-16 GRAVITY render wall is GONE (§8 queue
+#5, the last play-readiness item).** chord_mask / tension / live-pitch slots used to force a FULL
+per-track re-render EVERY tick — even when the field was perfectly STATIC. The render runs in the
++4 emission task's tick prologue, so with many tracks gripped it pegged the CPU and starved the
+lowest-priority +2 UI task (control surface dark while audio limped); the user's real patterns
+locked up at ~6 gripped tracks. **Fix (`SEQ_CORE_RenderTracks` / new `render_live_sig`):** fold
+every LIVE input a force-dirty processor reads into a per-track u32 signature and re-render only
+when it CHANGES. Static field → signature stable → **zero renders**; a dial sweep / held-chord
+change moves the signature → re-renders during the sweep only. The "Phase D sweep/quiet
+detection" the §8 phase-D notes promised, finally built. **The diagnostic-first arc paid off
+twice:** (1) a cost-cut tried first (bounding the per-tick `memcpy` to a track's *used* bytes via
+`par_used_bytes`/`trg_used_bytes`) moved the ceiling only 4→5 — real tracks fill the 1024-byte
+buffer, so the bound rarely shrinks the copy; the root waste was re-rendering 900×/sec to produce
+identical output, which only change-detection removes (kept the bound anyway — free for genuinely
+lean tracks). (2) The DWT-cycle-counter render probe (`CMD_RENDER_PERF`, conflict-free vs the TIM6
+stopwatch SEQ_STATISTICS owns) *measured* the wall before any fix: 16 full-buffer tracks = ~95%
+render duty, ~1500 µs/tick (> a 140 BPM tick), UI service-gap ~1869 ISR ticks (dead). **The
+critical correctness catch:** the build plan's signature audit was INCOMPLETE — it listed only
+gravity+grip+scale for TENSION, but `SEQ_CORE_TensionBandMask` reads the held chord via BOTH
+`SEQ_MIDI_IN_BusPCSetGet` (chord tones / L2c) AND `SEQ_MIDI_IN_BusLowestNoteGet` (bass → L0/root),
+plus `global_scale_root_selection` + `keyb_scale_root`. Missing the held-chord inputs would have
+silently staled a gripped TENSION track when a chord is played under it (wrong pitches). All folded
+in; a 3-lens adversarial review (staleness / control-flow / wire-format) confirmed the signature
+is complete (verified input inventory per processor), the store-after-render contract converges,
+and LIMIT's exclusion is safe (purely source-state). **by-ear GO + HIL 2/2** (`test_render_perf.py`
+rewritten around change-detection, parametrized lean + full-buffer): a STATIC armed field on all 16
+renders **nothing** (max_dirty 0, duty 0%, ui_gap == baseline) EVEN on the 1024-byte drum layout
+(the case that cost ~2469 µs/tick before); a no_dirty GRAVITY change re-renders all 16 (positive
+control isolating the signature from `RenderDirtySetAll`). On the user's real set: all 16 gripped +
+robotize + echo + humanize on every track → **CPU ~27%, no lockup, no drops.** +64 B flash,
+**+65 B main RAM** (the 16×u32 signature array). New permanent regression guards: `CMD_RENDER_PERF`
+probe (with a peak-`max_dirty` field for a race-free "tracks-armed" proof) + `board.render_perf()`
++ `tests/diag_render.py` (on-device by-ear tool, reports peak +2 UI gap live) + an OOB stale-tail
+fix the bounded copy exposed (`SEQ_PAR_Get`/`SEQ_TRG_Get` bound by real layer/instr count, not just
+MAX; the LIMIT `no_fx` layer bound). Plan `doc/plans/2026-06-26-render-changedetect.md` retired.
+**Next ceiling discovered (NOT this fix, NOT the scheduler pool — `seq_midi_out_dropouts` stayed
+0):** at the extreme all-16-echo load only ~8 tracks' notes emit and muting frees the rest — a
+downstream emission/port ceiling (likely the physical-port Tx buffer overflowing on a same-tick
+burst, dropped below the 256-slot scheduler so invisible to its drop counter), newly *reachable*
+only because the render wall no longer kills the box first. Parked for a separate measure-first
+investigation (split ports / Tx-buffer sizing).
 
 ---
 

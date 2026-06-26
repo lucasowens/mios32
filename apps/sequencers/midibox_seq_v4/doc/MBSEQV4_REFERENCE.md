@@ -371,6 +371,34 @@ Track 2; plan `doc/plans/2026-06-10-pitch-chain-migration.md`). HIL 108/108.
   standalone `Board()` scripts run on the USER session, not AUTOTEST (pytest's
   conftest swaps and restores it).
 
+### Render change-detection — sweep/quiet by live-input signature ([seq_core.c](../core/seq_core.c), shipped 2026-06-26)
+
+The force-dirty processors (CHORD_MASK / TENSION / live-PITCH) depend on inputs that change
+between ticks with NO source dirty: the held chord on a bus (`SEQ_MIDI_IN_Bus*` — never dirties),
+the live transposer note, the global GRAVITY dial, the global scale/root. The old `SEQ_CORE_RenderTracks`
+re-rendered every armed track EVERY tick to catch them → ~95% render duty / UI-dead at 16
+full-buffer gripped tracks (design doc §8 #5; §9 2026-06-26).
+- **Fix:** `render_live_sig(track, &has_live)` folds every such live input into a per-track u32
+  (rolling multiply-add, per-id tag); `SEQ_CORE_RenderTracks` re-renders a track only when its sig
+  differs from `seq_render_live_sig[track]` (stored AFTER the render). Static field → sig stable →
+  **zero renders**; sweep/chord-change → renders only that tick. Source edits still dirty via the
+  existing `RenderTouched` path — the sig covers ONLY the non-dirtying live inputs.
+- **GOTCHA — completeness is the whole risk:** a missed live input → the track renders STALE (wrong
+  pitches, silent). TENSION's `SEQ_CORE_TensionBandMask` reads the held chord via BOTH
+  `SEQ_MIDI_IN_BusPCSetGet` (L2c) AND `SEQ_MIDI_IN_BusLowestNoteGet` (L0/root) — both MUST be in the
+  sig (the build plan's audit missed them). live-PITCH needs the transposer note + FTS scale/root.
+  LIMIT is correctly EXCLUDED (purely source-state, no live input).
+- **Two prior cost-cuts kept (free, but insufficient alone):** the per-tick copy is bounded to a
+  track's used bytes (`par_used_bytes`/`trg_used_bytes`) — a no-op for real tracks that fill the
+  1024-byte buffer, so it only moved the ceiling 4→5; and `SEQ_PAR_Get`/`SEQ_TRG_Get` now bound by
+  the real layer/instr count (not just MAX) so the bounded copy's stale `[used,MAX)` tail is never
+  read as wrong notes/gates (fixes a latent OOB reachable via a loaded pattern / direct CC).
+- **Probe:** `CMD_RENDER_PERF` (0x46) / `board.render_perf()` — DWT-cycle-counter per-track render
+  cost (the fork's CMSIS omits the DWT block; mapped by fixed CM4 address, conflict-free vs the
+  TIM6 `MIOS32_STOPWATCH` SEQ_STATISTICS owns). Reports duty, +4 emission gap, +2 UI gap, and a
+  peak-`max_dirty` (race-free "how many armed tracks re-rendered together"). On-device by-ear tool:
+  `tests/diag_render.py`. HIL: `test_render_perf.py` (static==0 renders + no_dirty-gravity liveness).
+
 ### Two-pass robotize at runtime ([seq_core.c:1227 & :1423](../core/seq_core.c#L1227))
 
 `SEQ_ROBOTIZE_Event` is called twice per step. Any future bounce-style capture must replicate this or it'll be audibly faithful only to one of the two passes.

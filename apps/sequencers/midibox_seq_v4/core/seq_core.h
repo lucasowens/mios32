@@ -616,4 +616,12 @@ extern void SEQ_CORE_UIServiceGapReset(void);  // zero the peak, anchor "last UI
 extern u32  SEQ_CORE_UIServiceMaxGapGet(void); // peak ISR-tick gap between UI-task services since reset
 extern void SEQ_CORE_UIServiceGapMark(void);   // call at the top of SEQ_TASK_Period1mS each run
 
+// All-16 force-dirty render-cost probe (play-readiness #5). RenderCostReset zeroes the
+// window; RenderCostGet reports it in microseconds. Arm tracks (e.g. GRAVITY GRIP on all
+// 16), reset, run the transport, read back. NULL out-pointers are ignored.
+extern void SEQ_CORE_RenderCostReset(void);
+extern void SEQ_CORE_RenderCostGet(u32 *total_us, u32 *max_tick_us, u32 *max_track_us,
+                                   u32 *tick_count, u8 *last_dirty, u32 *elapsed_ms,
+                                   u8 *max_dirty);
+
 #endif /* _SEQ_CORE_H */

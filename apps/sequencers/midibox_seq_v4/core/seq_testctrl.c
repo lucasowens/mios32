@@ -141,6 +141,14 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 //   [status, running, wall_ticks(5x7), max_gap(5x7)]. Fills 0x48 (top of the free low gap).
 #define CMD_CAPTURE_PERF         0x48
 
+// CMD_RENDER_PERF — all-16 force-dirty render-cost probe (play-readiness #5). The render
+// prologue re-renders every track carrying an enabled chord_mask/tension/live-pitch slot
+// EVERY tick (memcpy 1024+256 + a processor sweep), bypassing the sweep/quiet fast path.
+// Arm the worst case (GRAVITY GRIP > 0 on all 16 tracks via CMD_CC_SET), RESET, run the
+// transport for a window, then READ. payload [mode] (0=reset+anchor, 1=read). 0x46 is the
+// last free low opcode below CMD_TRACK_REDO (0x47).
+#define CMD_RENDER_PERF          0x46
+
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
 //   1..16 = GP1..GP16
@@ -1021,11 +1029,17 @@ static void cmd_global_scale_set(mios32_midi_port_t port, const u8 *payload, u8 
 }
 
 
-// CMD_TENSION_SET payload: [gravity_biased]  (gravity = gravity_biased - 64,
-// range -64..+63; 64 = detent/pass-through). Reply: [gravity_biased, status].
-// Sets the global GRAVITY dial and dirties all tracks so the change renders.
-// GRIP (per-track) is set via the existing CMD_CC_SET on SEQ_CC_TENSION_GRIP
-// (0x9A); SHADE via CMD_GLOBAL_SCALE_SET — so this is the only new verb needed.
+// CMD_TENSION_SET payload: [gravity_biased, (opt) no_dirty]  (gravity =
+// gravity_biased - 64, range -64..+63; 64 = detent/pass-through). Reply:
+// [gravity_biased, status]. Sets the global GRAVITY dial; by default dirties all
+// tracks so the change renders. GRIP (per-track) is set via the existing CMD_CC_SET
+// on SEQ_CC_TENSION_GRIP (0x9A); SHADE via CMD_GLOBAL_SCALE_SET.
+//
+// Optional no_dirty (payload[1] bit0): write gravity WITHOUT RenderDirtySetAll. This
+// simulates a no-dirty live input (like a held-chord change on a bus, which the
+// harness can't inject) so the play-readiness #5 render change-detection test can
+// prove that the per-track live-input SIGNATURE alone re-renders an armed track —
+// isolated from the RenderDirtySetAll that would otherwise mask a broken signature.
 static void cmd_tension_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
   u8 reply[2] = { 0, 0x02 };
@@ -1034,8 +1048,10 @@ static void cmd_tension_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
     return;
   }
   s8 gravity = (s8)((s16)(payload[0] & 0x7f) - 64);
+  u8 no_dirty = (plen >= 2) ? (payload[1] & 0x01) : 0;
   seq_core_tension_gravity = gravity;
-  SEQ_CORE_RenderDirtySetAll();
+  if( !no_dirty )
+    SEQ_CORE_RenderDirtySetAll();
   reply[0] = payload[0] & 0x7f;
   reply[1] = 0x01;
   send_reply(port, CMD_TENSION_SET, reply, sizeof(reply));
@@ -2004,6 +2020,81 @@ static void cmd_capture_perf(mios32_midi_port_t port, u8 *payload, u32 len)
 }
 
 
+// Pack a u32 little-endian into 5 x 7-bit SysEx-safe bytes (the inline encoding repeated by
+// the *_perf probes above; the top nibble lands in the 5th byte's low 4 bits).
+static void pack_u32_le7(u8 *dst, u32 v)
+{
+  dst[0] = (v >> 0)  & 0x7f;
+  dst[1] = (v >> 7)  & 0x7f;
+  dst[2] = (v >> 14) & 0x7f;
+  dst[3] = (v >> 21) & 0x7f;
+  dst[4] = (v >> 28) & 0x0f;
+}
+
+
+// CMD_RENDER_PERF — all-16 force-dirty render-cost probe (play-readiness #5). See the define
+// above. Render time is measured with the DWT cycle counter (does NOT collide with the TIM6
+// stopwatch SEQ_STATISTICS brackets this handler with). RESET also re-anchors the emission
+// service-gap probe so the same window's starvation is reported on READ.
+// payload [mode]  (0 = reset+anchor, 1 = read)  ->  reply (39 bytes):
+//   [status, running,
+//    total_us(5x7 LE), max_tick_us(5x7 LE), max_track_us(5x7 LE),
+//    tick_count(5x7 LE), elapsed_ms(5x7 LE), emission_max_gap(5x7 LE),
+//    ui_max_gap(5x7 LE), last_dirty, max_dirty]
+//   ui_max_gap: peak +2 UI-task service gap (ISR ticks) during the window — the UI-death
+//   witness; balloons when the render load starves the control surface.
+//   last_dirty: tracks rendered on the MOST RECENT pass. max_dirty: PEAK tracks rendered in
+//   one pass over the window — race-free "how many armed tracks re-rendered together" (== 16
+//   on a live-input change; 0 in a truly-static window where change-detection renders nothing).
+//   status:  0x01 ok, 0x02 malformed
+//   running: transport running at call time (the render/gap window is only meaningful if it
+//            ran for the whole window)
+static void cmd_render_perf(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  u8 reply[39];
+  memset(reply, 0, sizeof(reply));
+  if( len < 1 ) {
+    reply[0] = 0x02; // malformed
+    send_reply(port, CMD_RENDER_PERF, reply, sizeof(reply));
+    return;
+  }
+
+  u8 mode = payload[0] & 0x7f;
+  reply[0] = 0x01;
+  reply[1] = SEQ_BPM_IsRunning() ? 1 : 0;
+
+  if( mode == 0 ) {
+    SEQ_CORE_RenderCostReset();
+    SEQ_CORE_ServiceGapReset();
+    SEQ_CORE_UIServiceGapReset();   // measure +2 UI-task starvation under the render load too
+    send_reply(port, CMD_RENDER_PERF, reply, sizeof(reply));
+    return;
+  }
+  if( mode != 1 ) {            // contract is strictly 0=reset, 1=read
+    reply[0] = 0x02;           // malformed
+    send_reply(port, CMD_RENDER_PERF, reply, sizeof(reply));
+    return;
+  }
+
+  u32 total_us = 0, max_tick_us = 0, max_track_us = 0, tick_count = 0, elapsed_ms = 0;
+  u8  last_dirty = 0, max_dirty = 0;
+  SEQ_CORE_RenderCostGet(&total_us, &max_tick_us, &max_track_us, &tick_count, &last_dirty, &elapsed_ms, &max_dirty);
+  u32 gap = SEQ_CORE_ServiceMaxGapGet();
+  u32 ui_gap = SEQ_CORE_UIServiceMaxGapGet();   // peak +2 UI-task service gap (UI-death witness)
+
+  pack_u32_le7(&reply[2],  total_us);
+  pack_u32_le7(&reply[7],  max_tick_us);
+  pack_u32_le7(&reply[12], max_track_us);
+  pack_u32_le7(&reply[17], tick_count);
+  pack_u32_le7(&reply[22], elapsed_ms);
+  pack_u32_le7(&reply[27], gap);
+  pack_u32_le7(&reply[32], ui_gap);
+  reply[37] = last_dirty & 0x7f;
+  reply[38] = max_dirty & 0x7f;
+  send_reply(port, CMD_RENDER_PERF, reply, sizeof(reply));
+}
+
+
 // CMD_CAPTURE_SPAN — retroactive CAPTURE. sub-op:
 //   0 = CAPTURE  [0, src, k, dst]  -> [src, dst, status]
 //         status: 0x01 ok; else 0x10|(-r) for the SEQ_CORE_CaptureSpan dispatcher's
@@ -2714,6 +2805,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_CAPTURE_PERF:
             cmd_capture_perf(port, payload_buf, payload_len);
+            break;
+          case CMD_RENDER_PERF:
+            cmd_render_perf(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface

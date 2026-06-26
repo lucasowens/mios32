@@ -273,6 +273,12 @@ s32 SEQ_PAR_Get(u8 track, u16 step, u8 par_layer, u8 par_instrument)
   u8 num_p_layers = par_layer_num_layers[track];
   u16 num_p_steps = par_layer_num_steps[track];
 
+  // OOB layer/instrument ⇒ 0 (see SEQ_TRG_Get): the bounded render leaves a stale tail in
+  // the output mirror, so bound by the real layer/instrument count, not just MAX. (Also
+  // guards the step modulo below against a degenerate zero-layer track.)
+  if( par_layer >= num_p_layers || par_instrument >= par_layer_num_instruments[track] )
+    return 0;
+
   // modulo of num_p_steps to allow mirroring of parameter layer in drum mode
   step %= num_p_steps;
 

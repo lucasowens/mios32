@@ -86,6 +86,7 @@ from .sysex import (
     CMD_CAPTURE_SPAN,
     CMD_TRANSPORT,
     CMD_CAPTURE_PERF,
+    CMD_RENDER_PERF,
     RNG_SEED_GEN_GET,
     RNG_SEED_GEN_SET,
     RNG_SEED_TRV_GET,
@@ -817,15 +818,22 @@ class Board:
         if payload[3] != CMD_STATUS_OK:
             raise ValueError(f"GLOBAL_SCALE_SET status {payload[3]:#04x}")
 
-    def tension_set(self, gravity: int, timeout: float = 1.0) -> None:
+    def tension_set(self, gravity: int, dirty: bool = True, timeout: float = 1.0) -> None:
         """Set the global GRAVITY dial (Tension Workbench). gravity is the
         signed -64..+63 dial value (0 = detent / pass-through); it's sent biased
-        by +64 to stay 7-bit-safe on the wire. Dirties all tracks so the change
-        renders. GRIP is per-track via cc_set(track, CC.TENSION_GRIP, ...)."""
+        by +64 to stay 7-bit-safe on the wire. GRIP is per-track via
+        cc_set(track, CC.TENSION_GRIP, ...).
+
+        dirty=True (default): also RenderDirtySetAll so the change renders even when
+        stopped (the production path). dirty=False: write gravity WITHOUT dirtying —
+        simulates a no-dirty live input (a held-chord change, which the harness can't
+        inject) so the render change-detection test can prove the per-track live-input
+        SIGNATURE alone re-renders an armed track, isolated from RenderDirtySetAll."""
         if not -64 <= gravity <= 63:
             raise ValueError(f"gravity out of range: {gravity}")
         since = time.monotonic() - self._t0
-        self.send_raw(frame(CMD_TENSION_SET, bytes([(gravity + 64) & 0x7F])))
+        body = bytes([(gravity + 64) & 0x7F, 0 if dirty else 1])
+        self.send_raw(frame(CMD_TENSION_SET, body))
         payload = self.wait_for_sysex(CMD_TENSION_SET, timeout=timeout, since=since)
         if len(payload) < 2:
             raise RuntimeError(f"short TENSION_SET reply: {payload!r}")
@@ -1503,6 +1511,78 @@ class Board:
             "freeze_fraction": (gap / wall) if wall else 0.0,
             "ui_gap": ui_gap,
             "ui_freeze_fraction": (ui_gap / wall) if wall else 0.0,
+        }
+
+    def render_perf_reset(self, timeout: float = 1.0) -> None:
+        """Reset the all-16 force-dirty render-cost probe and re-anchor the emission
+        service-gap window. Arm the worst case FIRST (e.g. GRIP > 0 on the tracks you want
+        force-dirty), then reset, run the transport for a window, then read render_perf()."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_RENDER_PERF, bytes([0x00])))
+        payload = self.wait_for_sysex(CMD_RENDER_PERF, timeout=timeout, since=since)
+        if len(payload) < 1 or payload[0] != CMD_STATUS_OK:
+            raise RuntimeError(f"RENDER_PERF reset failed: {payload!r}")
+
+    def render_perf(self, timeout: float = 2.0) -> dict:
+        """Read the all-16 force-dirty render-cost probe (play-readiness #5).
+
+        SEQ_CORE_RenderTracks re-renders every track carrying an enabled chord_mask / tension /
+        live-pitch slot EVERY tick (memcpy 1024+256 + a processor sweep over up to num_p_steps),
+        bypassing the sweep/quiet fast path. With GRIP armed on all 16 tracks that is the
+        all-sweeping worst case the design never measured: if it eats too much of a tick the +4
+        emission task (which runs this render in its prologue) falls behind and the audible clock
+        slips. Each render is timed with the Cortex-M4 DWT cycle counter (conflict-free vs the
+        TIM6 stopwatch SEQ_STATISTICS uses). Call render_perf_reset(), run the transport for a
+        window, then this. Returns:
+          - total_us:      summed render time across the window
+          - max_tick_us:   peak render of one tick (all dirty tracks summed) — competes with emission
+          - max_track_us:  peak single-track render
+          - tick_count:    RenderTracks passes that rendered >=1 track
+          - elapsed_ms:    window length (probe reset -> now)
+          - emission_gap:  peak emission-task (+4) service gap during the window, in ISR ticks
+                           (~1 = emission kept up through the render load; large = render starved it)
+          - ui_gap:        peak +2 UI-task service gap during the window, in ISR ticks — the UI-death
+                           witness. The +2 task (LEDs/LCD/buttons) is the lowest priority, so under a
+                           heavy render it starves FIRST: ~1 = control surface alive, large = UI frozen.
+          - last_dirty:    tracks rendered on the most recent pass (== 16 at full stress; a sanity check)
+          - max_dirty:     PEAK tracks rendered in one pass over the window — race-free "how many
+                           armed tracks re-rendered together". == 16 when a live-input change
+                           dirties all gripped tracks; 0 in a truly-static window where change-
+                           detection renders nothing (so it doubles as the "tracks ARE armed" proof
+                           in the signature-liveness pass, where last_dirty would race to 0).
+          - duty:          total_us / (elapsed_ms*1000) — render CPU fraction at the run BPM
+          - running:       transport running at read time
+        Note: total_us (and hence duty) is a u32 of accumulated render microseconds and a
+        slight low-biased estimate (it truncates <1 us/tick); it saturates after ~72 min of
+        cumulative render time, so re-reset between reads on a long manual session. The hard
+        threshold fields max_tick_us / max_track_us are bounded peaks and unaffected.
+        """
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_RENDER_PERF, bytes([0x01])))
+        payload = self.wait_for_sysex(CMD_RENDER_PERF, timeout=timeout, since=since)
+        if len(payload) < 39:
+            raise RuntimeError(f"short RENDER_PERF reply ({len(payload)}b): {payload!r}")
+        if payload[0] != CMD_STATUS_OK:
+            raise RuntimeError(f"RENDER_PERF status {payload[0]:#04x}: {payload!r}")
+
+        def u32(off: int) -> int:
+            return (payload[off] | (payload[off + 1] << 7) | (payload[off + 2] << 14)
+                    | (payload[off + 3] << 21) | (payload[off + 4] << 28))
+
+        total_us = u32(2)
+        elapsed_ms = u32(22)
+        return {
+            "running": bool(payload[1]),
+            "total_us": total_us,
+            "max_tick_us": u32(7),
+            "max_track_us": u32(12),
+            "tick_count": u32(17),
+            "elapsed_ms": elapsed_ms,
+            "emission_gap": u32(27),
+            "ui_gap": u32(32),
+            "last_dirty": payload[37],
+            "max_dirty": payload[38],
+            "duty": (total_us / (elapsed_ms * 1000.0)) if elapsed_ms else 0.0,
         }
 
     def capture_ring_query(self, timeout: float = 1.0) -> dict:
