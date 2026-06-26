@@ -408,7 +408,8 @@ performable** — see §8 + `doc/plans/2026-06-21-system-flatmap.md`.*
 | Unified UNDO/REDO | **built (Stage 2a+2b)** | §9, §10(a2) |
 | SET durable baseline | queued / design-ahead | §6, §9, §10(a) |
 | Trigger generators (don't fit as twin pool) | queued — needs redesign | §8, §10(b) |
-| Self-bus (self-modulation CC + note-grain) | queued / design-ahead | §6, §10(c) |
+| Self-bus, config-grain (direction/progression/…) | **shipped — it's TK's 2019 `Ctrl` par-type; by-ear GO 2026-06-26** | §6, §9, §10(c) |
+| Self-bus, note-grain (self-transpose/chord) + dirty gate | queued / design-ahead | §6, §10(c) |
 | Robotize → render-stack migration | queued | §9, §10 |
 | Windowing (sampler reads); track slots (RAM captures) | partial / deferred | §5.5 |
 
@@ -2931,6 +2932,55 @@ unparked:** bump USB ring 64→512 (~+1.8 KB) + pool 256→512 (~+4 KB) — fits
 spread tracks across USB1–4 (helps the ring burst, NOT the pool). The §8 emergent queue note re the
 ~95% wall is closed; this is the emission analogue, queued behind it.
 
+**2026-06-26 (cont.) — the config-grain self-bus ALREADY EXISTED (TK, 2019); discovered, validated
+by ear, capture-faithfulness mapped. §10(c)'s "build queued" was reinventing a shipped feature.**
+Picking up the queued self-modulation work (§10(c)), a source check *before* building found the
+config-grain self-bus **already in the tree**: it is the upstream `SEQ_PAR_Type_Ctrl` ("Ctrl")
+par-layer type, added by TK in commit `164c068b` (2019-12-18, "MBSEQ: support for Ctrl Layer"),
+inherited by this fork. A Ctrl layer calls `SEQ_CC_MIDI_Set(track, cc_number, value)` on its OWN
+track each step (`seq_layer.c:491` drum / ~848 normal) — routing per-step values to that track's own
+config params — and the UI shows **named labels** (`ctrl_labels[]` via `SEQ_CC_LABELS_Get(...,
+enforce_ctrl=1)`: Directn. / S.Replay / S.Fwd. / S.JmpBck / S.Repeat / S.Skip / S.Interv / ClockDiv
+/ TrkLen.), exactly the "labeled-parameter self-route" §10(c) proposed to build. Tick order is
+correct (NextStep `seq_core.c:4141` advances, then GetEvents `:4346` applies the Ctrl write → step N
+steers the N→N+1 hop; René/Eloquencer-style path modulation). **By ear: self-modulating direction +
+progression "works great."** No new code. The whole "build queued" framing was invisible-in-plain-
+sight — a cryptic name, upstream's loopback-drives-*another*-track framing, and this doc itself
+saying "build it" over a 2019 bridge. **LESSON (reinforces §2 / CLAUDE.md "verify against source"):
+grep the source before planning to BUILD a "queued" platform feature; upstream MIDIbox may already do it.**
+
+**FREEZE/CAPTURE faithfulness — code-traced + by-ear GO; the capture-centric MVP loop now proven
+end-to-end.** The two freeze paths treat self-mod OPPOSITELY. **Bounce-to-pattern**
+(`SEQ_CORE_CaptureToSlot`/`CaptureToTrack`) does NOT bake the re-phrasing: `ResetGenerativeForBounce`
+resets dir_mode/steps_* to forward, but the **Ctrl layer is on the PRESERVED list** (`seq_cc.c:139`)
+and its par values are kept, so the destination **re-runs the same modulation (preserve-and-REPLAY).**
+It reproduces the heard order only when the modulation is deterministic *and* starts from the same
+phase, and DRIFTS on: random directions (Directn. 4–6 draw `t->random_traverse_state`, which is
+runtime-only and NOT saved in the pattern → re-seeds fresh on load, `seq_core.c:3758` = a different
+walk); progression params the Ctrl layer doesn't itself drive (zeroed by the reset); or multi-bar
+counter phase. This is exactly this doc's "the CC source layer is the editable artifact / not
+bounce-bakeable," now confirmed — and it is what the user first read as "captured what I heard" then
+"not fully accurate." The **UTILITY-held CAPTURE grab** (`SEQ_CORE_CaptureSpan` — re-sim when
+stopped / tape when playing) IS faithful: it re-drives WITH the Ctrl layer live, records the EMITTED
+notes in PLAYBACK order and materializes them into consecutive forward steps (baking the re-phrasing
+into the note arrangement), memsets the dst par values to 0 to neutralize the inherited Ctrl layer
+(`seq_core.c:2191`), and restores `random_traverse_state` from the frame (`:2273`) so **even random
+directions reproduce.** **By ear: "worked perfectly using the utility method."** This proves the §8
+capture-centric MVP loop end-to-end — *material (self-bus motion) → harvest (CAPTURE) → faithful
+frozen pattern* — at a cost of ZERO new code (a 2019 feature + the already-built capture path).
+
+**Parked (the only fork-era debt; neither is blessed-needed yet).** (1) **The dirty gate** —
+`SEQ_CC_Set` unconditionally calls `SEQ_PATTERN_DirtySetTrack` (`seq_cc.c:523`), so continuous
+self-mod (and the vestigial all-zero Ctrl layer a CAPTURE dst inherits) churns the ~290 ms
+auto-writeback every step. Fix = a `seq_core_in_self_route`-style ambient flag + early-return in
+DirtySetTrack (~2 lines). User has NOT reported the churn bothering play ("everything is mostly
+working"), so it stays optional. (2) CaptureSpanPrepDst could null the baked Ctrl layer TYPE entirely
+(its effect is already in the notes) → kills that churn on captured dsts + de-clutters. **Still
+genuinely to-build (the note-grain half):** self-transpose / self-chord-mask (render-stack, born
+bounce-bakeable; §10(c)) and self-arp (deferred, hard). TrkLen./ClockDiv self-mod carry the
+immediate step-pointer wrap glitch (boundary-defer, `seq_cc.c:383-385`) — out of scope for
+direction/progression.
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3099,10 +3149,17 @@ the generative freeze/bounce law); the actionable build sketches live here.
   generative law (§9) so it never becomes a second emission-time exception. Spec before build:
   density/contour, drum-layer interaction, pitch×rhythm coupling.
 
-- **(c) Self-modulation = the "self-bus" (musical intent decided 2026-06-19; build queued).**
-  Let a track source the bus's *own* modulations from its **own par layers** instead of
-  spending a second (silent) loopback track. **Centerpiece = a self-routing CC layer**
-  (config-grain — the broad reach); the render-stack pitch path is the note-grain complement.
+- **(c) Self-modulation = the "self-bus".** Let a track source the bus's *own* modulations from
+  its **own par layers** instead of spending a second (silent) loopback track. **Centerpiece =
+  a self-routing CC layer** (config-grain — the broad reach); the render-stack pitch path is the
+  note-grain complement.
+  - **STATUS (corrected 2026-06-26): the config-grain centerpiece ALREADY EXISTS — it is the
+    upstream `SEQ_PAR_Type_Ctrl` ("Ctrl") par-layer type (TK, commit `164c068b`, 2019), validated
+    by ear, and it shows NAMED labels (`ctrl_labels[]`), not CC numbers. The design below was
+    "build queued" but was reinventing it.** What the spec below still buys on top of Ctrl: the
+    **dirty gate** (Ctrl churns auto-writeback) and the **note-grain half**. The freeze/capture
+    model below is now by-ear-confirmed. See §9 (2026-06-26 cont.) for the full account; treat the
+    rest of this entry as the design rationale that Ctrl already satisfies for config-grain.
   - **Self-routing CC layer (the MVP) — reuses the whole CC surface.** Today a loopback track's
     CC par layer routes `SEQ_MIDI_IN_BusReceive → SEQ_CC_MIDI_Set → SEQ_CC_Set` to **~50+
     track-level config params** (direction, length, loop, clock-div, transpose, groove, mode,
@@ -3151,16 +3208,20 @@ the generative freeze/bounce law); the actionable build sketches live here.
     `seq_cc_trk_t` (`0xFF`=off), SlotSync sets `slot->bus = 0xFF` self-sentinel; bounces editable.
   - **Self-arp — deferred (hard).** Emission-time + stateful (`t->arp_pos`); needs a per-track
     mini-notestack + reset hooks. Phase 2.
-  - **Capture/freeze (the §9 law bends here).** The note-grain complement BOUNCEs to static
-    notes (render-stack). The **CC self-routing half is not bounce-bakeable** — it modulates
-    playback behavior over time (a timeline, not buffer content), so freezing its **static heard
-    result** is a **tape/record** capture (§4/§5.5), not BOUNCE; the CC source layer is itself the
-    editable artifact. FREEZE (the wander gate) doesn't apply — self-routing is deterministic
-    layer replay, not wander; stop it by clearing the self-route flag (FREEZE only holds a
-    generator *feeding* the CC layer).
-  - **Build order:** the self-routing CC layer first — pick a couple of high-value targets to
-    prove by ear (e.g. direction + length, or the robotize dials) — then the note-grain
-    self-transpose / self-chord-mask, arp later.
+  - **Capture/freeze (CONFIRMED by ear 2026-06-26 — two paths, opposite behavior; §9).** The
+    note-grain complement BOUNCEs to static notes (render-stack). The **config-grain (Ctrl) half is
+    not bounce-bakeable** — it modulates playback behavior over time (a timeline, not buffer
+    content). Concretely: **bounce-to-pattern** (`CaptureToSlot`) preserves the Ctrl layer and
+    **replays** it (deterministic-only; drifts on random directions / multi-bar phase) — the CC
+    source layer stays the editable artifact. To freeze the **static heard result** you use the
+    **UTILITY-held CAPTURE grab** (`CaptureSpan`, re-sim/tape): it records the EMITTED stream in
+    playback order, bakes the re-phrasing into forward notes, and neutralizes the Ctrl layer —
+    faithful even for randomness. FREEZE (the wander gate) doesn't apply — self-routing is
+    deterministic layer replay, not wander; stop it by clearing the Ctrl layer.
+  - **Build order (revised 2026-06-26):** the self-routing CC layer is DONE (it's `Ctrl`;
+    direction + progression proven by ear). Remaining, in order: (1) the **dirty gate** if the
+    auto-writeback churn ever bothers play (parked — not yet needed); (2) the note-grain
+    **self-transpose / self-chord-mask** (render-stack, born bounce-bakeable); (3) self-arp later.
 
 - **(d)** The third beneficiary of the generative law is the existing **robotize →
   render-stack migration** (see the Bounce north-star entry above) — migrating it makes FREEZE

@@ -524,6 +524,33 @@ Per CHANGELOG.txt V4.097: a loopback track assigned to Bus1..4 can drive the glo
 - Limit Fx applies *after* the transpose/arp pass ([seq_core.c:1347](../core/seq_core.c#L1347)).
 - BLM Live/Jam page also writes to buses — search for `SEQ_MIDI_IN_NUM_BUSSES` to see all writers.
 
+### Self-bus via the `Ctrl` par-type (config-grain self-modulation) — TK 2019, rediscovered 2026-06-26
+
+The config-grain "self-bus" the design doc §10(c) once listed as "build queued" is **already in the
+tree**: it is the upstream `SEQ_PAR_Type_Ctrl` par-layer type (TK, commit `164c068b`, 2019-12-18,
+"MBSEQ: support for Ctrl Layer"). A `Ctrl` layer routes its per-step value to the track's **OWN**
+config params instead of emitting MIDI out — *self-modulation without spending a loopback track.*
+
+- **Mechanism:** [seq_layer.c:491](../core/seq_layer.c#L491) (drum) / ~848 (normal) — the `Ctrl`
+  case calls `SEQ_CC_MIDI_Set(track, cc_number, value)` on its own `track` (vs `Type_CC` which
+  builds an outbound CC package). `cc_number` is the per-layer assignment (`seq_layer_drum_cc` /
+  `lay_const`), an `0x10..0x5f` loopback-convention CC; `SEQ_CC_MIDI_Set` maps `+0x20 → SEQ_CC_Set`.
+- **Labels, not CC numbers:** [seq_cc_labels.c:337](../core/seq_cc_labels.c#L337) `SEQ_CC_LABELS_Get(port, cc, enforce_ctrl=1)`
+  returns `ctrl_labels[cc]` — e.g. `Directn.`(0x28→0x48) `S.Replay`/`S.Fwd.`/`S.JmpBck` `S.Repeat`/`S.Skip`/`S.Interv` `ClockDiv` `TrkLen.`
+- **Tick order is correct:** NextStep ([seq_core.c:4141](../core/seq_core.c#L4141)) advances, *then*
+  GetEvents ([:4346](../core/seq_core.c#L4346)) applies the `Ctrl` write → step N steers the N→N+1 hop.
+- **"Safe per-step" targets** (fresh-read by NextStep): direction, replay/forward/jump-back/repeat/skip/rs-interval, clock-div, groove, transpose, robotize/humanize/echo/LFO scalars. **Glitch:**
+  `LENGTH`/`CLK_DIVIDER` modulo-wrap the live step pointer immediately ([seq_cc.c:383-385](../core/seq_cc.c#L383)) → need boundary-deferral. **Random directions** (Directn. 4–6) draw the *per-track* `t->random_traverse_state` (the per-track-RNG keystone, [seq_core.c:5081](../core/seq_core.c#L5081)), so they re-sim faithfully but a buffer-bounce re-seeds them.
+- **Known caveat (parked):** `SEQ_CC_Set` unconditionally calls `SEQ_PATTERN_DirtySetTrack`
+  ([seq_cc.c:523](../core/seq_cc.c#L523)), so a live `Ctrl` self-mod marks the pattern dirty every
+  step → churns the ~290 ms auto-writeback. Fix = a `seq_core_in_self_route` ambient flag +
+  early-return in DirtySetTrack (not built; user hasn't hit it in play).
+- **Freeze interaction (by-ear-confirmed 2026-06-26):** *bounce-to-pattern* preserves the `Ctrl`
+  layer (it's on the `ResetGenerativeForBounce` PRESERVED list, [seq_cc.c:139](../core/seq_cc.c#L139))
+  → **preserve-and-replay** (deterministic only). *UTILITY-held CAPTURE* (`SEQ_CORE_CaptureSpan`)
+  bakes the emitted playback order into forward notes + memsets par values to 0 ([seq_core.c:2191](../core/seq_core.c#L2191))
+  → **faithful, even for randomness.** Full model below + design §9 (2026-06-26 cont.).
+
 ### Capture / bounce (unified 2026-05-30 — design doc §9 "Bounce unification")
 
 The fork captures the **computed output** of a track, never an emission tape. The old
