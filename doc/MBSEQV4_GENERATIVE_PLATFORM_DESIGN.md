@@ -2999,6 +2999,17 @@ bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot 
 **Still gating (genuinely open):**
 - **Max generator loop length** for static allocation — v1 default 64-step + tiling across
   longer tracks; revisit if a piece wants longer (≈3×/generator, §A5).
+- **CAPTURE is locked to one-global-measure tracks (the self-bus ↔ CAPTURE tension).**
+  Surfaced 2026-06-26 by the self-bus: both freeze paths refuse a source whose length ≠ the global
+  "Steps per Measure" with `-8 "not 1 measure"` (`SEQ_CORE_CaptureSpanReSim`/`Tape`,
+  `seq_core.c:2219`/`:2385`), because the capture ring is framed per **global** measure
+  (`SEQ_CORE_CaptureRingTick`, indexed `robotize_measure_ctr % RING_BARS`). But self-modulating
+  direction/progression is most interesting on a *longer* base loop — so the two features pull
+  against each other. Two fixes scoped: **(B, pragmatic)** relax to integer multiples
+  (`spm % gspm == 0`), land `FrameBack` on a loop-start frame; **(A, general)** re-frame the ring
+  around the recorded track's OWN loop wrap (handles sub-measure/polymeter too). The capture ring is
+  already self-contained (own seed, doesn't touch the FREEZE/robotize ring), which lowers (A)'s risk.
+  Full kickoff + grounded recon in `doc/plans/2026-06-26-multimeasure-capture.md`.
 
 **Tension Workbench — SHIPPED + by-ear GO 2026-06-10 (§9; build narrative → REFERENCE).** The
 GRAVITY field (monotone pull / varied push), per-track GRIP, RESOLVE, SHADE; ext-CC fix shipped
