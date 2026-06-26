@@ -2913,12 +2913,23 @@ probe (with a peak-`max_dirty` field for a race-free "tracks-armed" proof) + `bo
 + `tests/diag_render.py` (on-device by-ear tool, reports peak +2 UI gap live) + an OOB stale-tail
 fix the bounded copy exposed (`SEQ_PAR_Get`/`SEQ_TRG_Get` bound by real layer/instr count, not just
 MAX; the LIMIT `no_fx` layer bound). Plan `doc/plans/2026-06-26-render-changedetect.md` retired.
-**Next ceiling discovered (NOT this fix, NOT the scheduler pool — `seq_midi_out_dropouts` stayed
-0):** at the extreme all-16-echo load only ~8 tracks' notes emit and muting frees the rest — a
-downstream emission/port ceiling (likely the physical-port Tx buffer overflowing on a same-tick
-burst, dropped below the 256-slot scheduler so invisible to its drop counter), newly *reachable*
-only because the render wall no longer kills the box first. Parked for a separate measure-first
-investigation (split ports / Tx-buffer sizing).
+**Next ceiling discovered + DIAGNOSED (separate from this fix; PARKED by the user — no firmware
+written, keep the render win).** At the extreme all-16-echo load only ~8 tracks' notes emit and
+muting frees the rest. Box-side confirmed: the secondary screen shows activity on all 16 (the box
+generates + schedules them) but no notes reach Ableton on the silent tracks (all 16 on ONE cable,
+USB2). **Two undersized emission buffers**, both newly *reachable* only because the render wall no
+longer kills the box first: **(1) the USB Tx ring** `MIOS32_USB_MIDI_TX_BUFFER_SIZE` = **64**
+packages ([mios32_usb_midi.h](../include/mios32/mios32_usb_midi.h)) — all 16 burst on the same 16th
+out one cable; the ring holds 64 and drains ~16/USB-frame (single Tx buffer, no double-buffering),
+so the burst overflows and the *blocking* `MIOS32_USB_MIDI_PackageSend` gives up after its
+10000-spin `timeout_ctr` and drops — *below* the scheduler, so `seq_midi_out_dropouts` stays 0
+(the first report). **(2) the SEQ scheduler pool** `SEQ_MIDI_OUT_MAX_EVENTS` = **256** — echo×16
+schedules a future-event queue past 256, dropped at schedule time and *counted* (`dropouts` > 0 —
+the later report; also explains "first 8 play, rest dropped, muting frees slots"). **Fix when
+unparked:** bump USB ring 64→512 (~+1.8 KB) + pool 256→512 (~+4 KB) — fits the ~9 KB free main RAM
+(size the pool to the INFO-page "MIDI Scheduler: Alloc cur/MAX" peak); zero-cost partial lever =
+spread tracks across USB1–4 (helps the ring burst, NOT the pool). The §8 emergent queue note re the
+~95% wall is closed; this is the emission analogue, queued behind it.
 
 ---
 
