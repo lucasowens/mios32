@@ -56,6 +56,20 @@ def _setup_line(board: Board) -> None:
     board.trg_byte_set(TRACK, 1, 0xFF)
 
 
+def _num_steps(board: Board, track: int) -> int:
+    """Probe the track's allocated trg step count via the trg_byte_get range guard
+    (the firmware rejects a read past num_steps). num_steps = 8 * highest valid 8-step
+    block. Used to pin that a slot-capture doesn't shrink the SOURCE's geometry."""
+    n = 0
+    for s8 in range(32):
+        try:
+            board.trg_byte_get(track, 0, 0, step8_start=s8, step8_count=1)
+            n = s8 + 1
+        except RuntimeError:
+            break
+    return n * 8
+
+
 def _wait_ring_depth(board: Board, target: int, timeout: float = 25.0) -> int:
     deadline = time.monotonic() + timeout
     depth = 0
@@ -111,3 +125,40 @@ def test_recorder_capture_lands_in_same_track_other_pattern(board):
         assert slot[s] == _line_note(s), (
             f"slot track step {s} = {slot[s]}, expected played line {_line_note(s)}\n  slot: {slot}"
         )
+
+
+@pytest.mark.hardware
+def test_recorder_capture_preserves_source_geometry(board):
+    """The recorder→slot capture borrows a scratch track + restages the dst group on
+    SD, then restores the group's live RAM. That restore must re-apply each track's
+    par/trg GEOMETRY (num_steps/layers/instr) — which lives in seq_par/trg metadata,
+    not in the CC struct or byte buffers. Without it, capturing a sub-measure loop
+    (8 steps) over a 64-step SOURCE shrank the source's num_steps to 8, leaving its
+    longer LENGTH invalid ("!!!/8" on the TRKLEN page). Regression for that report."""
+    board.reset(RESET_UNMUTE_ALL)
+    board.track_drum_init(TRACK)
+    board.cc_set(TRACK, CC.EVENT_MODE, EVENT_MODE_NOTE)  # melodic -> 64 allocated steps
+    board.cc_set(TRACK, SEQ_CC_LENGTH, 7)               # LENGTH 8 (sub-measure) over 64 alloc
+    board.cc_set(TRACK, SEQ_CC_DIRECTION, TRKDIR_FORWARD)
+    board.ui_track_set(TRACK)
+    board.trg_byte_set(TRACK, 0, 0xFF)
+    for s in range(8):
+        board.track_par_set(TRACK, NOTE_LAYER, 0, s, _line_note(s))
+
+    ns_before = _num_steps(board, TRACK)
+    len_before = board.cc_get(TRACK, SEQ_CC_LENGTH)
+    assert ns_before > 8, f"precondition: source must be allocated >8 steps, got {ns_before}"
+
+    try:
+        board.transport(start=True)
+        _wait_ring_depth(board, 3)
+        assert board.capture_to_slot_track(TRACK, TRACK, SLOT_BANK, SLOT_PATTERN, k=1), \
+            "recorder capture-to-slot should commit"
+    finally:
+        board.transport(start=False)
+
+    assert _num_steps(board, TRACK) == ns_before, (
+        f"source num_steps shrank from {ns_before} to {_num_steps(board, TRACK)} — the "
+        f"slot-capture restore must re-apply geometry (the '!!!/8' bug)"
+    )
+    assert board.cc_get(TRACK, SEQ_CC_LENGTH) == len_before, "source LENGTH disturbed"

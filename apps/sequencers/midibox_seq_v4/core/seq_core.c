@@ -2641,6 +2641,35 @@ static u8           slottrk_trg_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_TRG_MAX_
 static char         slottrk_name_snap[20];
 static u8           slottrk_play_section_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
 static u8           slottrk_src_cc[128];
+// Par/trg GEOMETRY (num_steps/layers/instruments) lives in seq_par/trg metadata
+// (par_layer_num_steps[]), NOT in seq_cc_trk or the byte buffers — so the snapshot
+// must restore it via TrackInit or a re-partition (e.g. the slot read, or the dst_track
+// TrackInit to the captured size) leaves the restored track with the WRONG num_steps
+// (e.g. capturing an 8-step loop over a 64-step track shrank the source to "!!!/8").
+static u16          slottrk_par_steps[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u8           slottrk_par_layers[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u8           slottrk_par_instr[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u16          slottrk_trg_steps[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u8           slottrk_trg_layers[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+static u8           slottrk_trg_instr[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+
+// Snapshot one dst-group track's full geometry (shared by both slot-capture verbs).
+static void SEQ_CORE_SlotTrkSnapGeom(u8 t, u8 track)
+{
+  slottrk_par_steps[t]  = (u16)SEQ_PAR_NumStepsGet(track);
+  slottrk_par_layers[t] = (u8)SEQ_PAR_NumLayersGet(track);
+  slottrk_par_instr[t]  = (u8)SEQ_PAR_NumInstrumentsGet(track);
+  slottrk_trg_steps[t]  = (u16)SEQ_TRG_NumStepsGet(track);
+  slottrk_trg_layers[t] = (u8)SEQ_TRG_NumLayersGet(track);
+  slottrk_trg_instr[t]  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+}
+// Re-apply that geometry before the byte memcpy in the restore (TrackInit is what
+// writes par_layer_num_steps[]). Mirrors journal_restore's TrackInit-then-bytes order.
+static void SEQ_CORE_SlotTrkRestoreGeom(u8 t, u8 track)
+{
+  SEQ_PAR_TrackInit(track, slottrk_par_steps[t], slottrk_par_layers[t], slottrk_par_instr[t]);
+  SEQ_TRG_TrackInit(track, slottrk_trg_steps[t], slottrk_trg_layers[t], slottrk_trg_instr[t]);
+}
 // Stage B: live generators of the dst group, snapped around the staged
 // load-modify-save — the slot read seeds the SLOT's generators into the pool
 // (so the write-back round-trips them faithfully), and this restore puts the
@@ -2694,6 +2723,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   // 2. Snapshot the dst group's live RAM (4 tracks) so we can restore it.
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
     memcpy(&slottrk_cc_snap[t], &seq_cc_trk[dst_base+t], sizeof(seq_cc_trk_t));
+    SEQ_CORE_SlotTrkSnapGeom(t, dst_base+t);  // geometry isn't in the CC struct/bytes
     memcpy(slottrk_par_snap[t], seq_par_layer_value[dst_base+t], SEQ_PAR_MAX_BYTES);
     memcpy(slottrk_trg_snap[t], seq_trg_layer_value[dst_base+t], SEQ_TRG_MAX_BYTES);
     slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
@@ -2748,6 +2778,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   // 6. Restore the dst group's live RAM (always — even on a read/write error).
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
     memcpy(&seq_cc_trk[dst_base+t], &slottrk_cc_snap[t], sizeof(seq_cc_trk_t));
+    SEQ_CORE_SlotTrkRestoreGeom(t, dst_base+t);  // re-apply num_steps/layers/instr (TrackInit)
     memcpy(seq_par_layer_value[dst_base+t], slottrk_par_snap[t], SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
     seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
@@ -2822,6 +2853,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   //    scratch borrow AND the slot's staged load both unwind in step 7's restore.
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
     memcpy(&slottrk_cc_snap[t], &seq_cc_trk[dst_base+t], sizeof(seq_cc_trk_t));
+    SEQ_CORE_SlotTrkSnapGeom(t, dst_base+t);  // geometry isn't in the CC struct/bytes
     memcpy(slottrk_par_snap[t], seq_par_layer_value[dst_base+t], SEQ_PAR_MAX_BYTES);
     memcpy(slottrk_trg_snap[t], seq_trg_layer_value[dst_base+t], SEQ_TRG_MAX_BYTES);
     slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
@@ -2881,6 +2913,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   //    load; mirrors CaptureToSlotTrack's restore incl. the slot-bridge re-sync).
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
     memcpy(&seq_cc_trk[dst_base+t], &slottrk_cc_snap[t], sizeof(seq_cc_trk_t));
+    SEQ_CORE_SlotTrkRestoreGeom(t, dst_base+t);  // re-apply num_steps/layers/instr (TrackInit)
     memcpy(seq_par_layer_value[dst_base+t], slottrk_par_snap[t], SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
     seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
