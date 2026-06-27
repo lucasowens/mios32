@@ -2981,6 +2981,34 @@ bounce-bakeable; §10(c)) and self-arp (deferred, hard). TrkLen./ClockDiv self-m
 immediate step-pointer wrap glitch (boundary-defer, `seq_cc.c:383-385`) — out of scope for
 direction/progression.
 
+**2026-06-26 (cont.) — CAPTURE lifted off the one-measure constraint; by-ear GO; HIL 216/216.**
+The self-bus re-phrasing above was most interesting on a *longer/odd* base loop, but the UTILITY
+grab refused any track that wasn't exactly one global measure (`spm != gspm → -8`). Lifting it
+landed in two halves with a different reach each:
+- **While PLAYING (the north-star) → ANY length.** The live tape records the emitted stream, so the
+  grab window is a pure **tick-period slice** of the track's own loop period `P = spm·tps`
+  (`SEQ_CORE_CaptureSpanTape` non-aligned branch) — traversal-agnostic, so it captures a 2-bar, a
+  24-step polymeter, a sub-measure ostinato, or a self-modulating line identically. **By ear: "works
+  great"** on 8/24-step + 2-bar self-mod tracks; HIL pins it note-for-note (incl. downbeat phase).
+- **While STOPPED → one bar only.** The re-sim drive phase-aligns to the *global* measure, so it
+  faithfully regenerates a 1-bar loop but rotates a multi-bar loop by a sub-measure amount (a HIL
+  trace showed +11 steps on a 2-bar track). Multi-bar/odd stopped grabs now route to **"play to
+  grab."** Fixing the stopped multi-bar drive (phase the drive to the track's own loop, not the
+  global bar) is the queued **A2 kernel**; synch-to-measure support (route a synch'd track as a
+  1-bar loop — the synch reset makes its audible loop the global bar) is a small queued follow-on.
+- **Two FATAL bugs caught by adversarial trace-review *before* by-ear** (both in the multi-measure
+  helper, neither visible to the build or the success/determinism HIL pins): (1) loop-boundary
+  detection keyed on `frame->step==0`, but the frame is snapshotted in the tick PROLOGUE before the
+  body's NextStep wrap, so `frame->step` holds the PRE-advance step (`==length` forward; an RNG value
+  for random traversal) — never reliably 0; (2) a phase off-by-one — loop-start frames sit at
+  `robotize_measure_ctr ≡ 1 (mod n)`, not `≡ 0` (the first frame lands at ctr=1 with FIRST_CLK
+  suppressing that tick's advance). Both replaced by frame-count arithmetic (`e=(ctr-1)%n`,
+  `win_o=e+k·n`) that reduces exactly to the original per-bar `FrameBack(k)` for n=1. **LESSON
+  (reinforces §2 / CLAUDE.md): this capture timing is the "#1 hardware-validation item" — trust
+  source traces over comments (a wrong struct comment fooled both me and the first review), and
+  multi-measure PHASE needs a note-for-note HIL pin, not just success/determinism.** Plan +
+  full bug write-ups: `doc/plans/2026-06-26-multimeasure-capture.md` (not retired — A2/synch remain).
+
 ---
 
 ## 10. Open questions (unresolved forks)

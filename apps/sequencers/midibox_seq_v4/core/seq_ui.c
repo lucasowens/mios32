@@ -211,9 +211,10 @@ static char pull_status[24] = "";   // last commit result, shown in the held ove
 //   select row (DirectTrack) -> DESTINATION track (stash; must differ from src).
 //                               Swallowed, so the visible track does NOT change
 //                               (a switch would invalidate the ring).
-//   GP-n (1..16)             -> K = grab the last n bars + COMMIT
-//                               (SEQ_CORE_CaptureSpanReSim; transport STOPPED).
-// The GP LED row is a thermometer of the ring depth (max grabbable K = depth-1).
+//   GP-n (1..16)             -> K = grab the last n LOOPS + COMMIT (a loop = the src
+//                               track's full length, 1+ whole global measures; see
+//                               SEQ_CORE_CaptureSpan; transport STOPPED or PLAYING).
+// The GP LED row is a thermometer of the grabbable depth in loops (SEQ_CORE_CaptureMaxK).
 // A bare UTILITY tap (no sub-gesture) still navigates to the Utility page.
 static u8 capture_util_held;          // 1 while UTILITY held (capture armed)
 static u8 capture_consumed;           // 1 if a sub-gesture fired during the hold (suppress bare-tap nav)
@@ -688,9 +689,9 @@ static void capture_span_msg(u8 src, u8 dst, u8 k)
   s32 r = SEQ_CORE_CaptureSpan(src, dst, k);
   if( r == 0 ) {
     char msg[12];
-    sprintf(msg, ">T%d %db", dst + 1, k);
+    sprintf(msg, ">T%d %dL", dst + 1, k);                 // L = loops (k loops of src)
     SEQ_UI_Msg_Track(msg);
-    sprintf(capture_status, "T%d last %db -> T%d", src + 1, k, dst + 1);
+    sprintf(capture_status, "T%d last %d loops -> T%d", src + 1, k, dst + 1);
   } else {
     const char *why;
     switch( r ) {
@@ -698,10 +699,10 @@ static void capture_span_msg(u8 src, u8 dst, u8 k)
       case -3:  why = "STOP first";    break;
       case -4:  why = "ring not src";  break;
       case -5:  why = "ring overflow"; break;
-      case -6:  why = "too many bars"; break;
+      case -6:  why = "too few loops"; break; // fewer aligned loops than asked / torn ring
       case -10: why = "tape too dense";break; // span scrolled out of the live tape
       case -7:  why = ">256 steps";    break;
-      case -8:  why = "not 1 measure"; break;
+      case -8:  why = "play to grab";  break; // stopped re-sim is whole-measure only; PLAY -> tape grabs any length
       case -9:  why = "dst par full";  break;
       case -11: why = "arp track";     break;
       case -12: why = "dst trg full";  break;
@@ -850,9 +851,9 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     return 0;
   }
 
-  // Retroactive CAPTURE gesture (UTILITY held): GP-n grabs the last n bars (n =
-  // GP index, GP1=1 .. GP16=16) of the ring's track into the chosen destination
-  // track and COMMITs (transport must be STOPPED). The GP LED row shows the
+  // Retroactive CAPTURE gesture (UTILITY held): GP-n grabs the last n LOOPS (n =
+  // GP index, GP1=1 .. GP16=16; a loop = the src track's full length) of the ring's
+  // track into the chosen destination track and COMMITs. The GP LED row shows the
   // grabbable max = min(ring depth-1, what the dst par/trg buffer holds for src's
   // layout) — a heavy layout (e.g. a 16-instr drum track) caps it below the ring;
   // source = SEQ_CORE_CaptureRingTrack(),
@@ -1325,7 +1326,7 @@ static s32 SEQ_UI_Button_Utility(s32 depressed)
   if( !depressed ) {
     // UTILITY pressed: arm the retroactive-CAPTURE modifier; don't navigate yet.
     // While held, the select row picks a destination track and a GP-n press grabs
-    // the last n bars of the ring's track into it (see SEQ_UI_Button_GP /
+    // the last n loops of the ring's track into it (see SEQ_UI_Button_GP /
     // SEQ_UI_Button_DirectTrack). The release below opens the Utility page only on
     // a quick tap. Disarm a pull hold (same hardening as the PATTERN gesture).
     capture_util_held = 1;
@@ -3854,7 +3855,9 @@ s32 SEQ_UI_LCD_Handler(void)
   } else if( capture_util_held ) {
     // Retroactive CAPTURE overlay (north-star play-then-keep). Source = the ring's
     // recording track; the select row picks the destination; GP-n grabs the last n
-    // bars (n = GP index) and commits. The GP LED row is a depth thermometer.
+    // LOOPS of src (n = GP index) and commits. A "loop" = the src track's full length
+    // (one global measure for a whole-measure track, N for an N-measure track). The GP
+    // LED row is a depth thermometer in loops.
     u8 cap_src = SEQ_CORE_CaptureRingTrack();
     u8 cap_max_k = SEQ_CORE_CaptureMaxK(cap_src); // par/trg-aware: lit LEDs == grabbable
     char cap_buf[41];
@@ -3862,20 +3865,20 @@ s32 SEQ_UI_LCD_Handler(void)
     if( cap_src >= SEQ_CORE_NUM_TRACKS )
       sprintf(cap_buf, "CAPTURE: no ring (play, then STOP)");
     else if( capture_dst_track != 0xff )
-      sprintf(cap_buf, "CAPTURE T%d -> T%d   max %d bars", cap_src + 1, capture_dst_track + 1, cap_max_k);
+      sprintf(cap_buf, "CAPTURE T%d -> T%d   max %d loops", cap_src + 1, capture_dst_track + 1, cap_max_k);
     else
-      sprintf(cap_buf, "CAPTURE T%d -> ?   max %d bars", cap_src + 1, cap_max_k);
+      sprintf(cap_buf, "CAPTURE T%d -> ?   max %d loops", cap_src + 1, cap_max_k);
     SEQ_LCD_CursorSet(0, 0);
     SEQ_LCD_PrintFormattedString("%-40s", cap_buf);
 
     SEQ_LCD_CursorSet(0, 1);
-    SEQ_LCD_PrintFormattedString("%-40s", "sel=dest trk    GP-n=grab last n bars");
+    SEQ_LCD_PrintFormattedString("%-40s", "sel=dest trk   GP-n=grab last n loops");
 
     SEQ_LCD_CursorSet(40, 0);
     if( capture_status[0] )
       SEQ_LCD_PrintFormattedString("%-40s", capture_status);
     else
-      SEQ_LCD_PrintFormattedString("%-40s", "STOP first. GP-n=last n bars (max 16)");
+      SEQ_LCD_PrintFormattedString("%-40s", "STOP first. GP-n=last n loops (max 16)");
 
     SEQ_LCD_CursorSet(40, 1);
     SEQ_LCD_PrintSpaces(40);
@@ -4310,8 +4313,8 @@ s32 SEQ_UI_LED_Handler(void)
       ui_gp_leds = k ? (u16)((1 << k) - 1) : 0x0000;
     }
 
-    // Retroactive CAPTURE (UTILITY held): the GP row is a thermometer of the ring
-    // depth — the max grabbable K (= depth-1) lit from GP1. Tap GP-n to grab n.
+    // Retroactive CAPTURE (UTILITY held): the GP row is a thermometer of the grabbable
+    // depth in LOOPS — the max grabbable K lit from GP1. Tap GP-n to grab n loops.
     if( capture_util_held ) {
       u8 cap_k = SEQ_CORE_CaptureMaxK(SEQ_CORE_CaptureRingTrack()); // par/trg-aware grabbable max
       if( cap_k > 16 ) cap_k = 16;

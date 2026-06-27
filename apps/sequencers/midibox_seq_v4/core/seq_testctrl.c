@@ -2100,8 +2100,10 @@ static void cmd_render_perf(mios32_midi_port_t port, u8 *payload, u32 len)
 //         status: 0x01 ok; else 0x10|(-r) for the SEQ_CORE_CaptureSpan dispatcher's
 //         refusal — STOPPED re-sims the frame, PLAYING grabs the live tape:
 //         (-1 args, -2 src==dst, -3 wrong-state, -4 wrong-track, -5 frame-overflow,
-//          -6 history, -7 steps>256, -8 not-whole-measure, -9 par-overflow,
-//          -10 tape-scrolled-out, -11 arp, -12 trg-overflow).
+//          -6 history/unaligned, -7 steps>256, -8 stopped-non-aligned, -9 par-overflow,
+//          -10 tape-scrolled-out, -11 arp, -12 trg-overflow). k is in LOOPS of src. While
+//          PLAYING the tape grabs ANY length (Approach A, tick-period slice); while STOPPED
+//          the re-sim is whole-measure only (-8 -> play to grab; the A2 phase kernel lifts it).
 //   1 = RING QUERY [1]            -> [ring_track, ring_depth, ring_overflow, max_k]
 static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
 {

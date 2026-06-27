@@ -76,28 +76,96 @@ per-global-measure ring; teach CAPTURE that a track can be **N global measures**
 
 **Leaves refused:** sub-measure (length < gspm) and non-integer polymeter. That's Approach A.
 
-## Approach A — re-frame the ring around the track's own loop (general)
+**STATUS — SHIPPED + by-ear GO 2026-06-26; HIL 216/216.** A1 (any-length WHILE-PLAYING tick-period
+tape) is the headline win — grabs sub-measure/odd/multi-bar/self-mod loops note-for-note. Stopped
+re-sim restricted to ONE global measure (`spm != gspm → -8 "play to grab"`): the multi-bar stopped
+drive rotates by a sub-measure amount (HIL trace +11 on a 2-bar fwd line) — that's the queued **A2**
+kernel. Folded into design §9 (2026-06-26) + REFERENCE (multi-measure CAPTURE) + MANUAL. Grab unit =
+"loops"; 256-step ceiling kept. **NOT retired — A2 (stopped multi-bar drive-phase) + synch-to-measure
+support (route synch'd track as a 1-bar loop) remain (see the Mechanism/Stage notes below).**
 
-The "right" general solution. Push a frame at each **track-loop wrap** of the ring's recorded track
-(it records only ONE track at a time, so this is feasible), not at the global-measure boundary.
-`FrameBack(k)` = k track-loops. Handles any length incl. sub-measure/polymeter. Bigger change:
-decouple `CaptureRingTick` from `robotize_measure_ctr`, re-base `seq_core_cap_tape_bar_start` on
-track-loop downbeats, redefine ring depth as 17 *loops*. Because the capture ring is already
-self-contained (own seed), this does **not** disturb FREEZE or the robotize ring. Do this only if a
-by-ear case wants sub-measure/odd-length self-modulation that B can't reach.
+**Bugs caught (adversarial trace-review, both fixed pre-by-ear):** (1) `step==0` boundary premise was
+false (frame holds the PRE-advance step); (2) phase off-by-one (loop-starts at `ctr ≡ 1 (mod n)`).
+Fix = frame-count arithmetic `e=(ctr-1)%n` (reduces to `FrameBack(k)` for n=1). See design §9.
 
-## Validation / by-ear plan
+**Two FATAL bugs caught by adversarial trace-review (both in the B work, both now fixed + re-verified):**
+1. **`step==0` loop-boundary premise was false.** The frame is snapshotted in the tick PROLOGUE
+   *before* `NextStep` wraps, so `frame->step` holds the PRE-advance step (`==tcc->length` forward;
+   an RNG value for random traversal), never reliably 0. Every whole-measure grab silently refused.
+   The struct comment ("step ... 0 for a whole-measure track") was the lie that fooled it AND the
+   first review's "byte-identical" verdict. **Fix:** frame-count arithmetic, no `.step` read.
+2. **Phase off-by-one (n≥2 only).** Loop-start frames sit at `robotize_measure_ctr ≡ 1 (mod n)`, not
+   `≡ 0` (the first frame lands at ctr=1 with the track still at step 0 — FIRST_CLK suppresses that
+   tick's advance). `e = ctr % n` landed on the loop MIDPOINT → half-loop rotation. Invisible to HIL
+   (multi-measure pins assert success/determinism, NOT note-for-note phase) — only trace/ear catch it.
+   **Fix:** `e = (ctr-1) % n`. Reduces to `FrameBack(k)` for n==1.
+   **Lesson:** this capture timing is the "#1 hardware-validation item" for a reason — trust source
+   traces over comments, and multi-measure phase needs a note-for-note HIL pin (TODO) or by-ear.
 
-- HIL: extend `test_render_perf.py`-style or the capture tests — a 2-bar (32-step, gspm=16) track,
-  static-freeze k=1 and k=2, assert dst gets 32/64 steps and the materialized notes match a known
-  self-modulated arrangement (use a deterministic direction, e.g. ping-pong, so the re-phrasing is
-  reproducible without RNG). Add a refusal pin: a 24-step (non-multiple) track still returns -8.
-- By ear (the gate): a 2-bar melodic track with a `Ctrl: Directn.` layer doing jump-back/ping-pong,
-  static-freeze, play the bounce on a fresh track with NO Ctrl layer → the re-phrased 2-bar
-  arrangement must reproduce. Then try random direction across k bars and confirm re-sim reproduces.
+## Approach A — re-frame the ring around the track's own loop (general) — COMMITTED BUILD
 
-## Open decisions for the session
+User chose **full A** (tape + stopped re-sim) over B-only + the Steps-per-Measure workaround, 2026-06-26.
 
-- B vs A first (default B; jump to A only if a sub-measure case is the actual desire).
-- Loop-boundary alignment policy for the grab (require-aligned vs snap-to-nearest vs refuse-torn).
-- Whether to also lift the `dst_steps > 256` ceiling or accept it as the k×length cap.
+### Mechanism (verified against source 2026-06-26 — durable symbols, line numbers drift)
+
+Two clocks with **different cadences** — this is the whole key:
+- **Generator auto-mutate** (`SEQ_GENERATOR_Tick`, fires `cur==0 && prev!=0` where `cur =
+  seq_core_trk[t].step`) rides the **TRACK's own loop wrap** → phase-independent.
+- **Self-bus** (`Ctrl` par-type direction/progression), `loop[]`, and the step/progression counters
+  are captured in the frame → phase-independent.
+- **Robotize / GRAVITY / phrase-morph** (the `ref_step==0` block, ~`SEQ_CORE_RobotizeLoopBarTick` /
+  `SEQ_CORE_TensionResolveBoundary`) ride the **GLOBAL measure** → the *only* thing that needs
+  global-phase reproduction for a non-aligned loop.
+
+Within-tick order (`SEQ_CORE_Tick`): `SEQ_GENERATOR_Tick` (mutate, top) → `SEQ_CORE_RenderTracks` →
+`(bpm_tick%96==0)`: ref_step++ then `(ref_step==0)`: robotize/GRAVITY/`++robotize_measure_ctr`/
+`SEQ_CORE_CaptureRingTick` → body `SEQ_CORE_NextStep` advances `t->step` (wrap = `++t->bar`).
+
+Consequences:
+- **A subsumes B.** Per-track-loop framing makes "loops" literal; the `spm % gspm` gate and the
+  `step==0` boundary search both DISSOLVE (every frame is a loop boundary). Whole-measure tracks
+  become the special case where a loop spans N global measures. So A **replaces** the shipped B
+  mechanism and **re-validates** the whole-measure path.
+- **The tape path (while PLAYING) needs no kernel** — it records emitted output, so robotize/GRAVITY
+  are faithful at any phase. The hard part is the **stopped re-sim** global-phase reproduction.
+- The capture ring is **RAM-only** (`seq_core_cap_ring` is `.bss`, not persisted) → **no SD format bump**.
+- **Random traversal** (`Random_Step` / `Random_D_S` / `Random_Dir`) sets `t->step` straight from the
+  RNG and **never wrap-detects** (no `++t->bar`); it has no clean loop. Refuse it under A (revisit if a
+  by-ear case wants it — would need a synthetic fixed-step-count window).
+
+### Stage A1 — per-track-loop ring framing + tape path (foundation, low-risk)
+
+- New per-recording-track `cap_loop_ctr`; **leave `robotize_measure_ctr` untouched** (FREEZE's
+  `robotize_seed_snapshots` + robotize phase still use it — no coupling broken).
+- Capture the frame at the recording track's loop wrap: hook at the **top of `SEQ_CORE_Tick`**,
+  mirror the `cur==0 && prev!=0` detection on the recording track, **before** the mutate (frame holds
+  pre-mutate state, matching the existing convention). Add `ref_step` (global phase) to the frame for A2.
+- Re-base `seq_core_cap_tape_bar_start` to loop-wrap downbeats, indexed by `cap_loop_ctr`. Ring depth = 17 LOOPS.
+- Simplify the consumer: drop the `step==0` search in `SEQ_CORE_CaptureRingLoopWindow` (every frame is
+  a loop now) and the `spm % gspm` gate in both span paths + MaxK. `dst_steps = k * spm` (any length).
+- Refuse random-traversal directions.
+- **By-ear gate (A1):** while PLAYING, grab an 8-step and a 24-step self-modulating melodic track
+  (`Ctrl: Directn.` ping-pong/jump-back) → tape path → the re-phrased arrangement reproduces.
+
+### Stage A2 — stopped re-sim global-phase kernel (the hard part, higher risk)
+
+- Re-sim drive: instead of `B = gspm*96` + `ref_step = steps_per_measure`, derive the drive's initial
+  `ref_step` / base tick from the **frame's recorded global phase** so robotize/GRAVITY fire at the
+  correct phase relative to the loop start.
+- Robotize SEED is already self-contained in the frame (per-track-RNG keystone) → this is about
+  **phase**, not seed lookup; verify `robotize_loop_phase` / GRAVITY per-measure state don't read a
+  stale `robotize_measure_ctr` index.
+- **By-ear gate (A2):** STOPPED grab of an 8-step / 24-step loop **with GRAVITY on the track** →
+  reproduces the robotize-shaped arrangement. (This is the same class as the existing "#1
+  hardware-validation item," made harder by arbitrary phase.)
+
+### Stage A3 — polish
+
+- Final random-traversal policy, thermometer/LCD wording, HIL pins (sub-measure + odd-length success,
+  while-playing), docs (design §9/§10 + REFERENCE + MANUAL), retire this plan.
+
+## Open decisions (carry into the build)
+
+- Random-traversal: refuse (A1 default) vs synthetic fixed-step window (later).
+- Whether the `dst_steps > 256` ceiling ever bites a sub-measure case (it won't for short loops; a
+  long odd loop like 240 steps caps k≈1) — accept as the k×length cap.

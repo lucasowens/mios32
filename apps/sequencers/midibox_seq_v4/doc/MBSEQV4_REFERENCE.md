@@ -160,6 +160,34 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
   [test_capture_while_playing.py](../../../../tests/apps/seq_v4/test_capture_while_playing.py),
   [test_clock_step.py](../../../../tests/apps/seq_v4/test_clock_step.py). Full HIL **190/190** green;
   by-hand/by-ear GO 2026-06-20 (stopped re-sim) + while-playing tape GO 2026-06-20.
+- **Multi-measure / odd-length CAPTURE (2026-06-26, by-ear GO; HIL 216/216).** Grab unit is now a
+  **LOOP** (the src track's full length), not a global bar. Two reaches:
+  - **While PLAYING → ANY length.** `SEQ_CORE_CaptureSpanTape` branches: a **whole-measure** track
+    (`spm % gspm == 0`) uses the per-measure `bar_start` markers (below); a **non-(whole-measure)**
+    track (sub-measure/odd/polymeter) slices by the track's own loop PERIOD in ticks **`P = spm·tps`**
+    — `win_end = (SEQ_BPM_TickGet()/P)·P`, `win_start = win_end − k·P`, `dst_steps = k·spm` — which is
+    traversal-agnostic (records the emitted stream, so self-mod direction / random / ping-pong all
+    work). Phase assumes a grid-aligned start at tick 0 (a mid-run SPP/synch offset is a documented,
+    in-bounds edge). `clkdiv.SYNCH_TO_MEASURE` defaults 0 (`seq_cc.c:164`); a synch'd track's audible
+    loop is the global bar (queued: route it as a 1-bar loop).
+  - **While STOPPED → ONE global measure only.** `SEQ_CORE_CaptureSpanReSim` gates `spm != gspm → −8`
+    ("play to grab"). The re-sim drive phase-aligns to the global measure (`B = gspm·96`), so a
+    **multi-bar** loop is driven at the wrong phase (HIL trace: a 2-bar fwd line rotated +11 steps).
+    Lifting it (phase the drive to the track's own loop) is the queued **A2 kernel**; until then
+    multi-bar/odd capture is via the while-PLAYING tape.
+  - **`SEQ_CORE_CaptureRingLoopWindow(track, ctr, n, k, …)`** resolves the loop-aligned window for the
+    whole-measure path by **frame-count arithmetic** (the ring stores one frame per global measure, so
+    a loop is `n = spm/gspm` frames): `e = (ctr−1) % n` (frames back to the most-recent loop-START;
+    boundaries sit at `robotize_measure_ctr ≡ 1 (mod n)` because the first frame lands at ctr=1 with
+    FIRST_CLK suppressing that tick's advance), `win_o = e + k·n`, `max_loops = (filled−1−e)/n`.
+    Reduces to the original `FrameBack(k)` for `n=1`. **It must NOT key on `frame->step`** — the frame
+    is snapshotted in the tick PROLOGUE before NextStep wraps, so `frame->step` is the PRE-advance step
+    (`==length` fwd; an RNG value for random traversal), never reliably 0 (two FATAL bugs — a wrong
+    `step==0` premise and a `≡0` phase — were caught by adversarial trace-review here; see design §9
+    2026-06-26 + `doc/plans/2026-06-26-multimeasure-capture.md`). `CaptureMaxK` mirrors: whole-measure
+    via the helper (stopped→n=1 only), non-aligned via `loops_done` capped at `RING_BARS−1`. New
+    refusal **−8 = "play to grab"** (was "not 1 measure"). HIL: the multi-measure success/phase pins
+    live in `test_capture_while_playing.py` (note-for-note), stopped-refusal pins in `test_capture_span.py`.
 
 ### Persistence is versioned at the per-track level
 

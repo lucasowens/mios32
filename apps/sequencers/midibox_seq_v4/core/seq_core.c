@@ -213,7 +213,11 @@ typedef struct {
   u32 robotize_seed;       // robotize_seed_state at this boundary — self-contained so the re-sim
                            // doesn't read the 16-deep robotize_seed_snapshots ring (which only
                            // reaches 15 bars back and is shared with FREEZE)
-  u8  step;                // t->step at the boundary (0 for a whole-measure track)
+  u8  step;                // t->step at the boundary, captured in the tick PROLOGUE BEFORE
+                           // the body's NextStep advance -> the PRE-advance (last) step, NOT
+                           // 0 (forward: == tcc->length; random traversal: an RNG value).
+                           // Loop boundaries are found by frame-count arithmetic, not this
+                           // field (see SEQ_CORE_CaptureRingLoopWindow).
   u8  step_saved;          // replay anchor
   u8  step_replay_ctr;     // progression counters (forward/jmpbck/replay/repeat/skip)
   u8  step_fwd_ctr;
@@ -450,16 +454,50 @@ static void SEQ_CORE_CaptureRingTick(u32 bpm_tick)
     ++seq_core_cap_ring_filled;
 }
 
-// Frame K measures back from the current measure (K=1 -> the measure that just
-// completed). NULL if `track` is not the ring's track or there isn't enough
-// history. Re-sim window-start = K bars back; valid K is 1..filled-1 (the depth-17
-// ring keeps the live bar + 16 completed prior, so max K = 16).
-static const seq_core_cap_frame_t *SEQ_CORE_CaptureRingFrameBack(u8 track, u8 k)
+// Resolve the loop-aligned CAPTURE window for `track` (Approach B, 2026-06-26 —
+// lifting the one-global-measure constraint to N whole global measures).
+//
+// The ring pushes EXACTLY ONE frame per GLOBAL measure (SEQ_CORE_CaptureRingTick at
+// ref_step==0, robotize_measure_ctr index), so an N-global-measure track is n = spm/gspm
+// frames per loop. robotize_measure_ctr resets to 0 at transport start and the FIRST global
+// measure increments it to 1 with the track still at step 0 (FIRST_CLK suppresses that
+// tick's NextStep advance), so the track's loop-START frames sit at robotize_measure_ctr
+// ≡ 1 (mod n) — NOT ≡ 0 — for a grid-aligned start (the by-ear case; a synch/SPP-offset
+// start is the documented phase edge). We detect boundaries by FRAME-COUNT ARITHMETIC, NOT
+// by frame->step: the frame is snapshotted in the tick PROLOGUE *before* the body's NextStep
+// wraps, so frame->step holds the PRE-advance step (== tcc->length for a forward loop, an
+// arbitrary RNG value for random traversal) — it is never reliably 0 at a boundary. (The
+// step==0 premise AND a ≡0 phase were both shipped as bugs in the first cut; the arithmetic
+// below reduces to the original per-bar FrameBack(k) for n==1, the shipped one-measure path.)
+//
+//   e = (ctr-1) % n    -> frames back to the most-recent loop-START frame (the window's END
+//                         boundary); 0 when ctr is itself a loop start. For n==1, e==0 always.
+//   win-START          -> the k-th loop-start back = e + k*n
+//   max_loops          -> (filled-1 - e) / n   complete loops of history
+//
+//   k==0 -> query only: *max_loops = total complete loops available (thermometer cap).
+//   k>=1 -> *o_out / *e_out = measure offsets (from ctr) of the window START / END loop
+//           boundaries; the window spans k loops. Re-sim restores ring[(ctr-*o)]; the tape
+//           maps bar_start[(ctr-*o)] .. bar_start[(ctr-*e)].
+// `n` (frames per loop = spm/gspm, >=1) is passed in (the callers already compute spm/gspm).
+// Returns 0 on success; -2 = no completed loop boundary / fewer than k loops of history.
+static s32 SEQ_CORE_CaptureRingLoopWindow(u8 track, u32 ctr, u8 n, u8 k,
+                                          u8 *max_loops, u8 *o_out, u8 *e_out)
 {
-  if( track != seq_core_cap_ring_track ) return NULL;
-  if( k < 1 || k >= seq_core_cap_ring_filled ) return NULL;
-  u32 ctr = seq_core_trk[seq_core_cap_ring_track].robotize_measure_ctr;
-  return &seq_core_cap_ring[(ctr - k) % SEQ_CORE_CAP_RING_BARS];
+  if( max_loops ) *max_loops = 0;
+  if( track != seq_core_cap_ring_track || n < 1 ) return -2;
+  u8 filled = seq_core_cap_ring_filled;
+  if( filled < 2 ) return -2;                 // (ensures ctr >= 2, so ctr-1 can't underflow)
+
+  u8 e = (u8)((ctr - 1) % n);                // frames back to the most-recent loop-START
+  if( e >= filled ) return -2;               // no completed loop boundary recorded yet
+  u8 count = (u8)((filled - 1 - e) / n);     // complete loops behind the end boundary
+  if( max_loops ) *max_loops = count;
+  if( k == 0 ) return 0;                      // query-only (thermometer)
+  if( k > count ) return -2;                  // not enough history for k loops
+  if( o_out ) *o_out = (u8)(e + (u32)k * n);  // <= filled-1 since k<=count
+  if( e_out ) *e_out = e;
+  return 0;
 }
 
 // HIL / capture-verb accessors.
@@ -476,15 +514,41 @@ u8 SEQ_CORE_CaptureRingOverflow(void) { return seq_core_cap_ring_overflow; }
 u8 SEQ_CORE_CaptureMaxK(u8 src)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || src != seq_core_cap_ring_track ) return 0;
-  if( seq_core_cap_ring_filled < 2 ) return 0;
-  // The generative-frame overflow (> SLOTS engaged gens) only blocks the STOPPED
-  // re-sim, which replays the frame. The while-PLAYING tape records the emitted
-  // notes directly and doesn't touch the frame, so it grabs regardless of gen count.
-  if( !SEQ_BPM_IsRunning() && seq_core_cap_ring_overflow ) return 0;
-  u8 max_k = seq_core_cap_ring_filled - 1;                 // ring cap (depth-1)
 
-  u16 spm = (u16)(seq_cc_trk[src].length + 1);
+  // spm = steps per LOOP (tcc->length+1); gspm = global Steps-per-Measure (stored as steps-1).
+  u16 spm  = (u16)(seq_cc_trk[src].length + 1);
+  u16 gspm = (u16)(seq_core_steps_per_measure + 1);
   if( spm == 0 ) return 0;
+  u8 running = SEQ_BPM_IsRunning();
+
+  // Loop depth in LOOPS, by path:
+  u8 max_k = 0;
+  if( gspm != 0 && (spm % gspm) == 0 ) {
+    // Whole-measure (Approach B): count the complete loop-aligned spans in the frame ring.
+    // n = frames per loop. STOPPED re-sim grabs ONE-measure tracks only (n==1); a MULTI-
+    // measure stopped grab is refused (drive-phase A2 deferred), so report 0 then. While
+    // PLAYING the tape grabs any n. The generative-frame overflow only blocks the STOPPED
+    // re-sim (it replays the frame); the tape records emitted notes regardless of gen count.
+    if( seq_core_cap_ring_filled < 2 ) return 0;
+    u8 n = (u8)(spm / gspm);                              // frames per loop
+    if( !running && (n != 1 || seq_core_cap_ring_overflow) ) return 0;
+    u32 mctr = seq_core_trk[src].robotize_measure_ctr;
+    if( SEQ_CORE_CaptureRingLoopWindow(src, mctr, n, 0, &max_k, NULL, NULL) != 0 || max_k == 0 )
+      return 0;
+  } else {
+    // Approach A non-(whole-measure): only the while-PLAYING tape grabs (stopped re-sim of a
+    // non-aligned loop needs the A2 phase kernel). Depth = complete loop PERIODS played
+    // since transport start, capped at the ring depth (the tape-density cap is enforced at
+    // grab time via -10).
+    if( !running ) return 0;
+    u16 tps = seq_core_trk[src].step_length;
+    if( tps == 0 ) tps = (u16)((seq_cc_trk[src].clkdiv.value + 1) * (seq_cc_trk[src].clkdiv.TRIPLETS ? 4 : 6));
+    if( tps == 0 ) tps = 96;
+    u32 loops_done = (u32)SEQ_BPM_TickGet() / ((u32)spm * tps);
+    if( loops_done == 0 ) return 0;
+    max_k = (loops_done > (SEQ_CORE_CAP_RING_BARS - 1)) ? (SEQ_CORE_CAP_RING_BARS - 1) : (u8)loops_done;
+  }
+
   if( max_k > 256 / spm ) max_k = (u8)(256 / spm);         // dst_steps = K*spm <= 256
 
   u32 par_unit = (u32)spm * SEQ_PAR_NumLayersGet(src) * SEQ_PAR_NumInstrumentsGet(src);
@@ -2211,17 +2275,29 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // by-ear target.
   if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator ) return -11;
 
-  // The ring is indexed per GLOBAL measure (robotize_measure_ctr); a span only lines
-  // up when the src track is exactly one global measure long. seq_core_steps_per_measure
-  // is stored as (steps-1), so the true count is +1.
-  u8 spm  = (u8)(tcc->length + 1);
-  u8 gspm = (u8)(seq_core_steps_per_measure + 1);
-  if( spm != gspm ) return -8;                          // not a whole (global) measure
+  // STOPPED re-sim is ONE global measure only (2026-06-26). The drive phase-aligns to the
+  // global measure (B = gspm*96), so it faithfully reproduces a one-measure loop — but a
+  // MULTI-measure loop (n = spm/gspm >= 2) is driven at the wrong phase (a hardware trace
+  // showed a sub-measure rotation), and a NON-(whole-measure) loop is unaligned outright.
+  // BOTH route to "play to grab": the while-PLAYING tape (SEQ_CORE_CaptureSpanTape) records
+  // the emitted stream and is traversal- AND phase-correct for ANY length (n=1/n>=2/odd),
+  // verified note-for-note. The multi-measure/non-aligned STOPPED re-sim drive-phase is the
+  // deferred A2 kernel. seq_core_steps_per_measure is stored as (steps-1).
+  u16 spm  = (u16)(tcc->length + 1);
+  u16 gspm = (u16)(seq_core_steps_per_measure + 1);
+  if( spm != gspm ) return -8;                          // not ONE measure: play to grab (A2 pending)
   u16 dst_steps = (u16)k * spm;
   if( dst_steps == 0 || dst_steps > 256 ) return -7;    // exceeds max track steps
 
-  const seq_core_cap_frame_t *frame = SEQ_CORE_CaptureRingFrameBack(src, k);
-  if( frame == NULL ) return -6;                        // not enough history / bad k
+  // Window-START = the loop boundary k complete loops back (skipping any in-progress
+  // partial loop). n = frames per loop = spm/gspm (gate above guarantees spm%gspm==0).
+  // Frozen ctr (STOPPED) -> no race; the helper reduces to FrameBack(k) for n==1.
+  u8 n = (u8)(spm / gspm);
+  u32 mctr = seq_core_trk[src].robotize_measure_ctr;
+  u8 win_o;
+  if( SEQ_CORE_CaptureRingLoopWindow(src, mctr, n, k, NULL, &win_o, NULL) != 0 )
+    return -6;                                          // not enough aligned history
+  const seq_core_cap_frame_t *frame = &seq_core_cap_ring[(mctr - win_o) % SEQ_CORE_CAP_RING_BARS];
 
   u16 tps = seq_core_trk[src].step_length;
   if( tps == 0 ) tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
@@ -2378,14 +2454,19 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
   seq_cc_trk_t *tcc = &seq_cc_trk[src];
   if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator ) return -11; // unquantizable emitted stream (A8 fence)
 
-  // Must be exactly one global measure long (the per-measure bar markers line up only
-  // then). seq_core_steps_per_measure is stored as (steps-1), so +1 for the true count.
-  u8 spm  = (u8)(tcc->length + 1);
-  u8 gspm = (u8)(seq_core_steps_per_measure + 1);
-  if( spm != gspm ) return -8;                          // not a whole (global) measure
+  // Approach A (2026-06-26): ANY track length while PLAYING. spm = steps per LOOP
+  // (tcc->length+1). The tape records the EMITTED stream, so the grab window is just a
+  // tick-period slice of the track's own loop period — traversal-agnostic (works for
+  // self-modulated direction / random / ping-pong / sub-measure / odd, not only whole
+  // measures). A whole-measure track still uses the Approach-B per-measure markers below;
+  // a non-aligned one slices by P = spm*tps ticks. (Stopped re-sim keeps the whole-measure
+  // gate — A2 lifts it.) seq_core_steps_per_measure is stored as (steps-1).
+  u16 spm  = (u16)(tcc->length + 1);
+  u16 gspm = (u16)(seq_core_steps_per_measure + 1);
+  if( spm == 0 ) return -7;                             // degenerate length
   u16 dst_steps = (u16)k * spm;
   if( dst_steps == 0 || dst_steps > 256 ) return -7;    // exceeds max track steps
-  if( k < 1 || k >= seq_core_cap_ring_filled ) return -6; // not enough completed bars
+  if( k < 1 ) return -6;
 
   u16 tps = seq_core_trk[src].step_length;
   if( tps == 0 ) tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
@@ -2401,11 +2482,38 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
 
   MUTEX_MIDIOUT_TAKE;
 
-  // Window [win_start, win_end) in absolute ticks: win_end = the LIVE (in-progress)
-  // bar's downbeat (so we keep only COMPLETED bars), win_start = K bars before that.
-  u32 ctr = seq_core_trk[src].robotize_measure_ctr;
-  u32 win_start = seq_core_cap_tape_bar_start[(ctr - k) % SEQ_CORE_CAP_RING_BARS];
-  u32 win_end   = seq_core_cap_tape_bar_start[ctr % SEQ_CORE_CAP_RING_BARS];
+  // Window [win_start, win_end) in absolute ticks = the last k COMPLETE loops.
+  u32 win_start, win_end;
+  if( gspm != 0 && (spm % gspm) == 0 ) {
+    // Whole-measure track (Approach B): the per-measure bar markers line up loop-by-loop.
+    // n = frames per loop = spm/gspm. Resolve the loop-aligned offsets against a single ctr
+    // read (the engine advances ctr while PLAYING). Reduces to {win_o=k, win_e=0} for n==1
+    // -> identical to the original window.
+    u8 n = (u8)(spm / gspm);
+    u32 ctr = seq_core_trk[src].robotize_measure_ctr;
+    u8 win_o, win_e;
+    if( SEQ_CORE_CaptureRingLoopWindow(src, ctr, n, k, NULL, &win_o, &win_e) != 0 ) {
+      MUTEX_MIDIOUT_GIVE; return -6;                     // not enough aligned history
+    }
+    win_start = seq_core_cap_tape_bar_start[(ctr - win_o) % SEQ_CORE_CAP_RING_BARS];
+    win_end   = seq_core_cap_tape_bar_start[(ctr - win_e) % SEQ_CORE_CAP_RING_BARS];
+  } else {
+    // Approach A — non-(whole-measure) track: no per-global-measure marker lines up, so
+    // slice by the track's own loop PERIOD in ticks (P = spm*tps). The track advances one
+    // step per tps ticks regardless of how its direction/self-bus wanders, so a tick slice
+    // faithfully holds "what played in the last k loops" for ANY traversal. Loop boundaries
+    // sit at multiples of P from transport start (first cut: assumes the track started
+    // phase-aligned at tick 0; a mid-run synch/restart offset is the documented edge,
+    // deferred). win_end = the in-progress loop's start (keep only COMPLETED loops);
+    // win_start = k loops before it.
+    if( k > (SEQ_CORE_CAP_RING_BARS - 1) ) { MUTEX_MIDIOUT_GIVE; return -6; } // match the thermometer cap (MaxK)
+    u32 P = (u32)spm * tps;
+    u32 now = (u32)SEQ_BPM_TickGet();
+    u32 loops_done = now / P;                            // completed loops since tick 0
+    if( (u32)k > loops_done ) { MUTEX_MIDIOUT_GIVE; return -6; } // not enough played yet
+    win_end   = loops_done * P;
+    win_start = win_end - (u32)k * P;
+  }
 
   // Eviction guard: when the tape ring is full, the head slot holds the OLDEST retained
   // event. If even that is newer than the window start, the span's early notes scrolled

@@ -51,6 +51,23 @@ def _setup_forward_line(board: Board) -> None:
         board.track_par_set(TRACK, NOTE_LAYER, 0, step, 48 + step)
 
 
+def _setup_forward_line_len(board: Board, n_steps: int) -> None:
+    """A fixed forward line of `n_steps` steps (Approach A: any length, not just a whole
+    measure). Same recognizable shape as _setup_forward_line — step 0 accent (72), the
+    rest an ascending ramp — gated on every step, no generator, forward traversal, so the
+    captured copy is comparable element-for-element."""
+    board.track_drum_init(TRACK)
+    board.cc_set(TRACK, CC.EVENT_MODE, EVENT_MODE_NOTE)
+    board.cc_set(TRACK, SEQ_CC_LENGTH, n_steps - 1)
+    board.cc_set(TRACK, SEQ_CC_DIRECTION, TRKDIR_FORWARD)
+    board.ui_track_set(TRACK)
+    for b in range((n_steps + 7) // 8):                  # gate every step
+        board.trg_byte_set(TRACK, b, 0xFF)
+    board.track_par_set(TRACK, NOTE_LAYER, 0, 0, 72)     # downbeat accent
+    for step in range(1, n_steps):
+        board.track_par_set(TRACK, NOTE_LAYER, 0, step, 36 + (step % 48))
+
+
 def _wait_ring_depth(board: Board, target: int, timeout: float = 25.0) -> int:
     """Poll the CAPTURE ring until it has buffered >= `target` bars (the transport is
     genuinely running and bars are completing). Returns the depth reached; raises on
@@ -121,6 +138,79 @@ def test_capture_while_playing_reproduces_line(board):
             f"tape fidelity: dst step {s} = {dst[s]}, expected source step {s % 16} = {src[s % 16]}\n"
             f"  src: {src}\n  dst: {dst}"
         )
+
+
+@pytest.mark.hardware
+def test_capture_while_playing_nonaligned_loop(board):
+    """Approach A (2026-06-26): a NON-(whole-measure) track — here 24 steps = 1.5 global
+    measures — is grabbable WHILE PLAYING via the tape's tick-period slice (P = spm*tps),
+    even though its loop never lines up with a global-measure boundary. Grab k=1 (one
+    24-step loop) and the static dst reproduces the forward line note-for-note on the
+    correct phase. The stopped re-sim still refuses this length (see the pin below)."""
+    board.reset()
+    _setup_forward_line_len(board, 24)
+    try:
+        board.transport(start=True)
+        _wait_ring_depth(board, 4)                       # > 1 full 24-step loop has played
+        q = board.capture_ring_query()
+        assert q["max_k"] >= 1, f"non-aligned track should expose >=1 grabbable loop while playing, got {q['max_k']}"
+        status = board.capture_span(TRACK, 1, DST)       # one 24-step loop
+        assert status == 0x01, f"while-playing non-aligned capture should succeed, got {hex(status)}"
+    finally:
+        board.transport(start=False)
+
+    src = [board.track_par_get(TRACK, NOTE_LAYER, 0, s) for s in range(24)]
+    dst = [board.track_par_get(DST, NOTE_LAYER, 0, s) for s in range(24)]
+    assert len(set(src)) >= 8 and src[0] != src[1], f"source line not read back: {src}"
+    assert any(dst), "captured dst has no notes"
+    for s in range(24):
+        assert dst[s] == src[s], (
+            f"non-aligned tape fidelity: dst step {s} = {dst[s]}, expected src {s} = {src[s]}\n"
+            f"  src: {src}\n  dst: {dst}"
+        )
+
+
+@pytest.mark.hardware
+def test_capture_while_playing_twobar_phase(board):
+    """WHILE-PLAYING phase for a 2-bar (32-step) forward line: the tape just buckets the
+    real emitted ticks (no re-sim drive), so the downbeat must land right. Grab k=1 (one
+    32-step loop) and compare note-for-note. This isolates the tape-window phase for n=2
+    from the stopped re-sim drive (which has a separate multi-bar phase issue)."""
+    board.reset()
+    _setup_forward_line_len(board, 32)
+    try:
+        board.transport(start=True)
+        _wait_ring_depth(board, 5)                       # >= 2 full 32-step loops (n=2)
+        status = board.capture_span(TRACK, 1, DST)       # one 2-bar loop
+        assert status == 0x01, f"2-bar while-playing capture should succeed, got {hex(status)}"
+    finally:
+        board.transport(start=False)
+
+    src = [board.track_par_get(TRACK, NOTE_LAYER, 0, s) for s in range(32)]
+    dst = [board.track_par_get(DST, NOTE_LAYER, 0, s) for s in range(32)]
+    assert len(set(src)) >= 8 and src[0] != src[1], f"source line not read back: {src}"
+    assert any(dst), "captured dst has no notes"
+    assert dst[0] == src[0], (
+        f"2-bar tape downbeat phase wrong: dst[0]={dst[0]} src[0]={src[0]}\n  src: {src}\n  dst: {dst}"
+    )
+    for s in range(32):
+        assert dst[s] == src[s], (
+            f"2-bar tape fidelity: dst[{s}]={dst[s]}, expected src[{s}]={src[s]}\n  src: {src}\n  dst: {dst}"
+        )
+
+
+@pytest.mark.hardware
+def test_capture_nonaligned_stopped_refused(board):
+    """The flip side of the pin above: while STOPPED, a non-(whole-measure) track refuses
+    (0x18 = 0x10|8) — the re-sim drive phase-aligns to the global measure, so reproducing a
+    non-aligned loop is the deferred A2 kernel. The LCD steers the user to 'play to grab'."""
+    board.reset()
+    _setup_forward_line_len(board, 24)
+    # advance the (stopped) engine so the ring has history, then a stopped grab
+    board.clock_step(16000)
+    board.clock_step(16000)
+    status = board.capture_span(TRACK, 1, DST)
+    assert status == 0x18, f"stopped non-aligned should refuse 0x18 (play to grab), got {hex(status)}"
 
 
 @pytest.mark.hardware

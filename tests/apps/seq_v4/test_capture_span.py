@@ -136,15 +136,42 @@ def test_capture_max_k_matches_refusal_boundary(board):
 
 
 @pytest.mark.hardware
-def test_capture_refuses_non_whole_measure(board):
-    """A track whose length is not a whole measure is refused (status 0x18 =
-    0x10|8) — the ring index aligns to the global measure, not the track wrap."""
+def test_capture_stopped_refuses_non_measure_multiple(board):
+    """STOPPED re-sim grabs N-whole-global-measure tracks but refuses a length that is NOT
+    an integer multiple of the global measure (status 0x18 = 0x10|8): a non-multiple
+    longer-than-a-bar length (24 steps = 1.5 measures), an odd length (11 steps), and a
+    SUB-measure length (8 steps). The re-sim drive phase-aligns to the global measure, so
+    reproducing a non-aligned loop is the deferred A2 kernel — the LCD steers to 'play to
+    grab' (the WHILE-PLAYING tape path handles any length; see test_capture_while_playing)."""
     board.reset()
     board.ui_track_set(TRACK)
-    board.cc_set(TRACK, SEQ_CC_LENGTH, 10)  # 11 steps: not a multiple/divisor of 16
-    _drive_measures(board, 3)
-    status = board.capture_span(TRACK, 1, DST)
-    assert status == 0x18, f"expected whole-measure refusal 0x18, got {hex(status)}"
+    for length, steps in ((23, 24), (10, 11), (7, 8)):
+        board.cc_set(TRACK, SEQ_CC_LENGTH, length)
+        _drive_measures(board, 3)
+        status = board.capture_span(TRACK, 1, DST)
+        assert status == 0x18, (
+            f"expected measure-multiple refusal 0x18 for {steps} steps, got {hex(status)}"
+        )
+
+
+@pytest.mark.hardware
+def test_capture_multimeasure_stopped_refused(board):
+    """STOPPED re-sim is ONE global measure only. A multi-measure track (32-step = 2 bars,
+    64-step = 4 bars) refuses while stopped (0x18 = "play to grab"): the re-sim drive phase-
+    aligns to the global measure and can't yet reproduce a multi-bar loop's own phase (a
+    hardware trace showed a sub-measure rotation — the deferred A2 kernel). Multi-measure
+    capture is via the WHILE-PLAYING tape instead (test_capture_while_playing_twobar_phase
+    proves it note-for-note)."""
+    board.reset()
+    board.ui_track_set(TRACK)                          # ring follows the visible track
+    for steps in (32, 64):
+        board.cc_set(TRACK, SEQ_CC_LENGTH, steps - 1)
+        _drive_measures(board, 4)                      # a little history (the -8 gate is pre-history)
+        status = board.capture_span(TRACK, 1, DST)
+        assert status == 0x18, (
+            f"stopped {steps}-step ({steps // 16}-bar) grab should refuse 0x18 (play to grab), "
+            f"got {hex(status)}"
+        )
 
 
 @pytest.mark.hardware

@@ -303,45 +303,47 @@ In every case the capture **merges** into the destination pattern: it replaces o
 
 ### Retroactive Capture — the UTILITY gesture
 
-The **play-then-keep** capture — "Capture MIDI" for the whole organism. The box is always listening: every bar a track plays is recorded. When you hear something you want to keep, hold **UTILITY** and grab the last N bars onto a fresh track — no arming, no record-first. It lands as static notes that play back the same every time.
+The **play-then-keep** capture — "Capture MIDI" for the whole organism. The box is always listening: every bar a track plays is recorded. When you hear something you want to keep, hold **UTILITY** and grab the last N **loops** onto a fresh track — no arming, no record-first. It lands as static notes that play back the same every time.
 
-**Works whether you're playing or stopped — the gesture is identical.** What differs is *how* the box reconstructs the span:
+A **loop** is the source track's full length — a single bar for a one-measure track, the whole phrase for a longer one.
 
-* **While playing → a live tape.** The box keeps **exactly what you just heard** — including the things only a recording can hold: step-probability/humanize coin-flips as they actually rolled, notes you played in over the loop, the real timing. Grab without stopping; the captured track is instantly a loop you can solo/mute.
-* **While stopped → a re-simulation.** Nothing is sounding, so the box *regenerates* the span from the generators' state (faithful for autonomous wander/traversal — it re-runs the exact deterministic process). This is the original first cut.
+**Works whether you're playing or stopped — the gesture is identical.** What differs is *how* the box reconstructs the span, and how much it can reach:
 
-They produce the same result for a plain generator wander; the live tape pulls ahead the moment something other than the generator shaped the sound.
+* **While playing → a live tape (any length).** The box keeps **exactly what you just heard** — step-probability/humanize coin-flips as they actually rolled, notes you played in over the loop, the real timing. It grabs a loop of **any length**: one bar, several bars, an odd polymeter (e.g. 24 steps against a 16-step bar), or a sub-measure ostinato — because it just records what sounded. Grab without stopping; the captured track is instantly a loop you can solo/mute. **This is the way to keep an odd-length or self-modulating phrase.**
+* **While stopped → a re-simulation (one bar).** Nothing is sounding, so the box *regenerates* the span from the generators' state (faithful for autonomous wander/traversal — it re-runs the exact deterministic process). The stopped re-sim currently handles a **one-bar** loop only; grabbing a **multi-bar or odd-length** track while stopped flashes **`play to grab`** — start the transport and grab it live (the tape handles it). *(Lifting stopped re-sim to multi-bar is a queued follow-on — its drive needs to phase to the track's own loop, not just the global bar.)*
+
+For a plain one-bar generator wander, playing and stopped produce the same result; the live tape is what you reach for everywhere else.
 
 The **source** is the track that was playing into the ring (the visible track). While **UTILITY is held** the UTILITY LED lights and the LCD overlays the grab state:
 
 ```
-CAPTURE T1 -> T2    max 12 bars
-sel=dest trk    GP-n=grab last n bars
+CAPTURE T1 -> T2    max 12 loops
+sel=dest trk   GP-n=grab last n loops
 ```
 
-(Before you pick a destination it reads `CAPTURE T1 -> ?    max 12 bars`.)
+(Before you pick a destination it reads `CAPTURE T1 -> ?    max 12 loops`.)
 
 The gesture:
 
-1. **Hold UTILITY.** The GP LED row becomes a **thermometer** — the lit LEDs are the bars you can grab (it is not always the full row; see below).
+1. **Hold UTILITY.** The GP LED row becomes a **thermometer** — the lit LEDs are the loops you can grab (it is not always the full row; see below).
 2. **Tap a select-row button** to pick the **destination track** (the grab lands here). Tap a different one to re-aim.
-3. **Tap GP-n** (still holding UTILITY) — grabs the **last n bars** (n = the GP number) and **commits** immediately. A confirmation flashes (`T1 last 8b -> T2`); the span lands on the destination track on the bar, with generators stripped so it plays as static tape.
+3. **Tap GP-n** (still holding UTILITY) — grabs the **last n loops** (n = the GP number) and **commits** immediately. A confirmation flashes (`T1 last 8 loops -> T2`); the span lands on the destination track on the bar, with generators stripped so it plays as static tape. If you grab while stopped mid-loop, the box keeps the last n **complete** loops and skips the partial one in progress. (A stopped grab of a multi-bar/odd track flashes `play to grab` instead — start the transport.)
 
 A **quick UTILITY tap** (no select/GP, under half a second) opens the **Utility page** as before — reaching for CAPTURE never strands you there, and releasing a hold returns you exactly where you were.
 
-#### The thermometer — how many bars you can grab
+#### The thermometer — how many loops you can grab
 
-The ring keeps the last **16** completed bars, but how many you can actually grab depends on the **source track's layout** — how much note/trigger data one bar costs. The lit LEDs always tell the truth: **only the lit GP buttons will grab**; tapping past them refuses with `dst par full` (or `dst trg full`), and the `max N bars` readout is the exact ceiling.
+The ring keeps the last **16** completed measures of history, so the loop count caps at 16 for a one-measure track and proportionally fewer for longer tracks (8 loops of a 2-bar track, 4 of a 4-bar track). How many you can actually grab also depends on the **source track's layout** — how much note/trigger data one loop costs. The lit LEDs always tell the truth: **only the lit GP buttons will grab**; tapping past them refuses with `dst par full` (or `dst trg full`), and the `max N loops` readout is the exact ceiling. A grab can't exceed **256 steps** total, so longer loops grab fewer at a time (a 2-bar/32-step track tops out around 8 loops, a 4-bar around 4).
 
-* A **lean melodic track** (one voice) grabs the **full 16 bars**.
-* A **dense drum-layout track** (many instruments) costs far more per bar and caps at **~4 bars** — the per-bar storage fills up.
+* A **lean one-measure melodic track** (one voice) grabs the **full 16 loops**.
+* A **dense drum-layout track** (many instruments) costs far more per loop and caps at **~4** — the per-loop storage fills up.
 
 The cap is set by the **source** you recorded, not the destination you pick. So for the deepest grabs, run your generative line on a **normal melodic track**, not a drum-init'd one.
 
 #### Tips
 
-* **Watch the LEDs, not the clock:** the thermometer is the real limit — if only GP1–GP4 are lit, 4 bars is all this source can hold, however long you played.
-* **Audition first:** with the transport stopped you can hold UTILITY and read `max N bars` *before* picking a destination, so you know the ceiling up front.
+* **Watch the LEDs, not the clock:** the thermometer is the real limit — if only GP1–GP4 are lit, 4 loops is all this source can hold, however long you played.
+* **Audition first:** with the transport stopped you can hold UTILITY and read `max N loops` *before* picking a destination, so you know the ceiling up front.
 * **Re-grab freely:** the ring is preserved across a grab, so a second grab from the same source (e.g. into a leaner track) reproduces the same span.
 
 ### In-place freeze (GP8 on the PITCHGEN page)
