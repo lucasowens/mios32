@@ -958,14 +958,17 @@ class Board:
         dst_track: int,
         dst_bank: int,
         dst_pattern: int,
-        timeout: float = 4.0,
+        k: int = 0,
+        timeout: float = 5.0,
     ) -> bool:
-        """Trigger SEQ_CORE_CaptureToSlotTrack (capture → track-in-slot, saved).
+        """Trigger capture → track-in-slot, saved.
 
-        Renders src_track's computed output into dst_track of slot
-        (dst_bank, dst_pattern), persisted to SD, preserving the slot's other
-        tracks. The dst group's live RAM is restored afterward. Returns True on
-        success. The 4s default timeout accommodates two SD ops.
+        k=0 (default): SEQ_CORE_CaptureToSlotTrack — renders src_track's STATIC
+        computed output into dst_track of slot (dst_bank, dst_pattern). k>0:
+        SEQ_CORE_CaptureSpanToSlotTrack — captures the live RECORDER (last k loops,
+        the while-playing "capture to another pattern" path) instead. Both persist
+        to SD preserving the slot's other tracks and restore the dst group's live
+        RAM afterward. Returns True on success.
         """
         if not 0 <= src_track <= 15:
             raise ValueError(f"src_track out of range: {src_track}")
@@ -975,10 +978,13 @@ class Board:
             raise ValueError(f"dst_bank out of range: {dst_bank}")
         if not 0 <= dst_pattern <= 127:
             raise ValueError(f"dst_pattern out of range: {dst_pattern}")
+        if not 0 <= k <= 127:
+            raise ValueError(f"k out of range: {k}")
+        body = [src_track, dst_track, dst_bank, dst_pattern]
+        if k > 0:
+            body.append(k)
         since = time.monotonic() - self._t0
-        self.send_raw(
-            frame(CMD_CAPTURE_TO_SLOT_TRACK, bytes([src_track, dst_track, dst_bank, dst_pattern]))
-        )
+        self.send_raw(frame(CMD_CAPTURE_TO_SLOT_TRACK, bytes(body)))
         payload = self.wait_for_sysex(CMD_CAPTURE_TO_SLOT_TRACK, timeout=timeout, since=since)
         if len(payload) < 4:
             raise RuntimeError(f"short CAPTURE_TO_SLOT_TRACK reply: {payload!r}")

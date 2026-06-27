@@ -1354,13 +1354,15 @@ static void cmd_capture_to_track(mios32_midi_port_t port, const u8 *payload, u8 
 }
 
 
-// CMD_CAPTURE_TO_SLOT_TRACK payload: [src_track, dst_track, dst_bank, dst_pattern]
+// CMD_CAPTURE_TO_SLOT_TRACK payload: [src_track, dst_track, dst_bank, dst_pattern, (k)]
 // Reply payload: [src_track, dst_track, ok, dispatch_status]
-//   ok 0x01 = SEQ_CORE_CaptureToSlotTrack returned >=0, 0x00 = returned <0.
+//   ok 0x01 = the verb returned >=0, 0x00 = returned <0.
 //   dispatch_status 0x01 = ok, 0x02 = bad payload.
 //
-// Renders src_track's computed output into dst_track of slot (bank, pattern),
-// persisted to SD, preserving the slot's other tracks. Synchronous (two SD ops).
+// 4-byte payload: renders src_track's STATIC computed output into dst_track of slot
+// (bank, pattern). 5-byte payload with k>0: captures the live RECORDER (last k loops,
+// via SEQ_CORE_CaptureSpanToSlotTrack) instead — the while-playing "capture to another
+// pattern" path. Both persist to SD preserving the slot's other tracks. Synchronous.
 static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload, u8 plen)
 {
   u8 reply[4] = { 0, 0, 0, 0x02 };
@@ -1372,8 +1374,11 @@ static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload
   u8 dst_track   = payload[1];
   u8 dst_bank    = payload[2] & 0x07;
   u8 dst_pattern = payload[3] & 0x7f;
+  u8 k           = (plen >= 5) ? (payload[4] & 0x7f) : 0;
 
-  s32 r = SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern);
+  s32 r = (k > 0)
+    ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst_bank, dst_pattern, k)
+    : SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern);
 
   reply[0] = src_track;
   reply[1] = dst_track;

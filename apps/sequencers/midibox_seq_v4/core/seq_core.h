@@ -552,6 +552,11 @@ extern s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k);
 // Dispatcher used by the gesture + testctrl: PLAYING -> tape, STOPPED -> re-sim.
 extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k);
 
+// Recorder -> SD pattern slot: span-capture src's last k loops into dst_track of
+// slot (bank, pattern), persisted, preserving the slot's other tracks. The
+// while-playing companion to SEQ_CORE_CaptureToSlotTrack (static render).
+extern s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k);
+
 // Fork pull verb (RECOMBINE) — load ONE stored track section
 // (src_bank, src_pattern, src_slot_track 0..3) into dst_track, RAM only, a
 // transfusion into the running organism: seq_pattern[] is never touched and

@@ -827,7 +827,14 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     // group's pattern away and back — it lives in a bank that group can't address.
     // Same-group is a no-op: dst_group==src_group, so this is the bank dst already had.
     dst.bank = seq_pattern[dst_group].bank;
-    s32 cap_r = SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
+    // Transport-conditional source (Option 1, 2026-06-27): while PLAYING, grab the
+    // live RECORDER (the retroactive tape — what actually sounded over the last loop,
+    // incl. live keys / coin-flips / self-bus wander) into the slot; while STOPPED,
+    // keep freezing the static render (unchanged, works with no playback history).
+    // dst_track defaults to src_track above => "same track, another pattern."
+    s32 cap_r = SEQ_BPM_IsRunning()
+      ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst.bank, dst.pattern, 1)
+      : SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
     if( cap_r >= 0 ) {
       if( dst_group != src_group ) {
         // FEARLESS: the capture just replaced that slot's record. If it's the

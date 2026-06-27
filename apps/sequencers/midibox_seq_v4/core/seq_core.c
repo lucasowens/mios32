@@ -240,6 +240,10 @@ static u8  seq_core_cap_ring_overflow = 0;    // a measure had > SLOTS gens (cap
 static u8  seq_core_cap_resim_active  = 0;    // 1 while a CAPTURE re-sim drives the engine
                                               // (suppresses ring writes so re-sim doesn't
                                               //  overwrite the very history it reads)
+static u8  seq_core_cap_suppress_journal = 0; // 1 while CaptureSpanToSlotTrack runs its
+                                              // internal scratch-track CaptureSpan — that
+                                              // dst is fully restored, so its undo arm must
+                                              // not clobber the user's one-deep journal
 
 /////////////////////////////////////////////////////////////////////////////
 // Retroactive CAPTURE — while-PLAYING live tape (2026-06-20)
@@ -505,6 +509,23 @@ u8 SEQ_CORE_CaptureRingDepth(void) { return seq_core_cap_ring_filled; }
 u8 SEQ_CORE_CaptureRingTrack(void) { return seq_core_cap_ring_track; }
 u8 SEQ_CORE_CaptureRingOverflow(void) { return seq_core_cap_ring_overflow; }
 
+// Effective CAPTURE loop length (steps) for `src`. A SYNCH_TO_MEASURE track is
+// force-reset to step 0 at every global-measure boundary (SEQ_CORE_ResetTrkPos in the
+// tick body, gated on synch_to_measure_req), so its AUDIBLE loop is exactly ONE global
+// measure regardless of tcc->length — route it as a 1-bar loop (spm = gspm, n = 1, the
+// most-validated path) instead of refusing it (re-sim) or slicing by its raw length
+// (tape's non-aligned branch). Both the per-measure tape markers and the re-sim drive
+// (which re-applies the synch reset at tick B) line up exactly with the synch'd loop.
+// Any other track loops at its own length. seq_core_steps_per_measure is stored as
+// (steps-1). The three capture call sites share this so they can never disagree.
+static u16 SEQ_CORE_CaptureLoopSteps(u8 src)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS ) return 0;
+  if( seq_cc_trk[src].clkdiv.SYNCH_TO_MEASURE )
+    return (u16)(seq_core_steps_per_measure + 1);   // one global measure
+  return (u16)(seq_cc_trk[src].length + 1);          // the track's own loop
+}
+
 // Max grabbable K (bars) for `src` right now: the SMALLER of the ring depth and
 // what the destination buffers can hold (the dst inherits src's layout, so a heavy
 // src — e.g. a 16-instrument drum track — caps the par buffer well below the ring).
@@ -515,8 +536,9 @@ u8 SEQ_CORE_CaptureMaxK(u8 src)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || src != seq_core_cap_ring_track ) return 0;
 
-  // spm = steps per LOOP (tcc->length+1); gspm = global Steps-per-Measure (stored as steps-1).
-  u16 spm  = (u16)(seq_cc_trk[src].length + 1);
+  // spm = steps per LOOP; gspm = global Steps-per-Measure (stored as steps-1). A synch'd
+  // track reports gspm here (SEQ_CORE_CaptureLoopSteps) so the thermometer matches the grab.
+  u16 spm  = SEQ_CORE_CaptureLoopSteps(src);
   u16 gspm = (u16)(seq_core_steps_per_measure + 1);
   if( spm == 0 ) return 0;
   u8 running = SEQ_BPM_IsRunning();
@@ -2240,7 +2262,7 @@ static void SEQ_CORE_CaptureSpanRestore(u8 src)
 // MUTEX_MIDIOUT. Keep the two callers' prep identical by routing both through here.
 static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
                                         u8 par_layers, u8 par_instr,
-                                        u8 trg_layers, u8 trg_instr)
+                                        u8 trg_layers, u8 trg_instr, u16 tps)
 {
   SEQ_CC_Set(dst, SEQ_CC_MIDI_EVENT_MODE, SEQ_CC_Get(src, SEQ_CC_MIDI_EVENT_MODE));
   SEQ_CC_LinkUpdate(dst);
@@ -2251,6 +2273,22 @@ static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
   SEQ_CC_Set(dst, SEQ_CC_GROOVE_VALUE, 0);
   SEQ_CC_Set(dst, SEQ_CC_GROOVE_STYLE, 0);
   SEQ_CC_Set(dst, SEQ_CC_LENGTH, dst_steps - 1);       // K-bar length
+
+  // Pin the dst clock divider to the CAPTURE GRID: the notes were quantized to a
+  // `tps`-tick step spacing, so the frozen copy must PLAY at that spacing. The full-CC
+  // inherit above copied src's clkdiv.value, but a self-bus / `Ctrl` routing on the
+  // clock divider can leave that config at a TRANSIENT value (e.g. 0 -> divide-by-1)
+  // that disagrees with the actual step spacing, so the copy played at the wrong speed.
+  // step_length = (value+1)*(TRIPLETS?4:6); for an UNmodulated src this re-derives the
+  // SAME value it inherited (tps == src step_length), so the normal bounce is unchanged.
+  {
+    u8 unit = seq_cc_trk[dst].clkdiv.TRIPLETS ? 4 : 6;
+    if( unit && tps >= unit ) {
+      u16 div = (u16)(tps / unit) - 1;
+      if( div > 255 ) div = 255;
+      SEQ_CC_Set(dst, SEQ_CC_CLK_DIVIDER, (u8)div);
+    }
+  }
   SEQ_CC_LinkUpdate(dst);
   memset(seq_par_layer_value[dst], 0, SEQ_PAR_MAX_BYTES); // start as all-rest
   memset(seq_trg_layer_value[dst], 0, SEQ_TRG_MAX_BYTES);
@@ -2283,7 +2321,10 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // the emitted stream and is traversal- AND phase-correct for ANY length (n=1/n>=2/odd),
   // verified note-for-note. The multi-measure/non-aligned STOPPED re-sim drive-phase is the
   // deferred A2 kernel. seq_core_steps_per_measure is stored as (steps-1).
-  u16 spm  = (u16)(tcc->length + 1);
+  // A SYNCH_TO_MEASURE track resolves to gspm (1-bar loop) via SEQ_CORE_CaptureLoopSteps,
+  // so it passes the gate below and re-sims through the n==1 path; the drive re-applies the
+  // synch reset at tick B (it runs the real tick logic), reproducing the audible measure.
+  u16 spm  = SEQ_CORE_CaptureLoopSteps(src);
   u16 gspm = (u16)(seq_core_steps_per_measure + 1);
   if( spm != gspm ) return -8;                          // not ONE measure: play to grab (A2 pending)
   u16 dst_steps = (u16)k * spm;
@@ -2326,7 +2367,7 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
 
   // (b) prepare dst: inherit src config/geometry, K-bar length, start empty (shared
   //     with the while-playing tape path so both stay identical)
-  SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr);
+  SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr, tps);
 
   // sink params (read dst links AFTER the CC inherit above)
   seq_cc_trk_t *dtcc = &seq_cc_trk[dst];
@@ -2461,7 +2502,10 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
   // measures). A whole-measure track still uses the Approach-B per-measure markers below;
   // a non-aligned one slices by P = spm*tps ticks. (Stopped re-sim keeps the whole-measure
   // gate — A2 lifts it.) seq_core_steps_per_measure is stored as (steps-1).
-  u16 spm  = (u16)(tcc->length + 1);
+  // A SYNCH_TO_MEASURE track resolves to gspm via SEQ_CORE_CaptureLoopSteps, so it takes
+  // the whole-measure (n==1) marker branch below — the per-global-measure tape markers are
+  // exactly the synch'd track's loop boundaries (the reset re-aligns it every bar).
+  u16 spm  = SEQ_CORE_CaptureLoopSteps(src);
   u16 gspm = (u16)(seq_core_steps_per_measure + 1);
   if( spm == 0 ) return -7;                             // degenerate length
   u16 dst_steps = (u16)k * spm;
@@ -2528,7 +2572,7 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
   SEQ_CORE_JournalArm(dst);
 
   // prepare dst (shared with the re-sim path)
-  SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr);
+  SEQ_CORE_CaptureSpanPrepDst(src, dst, dst_steps, par_layers, par_instr, trg_layers, trg_instr, tps);
   seq_cc_trk_t *dtcc = &seq_cc_trk[dst];
   s8 note_layer = dtcc->link_par_layer_note;
   s8 vel_layer  = dtcc->link_par_layer_velocity;
@@ -2733,6 +2777,132 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Fork: capture the live RECORDER (the retroactive ring/tape — what actually
+// SOUNDED over the last k loops, incl. live keys / emission coin-flips / wander)
+// of `src` into `dst_track` of slot (dst_bank, dst_pattern), PERSISTED to SD,
+// preserving the slot's other 3 tracks. The while-PLAYING companion to
+// SEQ_CORE_CaptureToSlotTrack (which freezes the static render mirror): the
+// PATTERN-hold gesture dispatches here when the transport runs so "capture to
+// another pattern" keeps the PERFORMANCE, not a single rendered frame. With
+// dst_track == src this is exactly "same track, another pattern".
+//
+// SEQ_CORE_CaptureSpan materializes into a real track, so we borrow a SCRATCH
+// track in the dst group (!= src, != dst_track), snapshot the WHOLE dst group
+// FIRST (so both the scratch borrow AND the slot's staged load are undone by one
+// restore), span-capture the recorder into scratch, then run the same load-
+// modify-save as CaptureToSlotTrack sourcing the captured scratch. seq_pattern[]
+// is never touched. MUST run in task context (CaptureSpan takes MUTEX_MIDIOUT,
+// the slot R/W takes MUTEX_SDCARD — sequential, not nested).
+//
+// Returns the PatternWrite status (>=0 ok); a negative CaptureSpan refusal (e.g.
+// -3 wrong transport, -4 ring not recording src, -8 multi-bar stopped) or the
+// PatternRead status on failure (dst group left restored).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  u8 dst_group = dst_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  u8 dst_base  = dst_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  s32 status;
+  int t, i;
+
+  // Borrow a scratch track in the dst group: the span capture needs a target != src,
+  // and the slot writer overwrites dst_track. With 4 tracks/group and 2 excluded there
+  // is always one free.
+  u8 scratch = 0xff;
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    u8 cand = (u8)(dst_base + t);
+    if( cand != src && cand != dst_track ) { scratch = cand; break; }
+  }
+  if( scratch == 0xff ) return -1;
+
+  // 1. Snapshot the dst group's live RAM (4 tracks) BEFORE the span capture, so the
+  //    scratch borrow AND the slot's staged load both unwind in step 7's restore.
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    memcpy(&slottrk_cc_snap[t], &seq_cc_trk[dst_base+t], sizeof(seq_cc_trk_t));
+    memcpy(slottrk_par_snap[t], seq_par_layer_value[dst_base+t], SEQ_PAR_MAX_BYTES);
+    memcpy(slottrk_trg_snap[t], seq_trg_layer_value[dst_base+t], SEQ_TRG_MAX_BYTES);
+    slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
+    slottrk_gen_count[t] = SEQ_GENERATOR_TrackSnapshot(dst_base+t, slottrk_gen_snap[t], SEQ_GENERATOR_PERSIST_SLOTS);
+  }
+  memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
+  u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
+
+  // 2. Materialize the recorder (tape while playing / re-sim stopped) into scratch.
+  //    Non-destructive to src; writes scratch (in the snapshotted group). Suppress the
+  //    internal undo arm — scratch is restored, so it must not eat the user's one-deep.
+  seq_core_cap_suppress_journal = 1;
+  status = SEQ_CORE_CaptureSpan(src, scratch, k);
+  seq_core_cap_suppress_journal = 0;
+
+  if( status >= 0 ) {
+    // 3. scratch now holds the captured loop (static, ResetGen'd, length=k*spm, clock
+    //    pinned to the grid). Read it as the slot-source material + geometry.
+    memcpy(capture_par_snapshot, seq_par_layer_value[scratch], SEQ_PAR_MAX_BYTES);
+    memcpy(capture_trg_snapshot, seq_trg_layer_value[scratch], SEQ_TRG_MAX_BYTES);
+    for(i=0; i<128; ++i)
+      slottrk_src_cc[i] = (u8)SEQ_CC_Get(scratch, i);
+    u16 cap_par_steps  = (u16)SEQ_PAR_NumStepsGet(scratch);
+    u8  cap_par_layers = (u8)SEQ_PAR_NumLayersGet(scratch);
+    u8  cap_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(scratch);
+    u16 cap_trg_steps  = (u16)SEQ_TRG_NumStepsGet(scratch);
+    u8  cap_trg_layers = (u8)SEQ_TRG_NumLayersGet(scratch);
+
+    // 4. Read the target slot into the dst group (full load, remix_map=0).
+    MUTEX_SDCARD_TAKE;
+    status = SEQ_FILE_B_PatternRead(dst_bank, dst_pattern, dst_group, 0);
+    MUTEX_SDCARD_GIVE;
+
+    if( status >= 0 ) {
+      // 5. Inherit the captured geometry/CC onto the slot's dst_track + write the notes
+      //    (same shape as CaptureToSlotTrack step 4).
+      SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE]);
+      SEQ_CC_LinkUpdate(dst_track);
+      SEQ_PAR_TrackInit(dst_track, cap_par_steps, cap_par_layers, cap_num_instr);
+      SEQ_TRG_TrackInit(dst_track, cap_trg_steps, cap_trg_layers, cap_num_instr);
+      for(i=0; i<128; ++i)
+        SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
+      SEQ_CC_LinkUpdate(dst_track);
+      memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
+      memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
+      SEQ_CC_ResetGenerativeForBounce(dst_track);
+      SEQ_GENERATOR_TrackClear(dst_track);
+
+      // 6. Write the dst group (now carrying the captured track) back to the slot.
+      MUTEX_SDCARD_TAKE;
+      status = SEQ_FILE_B_PatternWrite(seq_file_session_name, dst_bank, dst_pattern, dst_group, 1);
+      MUTEX_SDCARD_GIVE;
+    }
+  }
+
+  // 7. Restore the dst group's live RAM (always — undoes the scratch borrow AND any slot
+  //    load; mirrors CaptureToSlotTrack's restore incl. the slot-bridge re-sync).
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    memcpy(&seq_cc_trk[dst_base+t], &slottrk_cc_snap[t], sizeof(seq_cc_trk_t));
+    memcpy(seq_par_layer_value[dst_base+t], slottrk_par_snap[t], SEQ_PAR_MAX_BYTES);
+    memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
+    seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
+    SEQ_CC_LinkUpdate(dst_base+t);
+    SEQ_GENERATOR_TrackRestore(dst_base+t, slottrk_gen_snap[t], slottrk_gen_count[t]);
+    SEQ_CORE_ChordMaskSlotSync(dst_base+t);
+    SEQ_CORE_TensionSlotSync(dst_base+t);
+    SEQ_CORE_PitchSlotSync(dst_base+t);
+    SEQ_CORE_LimitSlotSync(dst_base+t);
+    SEQ_CORE_RenderDirtySet(dst_base+t);
+  }
+  memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
+
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty = (seq_pattern_dirty & ~(1 << dst_group)) | dirty_snap;
+  MIOS32_IRQ_Enable();
+
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Fork: one-deep track undo — the RECOMBINE keystone (design doc §9
 // 2026-06-11). The snapshot buffer shape for one track's full persisted state
 // (geometry, name, CC image 0x00..0x9f, robotize anchors, par/trg sources,
@@ -2920,6 +3090,11 @@ static s32 journal_restore(const seq_core_track_undo_t *u)
 s32 SEQ_CORE_JournalArm(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  // Internal scratch capture (CaptureSpanToSlotTrack): the dst is a borrowed track
+  // that is restored byte-identical, so arming it would silently replace the user's
+  // real one-deep undo with a no-op. Leave the journal untouched.
+  if( seq_core_cap_suppress_journal ) return 0;
 
   // The snapshot caps generators at SEQ_GENERATOR_PERSIST_SLOTS (the same cap
   // every persistence boundary uses — bank save, capture frame, pull). If the
