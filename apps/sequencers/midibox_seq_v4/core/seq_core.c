@@ -2267,7 +2267,13 @@ static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
   SEQ_CC_Set(dst, SEQ_CC_MIDI_EVENT_MODE, SEQ_CC_Get(src, SEQ_CC_MIDI_EVENT_MODE));
   SEQ_CC_LinkUpdate(dst);
   SEQ_PAR_TrackInit(dst, dst_steps, par_layers, par_instr);
-  SEQ_TRG_TrackInit(dst, dst_steps, trg_layers, trg_instr);
+  // TRG is bit-packed (num_steps8 = steps/8): a non-x8 dst_steps would FLOOR trg below
+  // LENGTH+1, so SEQ_TRG_Set REFUSES the tail-bar gate writes (steps in the last partial
+  // byte) -> those captured notes land their par value but NO gate = silently muted, and
+  // TRKLEN shows "!!!". Round the trg allocation UP to the next x8 so every captured step
+  // keeps its gate; LENGTH stays exact (dst_steps-1) so loop timing is unchanged. The
+  // caller's trg overflow guard already reserves the ceil'd byte count ((dst_steps+7)/8).
+  SEQ_TRG_TrackInit(dst, (dst_steps + 7) & ~7, trg_layers, trg_instr);
   { int i; for(i=0; i<128; ++i) SEQ_CC_Set(dst, i, SEQ_CC_Get(src, i)); SEQ_CC_LinkUpdate(dst); }
   SEQ_CC_ResetGenerativeForBounce(dst);                // forward playback, strip gen axis
   SEQ_CC_Set(dst, SEQ_CC_GROOVE_VALUE, 0);
@@ -2676,6 +2682,11 @@ static void SEQ_CORE_SlotTrkRestoreGeom(u8 t, u8 track)
 // LIVE organisms back afterwards. Persist-cap per track, like the file format.
 static seq_generator_t slottrk_gen_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_GENERATOR_PERSIST_SLOTS];
 static u8              slottrk_gen_count[SEQ_CORE_NUM_TRACKS_PER_GROUP];
+// The SAVE (keep-generators) verb additionally carries the SOURCE track's living
+// generator pool into the slot's dst_track. Snapshot it before the staged load
+// (the load would replace src's pool entry if src shares the dst group).
+static seq_generator_t copytrk_src_gen[SEQ_GENERATOR_PERSIST_SLOTS];
+static u8              copytrk_src_gen_count;
 
 /////////////////////////////////////////////////////////////////////////////
 // Fork: capture src_track's computed output into dst_track of slot (bank,
@@ -2808,6 +2819,123 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Fork (2026-06-28): tile a captured WINDOW into a dst track's FIXED canvas.
+// `par_snap`/`trg_snap` are the W-step window's raw SOURCE bytes (snapshotted off
+// the scratch track BEFORE the slot load clobbered it); W = window length in steps
+// (par is exact, so this is the true k*spm), npl/npi = window par layers/instr,
+// wts8 = window trg bytes-per-layer (steps/8), ntl/nti = window trg layers/instr.
+// dst must already be TrackInit'd to (canvas, same layer/instr config); we write
+// `fill_steps` steps of dst, repeating the window (i % W) and truncating at the end
+// — steps past fill_steps keep the TrackInit zero (trailing rest). Reads the SNAPSHOT
+// directly (SEQ_PAR/TRG_Get read the output mirror, not the captured source) and
+// writes via SEQ_PAR/TRG_Set (which target the source). The dst index strides come
+// from its own num_steps inside the setters; the snapshot strides are passed in.
+/////////////////////////////////////////////////////////////////////////////
+static void SEQ_CORE_TileWindowToCanvas(u8 dst, u16 fill_steps,
+                                        const u8 *par_snap, u16 W, u8 npl, u8 npi,
+                                        const u8 *trg_snap, u8 wts8, u8 ntl, u8 nti)
+{
+  if( W == 0 ) return;
+  u16 i;
+  for(i=0; i<fill_steps; ++i) {
+    u16 s = (u16)(i % W);                          // tiled source step
+    u8 L, I;
+    for(I=0; I<npi; ++I)
+      for(L=0; L<npl; ++L) {
+        u32 six = (u32)I * npl * W + (u32)L * W + s;
+        u8  val = (six < SEQ_PAR_MAX_BYTES) ? par_snap[six] : 0;
+        SEQ_PAR_Set(dst, i, L, I, val);
+      }
+    for(I=0; I<nti; ++I)
+      for(L=0; L<ntl; ++L) {
+        u32 tix = (u32)I * ntl * wts8 + (u32)L * wts8 + (s/8);
+        u8  bit = (tix < SEQ_TRG_MAX_BYTES) ? ((trg_snap[tix] >> (s % 8)) & 1) : 0;
+        SEQ_TRG_Set(dst, i, L, I, bit);
+      }
+  }
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Fork (2026-06-28): fill the capture window for a CHORD event-mode source.
+// A chord track stores a chord INDEX in its par layer (SEQ_PAR_Type_Chord1),
+// expanded to notes at render — the note-stream materialize can't round-trip that
+// (it would write raw note values into the index slot, which the engine then reads
+// as garbage chord indices). So for a chord source we BYPASS the emitted-note tape
+// and snapshot the SOURCE's chord par/trg loop directly, tiling its spm-step loop
+// into a W = k*spm window in capture_par_snapshot/capture_trg_snapshot — the SAME
+// buffers + cap_* geometry the slot-tile step consumes, so chord indices, velocity
+// and gates pass through byte-for-byte. Captures the chord loop AS IT STANDS at grab
+// time (a generator's per-bar index wander can't be reconstructed from emitted notes,
+// so there's nothing to lose by freezing the current loop). Must be called BEFORE the
+// slot PatternRead clobbers the source's live RAM. Returns 0, or a negative refusal.
+/////////////////////////////////////////////////////////////////////////////
+static s32 SEQ_CORE_CaptureChordWindow(u8 src, u8 k,
+                                       u16 *o_par_steps, u8 *o_par_layers, u8 *o_par_instr,
+                                       u16 *o_trg_steps, u8 *o_trg_layers, u8 *o_trg_instr)
+{
+  u16 spm = SEQ_CORE_CaptureLoopSteps(src);
+  if( spm == 0 || k == 0 ) return -7;
+  u16 W = (u16)k * spm;
+  if( W == 0 || W > 256 ) return -7;                  // exceeds max track steps
+
+  u8  par_layers = (u8)SEQ_PAR_NumLayersGet(src);
+  u8  par_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src);
+  u16 src_psteps = (u16)SEQ_PAR_NumStepsGet(src);
+  u8  trg_layers = (u8)SEQ_TRG_NumLayersGet(src);
+  u8  trg_instr  = (u8)SEQ_TRG_NumInstrumentsGet(src);
+  u8  src_t8     = (u8)(SEQ_TRG_NumStepsGet(src) / 8);
+  u8  cap_t8     = (u8)((W + 7) / 8);                  // window trg bytes per layer (x8 ceil)
+
+  // The tiling read period is the source's TRUE audible loop, NOT spm: a SYNCH_TO_MEASURE
+  // track has spm = gspm (the global measure), which can differ from the track's own par
+  // loop (length+1) and even exceed its par allocation — reading by gspm would tile steps
+  // the source never played, or run off the layer into the next one. Use min(length+1, spm)
+  // clamped to the allocation so the read always stays within the real chord sequence.
+  u16 period = (u16)(seq_cc_trk[src].length + 1);
+  if( period > spm ) period = spm;                    // synch'd-longer: audible loop is gspm
+  if( period < 1 ) period = 1;
+  if( period > src_psteps ) period = src_psteps;      // never read past the source allocation
+
+  if( (u32)W * par_layers * par_instr > SEQ_PAR_MAX_BYTES ) return -9;
+  if( (u32)cap_t8 * trg_layers * trg_instr > SEQ_TRG_MAX_BYTES ) return -12;
+
+  { int i; for(i=0; i<128; ++i) slottrk_src_cc[i] = (u8)SEQ_CC_Get(src, i); } // chord mode + layers travel
+  memset(capture_par_snapshot, 0, SEQ_PAR_MAX_BYTES);
+  memset(capture_trg_snapshot, 0, SEQ_TRG_MAX_BYTES);
+
+  // Tile the source's spm-step LOOP into the W-step window (compact stride W par / cap_t8 trg),
+  // reading the SOURCE source bytes directly (SEQ_PAR/TRG_Get read the rendered output mirror).
+  u8  L, I;
+  u16 s;
+  for(I=0; I<par_instr; ++I)
+    for(L=0; L<par_layers; ++L)
+      for(s=0; s<W; ++s) {
+        u16 ss  = (u16)(s % period);
+        u32 six = (u32)I * par_layers * src_psteps + (u32)L * src_psteps + ss;
+        u32 dix = (u32)I * par_layers * W + (u32)L * W + s;
+        if( six < SEQ_PAR_MAX_BYTES && dix < SEQ_PAR_MAX_BYTES )
+          capture_par_snapshot[dix] = seq_par_layer_value[src][six];
+      }
+  for(I=0; I<trg_instr; ++I)
+    for(L=0; L<trg_layers; ++L)
+      for(s=0; s<W; ++s) {
+        u16 ss  = (u16)(s % period);
+        u32 six = (u32)I * trg_layers * src_t8 + (u32)L * src_t8 + (ss/8);
+        u8  bit = (six < SEQ_TRG_MAX_BYTES) ? ((seq_trg_layer_value[src][six] >> (ss % 8)) & 1) : 0;
+        if( bit ) {
+          u32 dix = (u32)I * trg_layers * cap_t8 + (u32)L * cap_t8 + (s/8);
+          if( dix < SEQ_TRG_MAX_BYTES ) capture_trg_snapshot[dix] |= (u8)(1 << (s % 8));
+        }
+      }
+
+  *o_par_steps = W;   *o_par_layers = par_layers; *o_par_instr = par_instr;
+  *o_trg_steps = (u16)(cap_t8 * 8); *o_trg_layers = trg_layers; *o_trg_instr = trg_instr;
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Fork: capture the live RECORDER (the retroactive ring/tape — what actually
 // SOUNDED over the last k loops, incl. live keys / emission coin-flips / wander)
 // of `src` into `dst_track` of slot (dst_bank, dst_pattern), PERSISTED to SD,
@@ -2829,7 +2957,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
 // -3 wrong transport, -4 ring not recording src, -8 multi-bar stopped) or the
 // PatternRead status on failure (dst group left restored).
 /////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k)
+s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k, u8 fit_mode)
 {
   if( src >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
@@ -2838,6 +2966,9 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   u8 dst_base  = dst_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
   s32 status;
   int t, i;
+  // Read the source's event mode NOW — step 4's slot load clobbers the dst group, which
+  // may contain src. Drives both the window-fill branch and the transpose re-apply below.
+  u8 src_is_chord = (seq_cc_trk[src].event_mode == SEQ_EVENT_MODE_Chord);
 
   // Borrow a scratch track in the dst group: the span capture needs a target != src,
   // and the slot writer overwrites dst_track. With 4 tracks/group and 2 excluded there
@@ -2862,45 +2993,103 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
   u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
 
-  // 2. Materialize the recorder (tape while playing / re-sim stopped) into scratch.
-  //    Non-destructive to src; writes scratch (in the snapshotted group). Suppress the
-  //    internal undo arm — scratch is restored, so it must not eat the user's one-deep.
-  seq_core_cap_suppress_journal = 1;
-  status = SEQ_CORE_CaptureSpan(src, scratch, k);
-  seq_core_cap_suppress_journal = 0;
+  // 2/3. Fill the capture WINDOW: capture_par_snapshot/trg + cap_* geometry + slottrk_src_cc.
+  //    CHORD event-mode source -> copy the chord-INDEX par loop directly (the note-stream
+  //    materialize can't round-trip chord indices). Else -> materialize the recorder (tape
+  //    while playing / re-sim stopped) into scratch, then read it back. BOTH must run before
+  //    step 4's slot read clobbers the dst group (which may contain src and the scratch).
+  u16 cap_par_steps = 0, cap_trg_steps = 0;
+  u8  cap_par_layers = 0, cap_num_instr = 0, cap_trg_layers = 0, cap_trg_instr = 0;
+
+  if( src_is_chord ) {
+    status = SEQ_CORE_CaptureChordWindow(src, k,
+                                         &cap_par_steps, &cap_par_layers, &cap_num_instr,
+                                         &cap_trg_steps, &cap_trg_layers, &cap_trg_instr);
+  } else {
+    // Non-destructive to src; writes scratch (in the snapshotted group). Suppress the
+    // internal undo arm — scratch is restored, so it must not eat the user's one-deep.
+    seq_core_cap_suppress_journal = 1;
+    status = SEQ_CORE_CaptureSpan(src, scratch, k);
+    seq_core_cap_suppress_journal = 0;
+    if( status >= 0 ) {
+      // scratch holds the captured loop (static, ResetGen'd, length=k*spm, clock pinned to
+      // the grid). Read it as the slot-source material + geometry.
+      memcpy(capture_par_snapshot, seq_par_layer_value[scratch], SEQ_PAR_MAX_BYTES);
+      memcpy(capture_trg_snapshot, seq_trg_layer_value[scratch], SEQ_TRG_MAX_BYTES);
+      for(i=0; i<128; ++i)
+        slottrk_src_cc[i] = (u8)SEQ_CC_Get(scratch, i);
+      cap_par_steps  = (u16)SEQ_PAR_NumStepsGet(scratch);   // window length W = k*spm (exact)
+      cap_par_layers = (u8)SEQ_PAR_NumLayersGet(scratch);
+      cap_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(scratch);
+      cap_trg_steps  = (u16)SEQ_TRG_NumStepsGet(scratch);
+      cap_trg_layers = (u8)SEQ_TRG_NumLayersGet(scratch);
+      cap_trg_instr  = (u8)SEQ_TRG_NumInstrumentsGet(scratch); // trg's OWN instr count (not par's)
+    }
+  }
 
   if( status >= 0 ) {
-    // 3. scratch now holds the captured loop (static, ResetGen'd, length=k*spm, clock
-    //    pinned to the grid). Read it as the slot-source material + geometry.
-    memcpy(capture_par_snapshot, seq_par_layer_value[scratch], SEQ_PAR_MAX_BYTES);
-    memcpy(capture_trg_snapshot, seq_trg_layer_value[scratch], SEQ_TRG_MAX_BYTES);
-    for(i=0; i<128; ++i)
-      slottrk_src_cc[i] = (u8)SEQ_CC_Get(scratch, i);
-    u16 cap_par_steps  = (u16)SEQ_PAR_NumStepsGet(scratch);
-    u8  cap_par_layers = (u8)SEQ_PAR_NumLayersGet(scratch);
-    u8  cap_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(scratch);
-    u16 cap_trg_steps  = (u16)SEQ_TRG_NumStepsGet(scratch);
-    u8  cap_trg_layers = (u8)SEQ_TRG_NumLayersGet(scratch);
-
     // 4. Read the target slot into the dst group (full load, remix_map=0).
     MUTEX_SDCARD_TAKE;
     status = SEQ_FILE_B_PatternRead(dst_bank, dst_pattern, dst_group, 0);
     MUTEX_SDCARD_GIVE;
 
     if( status >= 0 ) {
-      // 5. Inherit the captured geometry/CC onto the slot's dst_track + write the notes
-      //    (same shape as CaptureToSlotTrack step 4).
+      // 5. CANVAS MODEL (2026-06-28): the dst keeps ITS OWN max length — never resized to
+      //    the grab (so the trg-floor "!!!" can't happen). Adopt the captured event-mode +
+      //    layer config at the CANVAS step count, then TILE the W-step window into it.
+      //      canvas = the LIVE dst track's max length, snapshotted in step 1 (the slot read
+      //               just clobbered the live geometry; slottrk_*_steps[] still hold it).
+      //      FILL: tile across the whole canvas, loop at the canvas (grid-locked; seam when
+      //            W doesn't divide the canvas). LOOP: loop at the window (drifts free).
+      u8  dst_idx = dst_track % SEQ_CORE_NUM_TRACKS_PER_GROUP;
+      u16 W       = cap_par_steps;                       // window length (exact k*spm)
+      u16 canvas  = slottrk_trg_steps[dst_idx];          // dst's own max length (x8-aligned)
+      if( canvas == 0 ) canvas = (W + 7) & ~7;           // empty dst fallback: x8 of the window
+      // CLAMP the canvas to what the CAPTURED layout fits in BOTH buffers. The dst keeps its
+      // own length, but that length x the SOURCE's layer/instr counts can exceed the par/trg
+      // budgets (e.g. an 8-layer note src tiled into a 256-step canvas: 256*8 = 2048 > 1024).
+      // SEQ_*_TrackInit silently NO-OPs on overflow (returns -1, geometry left STALE), which
+      // would re-introduce the very mismatch this rewrite removes — so clamp here, x8-aligned,
+      // and the TrackInits below can never fail. Heavy layouts simply cap to a shorter canvas.
+      {
+        u16 par_unit = (u16)cap_par_layers * cap_num_instr;
+        if( par_unit && canvas > (u16)(SEQ_PAR_MAX_BYTES / par_unit) )
+          canvas = (u16)(SEQ_PAR_MAX_BYTES / par_unit);
+        u16 trg_unit = (u16)cap_trg_layers * cap_trg_instr;
+        if( trg_unit ) {
+          u16 max_trg = (u16)((SEQ_TRG_MAX_BYTES / trg_unit) * 8);
+          if( canvas > max_trg ) canvas = max_trg;
+        }
+        canvas &= (u16)~7u;                              // trg is bit-packed -> keep x8
+        if( canvas < 8 ) canvas = 8;
+      }
+      u16 loop_steps = (fit_mode == SEQ_CORE_CAP_FIT_LOOP) ? ((W < canvas) ? W : canvas) : canvas;
+      if( loop_steps < 1 ) loop_steps = 1;
+
       SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE]);
       SEQ_CC_LinkUpdate(dst_track);
-      SEQ_PAR_TrackInit(dst_track, cap_par_steps, cap_par_layers, cap_num_instr);
-      SEQ_TRG_TrackInit(dst_track, cap_trg_steps, cap_trg_layers, cap_num_instr);
+      SEQ_PAR_TrackInit(dst_track, canvas, cap_par_layers, cap_num_instr);  // canvas, src layout
+      SEQ_TRG_TrackInit(dst_track, canvas, cap_trg_layers, cap_trg_instr);  // (clears the buffers)
       for(i=0; i<128; ++i)
         SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
       SEQ_CC_LinkUpdate(dst_track);
-      memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
-      memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
+      // tile the window (snapshot, W steps) across loop_steps; steps past loop_steps stay rest
+      SEQ_CORE_TileWindowToCanvas(dst_track, loop_steps,
+                                  capture_par_snapshot, W, cap_par_layers, cap_num_instr,
+                                  capture_trg_snapshot, (u8)(cap_trg_steps/8), cap_trg_layers, cap_trg_instr);
       SEQ_CC_ResetGenerativeForBounce(dst_track);
       SEQ_GENERATOR_TrackClear(dst_track);
+      // A chord track stores ROOT indices; transpose is applied to the expanded notes at
+      // render, so it's NOT baked into the captured indices the way the note path bakes it
+      // into emitted notes. ResetGenerativeForBounce just zeroed it — re-apply the source's
+      // static transpose so captured chords keep their key (live/global transpose still
+      // follow at playback; the held-key transposer is a live gesture, not track data).
+      if( src_is_chord ) {
+        SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_SEMI, slottrk_src_cc[SEQ_CC_TRANSPOSE_SEMI]);
+        SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_OCT,  slottrk_src_cc[SEQ_CC_TRANSPOSE_OCT]);
+      }
+      SEQ_CC_Set(dst_track, SEQ_CC_LENGTH, (u8)(loop_steps - 1)); // authoritative after the reset
+      SEQ_CC_LinkUpdate(dst_track);
 
       // 6. Write the dst group (now carrying the captured track) back to the slot.
       MUTEX_SDCARD_TAKE;
@@ -2911,6 +3100,122 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
 
   // 7. Restore the dst group's live RAM (always — undoes the scratch borrow AND any slot
   //    load; mirrors CaptureToSlotTrack's restore incl. the slot-bridge re-sync).
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    memcpy(&seq_cc_trk[dst_base+t], &slottrk_cc_snap[t], sizeof(seq_cc_trk_t));
+    SEQ_CORE_SlotTrkRestoreGeom(t, dst_base+t);  // re-apply num_steps/layers/instr (TrackInit)
+    memcpy(seq_par_layer_value[dst_base+t], slottrk_par_snap[t], SEQ_PAR_MAX_BYTES);
+    memcpy(seq_trg_layer_value[dst_base+t], slottrk_trg_snap[t], SEQ_TRG_MAX_BYTES);
+    seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
+    SEQ_CC_LinkUpdate(dst_base+t);
+    SEQ_GENERATOR_TrackRestore(dst_base+t, slottrk_gen_snap[t], slottrk_gen_count[t]);
+    SEQ_CORE_ChordMaskSlotSync(dst_base+t);
+    SEQ_CORE_TensionSlotSync(dst_base+t);
+    SEQ_CORE_PitchSlotSync(dst_base+t);
+    SEQ_CORE_LimitSlotSync(dst_base+t);
+    SEQ_CORE_RenderDirtySet(dst_base+t);
+  }
+  memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
+
+  MIOS32_IRQ_Disable();
+  seq_pattern_dirty = (seq_pattern_dirty & ~(1 << dst_group)) | dirty_snap;
+  MIOS32_IRQ_Enable();
+
+  return status;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Fork: SAVE the LIVING src_track — full CC (incl. the generative axis), the
+// SOURCE par/trg, AND the generator pool — into dst_track of slot (dst_bank,
+// dst_pattern), PERSISTED to SD, preserving the slot's other 3 tracks. The
+// keep-generators companion to SEQ_CORE_CaptureToSlotTrack (which FLATTENS to a
+// generator-less freeze). Recall REGENERATES the deposited track: it wanders
+// again from its restored seed (per-track-RNG deterministic) rather than
+// replaying a single frozen frame.
+//
+// What a whole-group pattern SAVE can't do: drop ONE living track into ANOTHER
+// pattern mid-jam without clobbering that pattern's other 3 tracks or leaving
+// the pattern you're playing (seq_pattern[] is never touched). With dst_track ==
+// src this is "save this living track into another pattern."
+//
+// Same staged load-modify-save as CaptureToSlotTrack, with three differences:
+// it copies the SOURCE par/trg (the editable substrate the generator wanders
+// over), NOT the rendered output mirror; it does NOT strip the generative axis
+// (no SEQ_CC_ResetGenerativeForBounce, no SEQ_GENERATOR_TrackClear); and it
+// re-homes the source's generator pool into the slot's dst_track. MUST run in
+// task context (two MUTEX_SDCARD ops). Returns the PatternWrite status (>=0 ok),
+// or the negative PatternRead status if the load failed (dst group restored).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_pattern)
+{
+  if( src_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+  if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
+
+  u8 dst_group = dst_track / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  u8 dst_base  = dst_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
+  s32 status;
+  int t, i;
+
+  // 1. Snapshot the LIVING source BEFORE touching the dst group (step 3's load
+  //    overwrites the dst group's RAM, which may include the source). Unlike the
+  //    FLATTEN verb this is the raw SOURCE par/trg (so recall regenerates), not
+  //    SEQ_CORE_CaptureTrackOutput's rendered mirror.
+  memcpy(capture_par_snapshot, seq_par_layer_value[src_track], SEQ_PAR_MAX_BYTES);
+  memcpy(capture_trg_snapshot, seq_trg_layer_value[src_track], SEQ_TRG_MAX_BYTES);
+  u16 src_par_steps  = (u16)SEQ_PAR_NumStepsGet(src_track);
+  u8  src_par_layers = (u8)SEQ_PAR_NumLayersGet(src_track);
+  u8  src_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
+  u16 src_trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
+  u8  src_trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
+  for(i=0; i<128; ++i)
+    slottrk_src_cc[i] = (u8)SEQ_CC_Get(src_track, i);
+  // The living generator pool travels too (the keep-gen difference). Snapshot it
+  // now: if src is in the dst group, step 3's load would replace its pool entry.
+  copytrk_src_gen_count = SEQ_GENERATOR_TrackSnapshot(src_track, copytrk_src_gen, SEQ_GENERATOR_PERSIST_SLOTS);
+
+  // 2. Snapshot the dst group's live RAM (4 tracks) so we can restore it.
+  for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
+    memcpy(&slottrk_cc_snap[t], &seq_cc_trk[dst_base+t], sizeof(seq_cc_trk_t));
+    SEQ_CORE_SlotTrkSnapGeom(t, dst_base+t);  // geometry isn't in the CC struct/bytes
+    memcpy(slottrk_par_snap[t], seq_par_layer_value[dst_base+t], SEQ_PAR_MAX_BYTES);
+    memcpy(slottrk_trg_snap[t], seq_trg_layer_value[dst_base+t], SEQ_TRG_MAX_BYTES);
+    slottrk_play_section_snap[t] = seq_core_trk[dst_base+t].play_section;
+    slottrk_gen_count[t] = SEQ_GENERATOR_TrackSnapshot(dst_base+t, slottrk_gen_snap[t], SEQ_GENERATOR_PERSIST_SLOTS);
+  }
+  memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
+  u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
+
+  // 3. Read the target slot into the dst group (full load, remix_map=0).
+  MUTEX_SDCARD_TAKE;
+  status = SEQ_FILE_B_PatternRead(dst_bank, dst_pattern, dst_group, 0);
+  MUTEX_SDCARD_GIVE;
+
+  if( status >= 0 ) {
+    // 4. Inherit the source geometry/CC onto dst_track, write the SOURCE par/trg,
+    //    and re-home the SOURCE generators. NO generative reset / NO clear — the
+    //    generative CC and the generator pool are the point of SAVE.
+    SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE]);
+    SEQ_CC_LinkUpdate(dst_track);
+    SEQ_PAR_TrackInit(dst_track, src_par_steps, src_par_layers, src_num_instr);
+    SEQ_TRG_TrackInit(dst_track, src_trg_steps, src_trg_layers, src_num_instr);
+    for(i=0; i<128; ++i)
+      SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
+    SEQ_CC_LinkUpdate(dst_track);
+    memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
+    memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
+    // Re-home the living generators into the slot's pool entry. TrackRestore
+    // re-stamps each gen's track field; geometry was just set to the source's, so
+    // every gen's par_layer stays valid (SlotSet won't collapse it). The slot read
+    // had seeded this track's pool with the SLOT's gens — TrackRestore clears them.
+    SEQ_GENERATOR_TrackRestore(dst_track, copytrk_src_gen, copytrk_src_gen_count);
+
+    // 5. Write the dst group (now carrying the living source track) back to the slot.
+    MUTEX_SDCARD_TAKE;
+    status = SEQ_FILE_B_PatternWrite(seq_file_session_name, dst_bank, dst_pattern, dst_group, 1);
+    MUTEX_SDCARD_GIVE;
+  }
+
+  // 6. Restore the dst group's live RAM (always — even on a read/write error).
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
     memcpy(&seq_cc_trk[dst_base+t], &slottrk_cc_snap[t], sizeof(seq_cc_trk_t));
     SEQ_CORE_SlotTrkRestoreGeom(t, dst_base+t);  // re-apply num_steps/layers/instr (TrackInit)

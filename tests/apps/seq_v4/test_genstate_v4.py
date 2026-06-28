@@ -262,6 +262,83 @@ def test_capture_trample_preserves_live_generators(genv4):
     board.dirty_set(1, False)
 
 
+# SAVE pin (CopyTrackLiveToSlot) — the keep-generators companion to the FLATTEN
+# capture above. Deposit witnesses on the slot's OTHER tracks and inspect from a
+# FRESH group so the bytes can only have come from SD.
+SAVE_MARK_TRACKS = (5, 6, 7)        # group 1 tracks 1..3 (the deposit slot's other 3)
+SAVE_MARK_LENS = (9, 10, 11)        # distinct, non-default LENGTH witnesses
+SAVE_DEPOSIT_DST = 4                # group 1, slot-track 0 — the SAVE lands here
+SAVE_INSPECT_GROUP = 2              # tracks 8..11 — never written by this test
+SAVE_INSPECT_BASE = 8
+
+
+@pytest.mark.hardware
+def test_save_living_track_to_slot_keeps_generator(genv4):
+    """SAVE (CopyTrackLiveToSlot) deposits the LIVING track — full CC + source
+    par/trg + the generator pool — into a slot's track, preserving the slot's
+    other 3 tracks. Recall REGENERATES the deposited track: the organism comes
+    back ALIVE and still mutates, the keep-generators difference from
+    test_capture_trample_preserves_live_generators (where the frozen copy is
+    persisted generator-less). Mirrors that test's structure; inspects the
+    deposit from a fresh group so the round-trip bytes can only be from SD."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    # The living organism on track 0.
+    _engage(board)
+    _sculpt(board)
+    g0 = board.generator_query(TRACK, INSTR, with_anchor=True)
+    assert g0 is not None and g0.engaged
+
+    # Give the deposit slot's OTHER tracks distinct witnesses, then store the
+    # whole group so the slot carries known content in tracks 1..3.
+    for trk, ln in zip(SAVE_MARK_TRACKS, SAVE_MARK_LENS):
+        board.cc_set(trk, CC.LENGTH, ln)
+    src_marks = [board.cc_get(trk, CC.LENGTH) for trk in SAVE_MARK_TRACKS]
+    assert len(set(src_marks)) == 3, f"witnesses must be distinct: {src_marks}"
+    assert board.pattern_save(1, SCRATCH_BANK, SCRATCH_B), "deposit-slot build should commit"
+
+    # SAVE the living organism into the slot's track-0 position (keep-generators).
+    assert board.copy_track_live_to_slot(
+        src_track=TRACK,
+        dst_track=SAVE_DEPOSIT_DST,
+        dst_bank=SCRATCH_BANK,
+        dst_pattern=SCRATCH_B,
+    ), "SAVE should commit"
+
+    # Non-destructive to live: the source organism is untouched.
+    g_src = board.generator_query(TRACK, INSTR, with_anchor=True)
+    assert g_src is not None and g_src.engaged, "SAVE must not disturb the live source"
+    _assert_same_slot(g_src, g0)
+
+    # Reload the slot into a FRESH group — its bytes can only come from SD now.
+    assert board.pattern_load(SAVE_INSPECT_GROUP, SCRATCH_BANK, SCRATCH_B), "reload should commit"
+    time.sleep(SETTLE)
+
+    # The deposited track comes back ALIVE (the keep-gen difference vs FLATTEN).
+    g_dep = board.generator_query(SAVE_INSPECT_BASE, INSTR, with_anchor=True)
+    assert g_dep is not None, "SAVE must persist the generator (recall regenerates)"
+    assert g_dep.engaged, "the deposited organism resumes ENGAGED"
+    _assert_same_slot(g_dep, g0)
+
+    # ...and it still mutates — alive, not a frozen frame.
+    board.generator_tick_force(SAVE_INSPECT_BASE, INSTR)
+    g_dep2 = board.generator_query(SAVE_INSPECT_BASE, INSTR)
+    assert g_dep2.loop != g_dep.loop, "the deposited organism mutates (alive)"
+
+    # The slot's OTHER 3 tracks survived the deposit, in order.
+    for off, want in zip((1, 2, 3), src_marks):
+        got = board.cc_get(SAVE_INSPECT_BASE + off, CC.LENGTH)
+        assert got == want, (
+            f"slot track {off} lost its witness: want LENGTH {want}, got {got} "
+            f"— SAVE must preserve the slot's other 3 tracks"
+        )
+
+    board.dirty_set(1, False)
+    board.dirty_set(SAVE_INSPECT_GROUP, False)
+
+
 @pytest.mark.hardware
 def test_persist_cap_keeps_first_four_instruments(genv4):
     """A drum track can engage up to 16 generators but only

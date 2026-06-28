@@ -109,6 +109,7 @@ static const seq_ui_page_entry_t ui_menu_pages[SEQ_UI_PAGES] = {
   { "ABOUT",        "About", "About this MIDIbox", 52, (void *)&SEQ_UI_INFO_Init },
   { "PITCHGEN",     "Pitch", "Pitch Gen (POC)   ", 59, (void *)&SEQ_UI_TRKPITCHGEN_Init },
   { "GRAVITY",      "Grav.", "Tension Workbench ", 60, (void *)&SEQ_UI_GRAVITY_Init },
+  { "CAPTURE",      "Capt.", "Unified Capture   ", 61, (void *)&SEQ_UI_CAPTURE_Init },
 };
 
 

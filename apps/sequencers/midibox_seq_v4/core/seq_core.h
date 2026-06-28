@@ -552,10 +552,25 @@ extern s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k);
 // Dispatcher used by the gesture + testctrl: PLAYING -> tape, STOPPED -> re-sim.
 extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k);
 
-// Recorder -> SD pattern slot: span-capture src's last k loops into dst_track of
-// slot (bank, pattern), persisted, preserving the slot's other tracks. The
-// while-playing companion to SEQ_CORE_CaptureToSlotTrack (static render).
-extern s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k);
+// CAPTURE fit modes (2026-06-28): how the grabbed window maps onto the dst track's
+// FIXED canvas (its max length is NEVER resized — the geometry stays put, which makes
+// the trg-floor "!!!" bug structurally impossible). FILL tiles the window across the
+// whole canvas and loops at the canvas length (grid-locked; a seam/hiccup when the
+// window doesn't divide the canvas). LOOP loops at exactly the window length (sounds
+// like the moment, drifts free against the grid). User-selectable per grab.
+#define SEQ_CORE_CAP_FIT_FILL 0
+#define SEQ_CORE_CAP_FIT_LOOP 1
+
+// Recorder -> SD pattern slot: span-capture src's last k loops, then TILE that window
+// into dst_track's existing canvas (never resized) per fit_mode, persisted, preserving
+// the slot's other tracks. The while-playing companion to SEQ_CORE_CaptureToSlotTrack.
+extern s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k, u8 fit_mode);
+
+// SAVE the LIVING src_track (full CC incl. generative axis + SOURCE par/trg + the
+// generator pool) into dst_track of slot (bank, pattern), persisted, preserving
+// the slot's other 3 tracks. The keep-generators companion to the FLATTEN verbs
+// above: recall REGENERATES the deposited track from its restored seed.
+extern s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_pattern);
 
 // Fork pull verb (RECOMBINE) — load ONE stored track section
 // (src_bank, src_pattern, src_slot_track 0..3) into dst_track, RAM only, a

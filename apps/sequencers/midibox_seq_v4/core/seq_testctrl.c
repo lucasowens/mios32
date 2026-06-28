@@ -148,6 +148,12 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 // transport for a window, then READ. payload [mode] (0=reset+anchor, 1=read). 0x46 is the
 // last free low opcode below CMD_TRACK_REDO (0x47).
 #define CMD_RENDER_PERF          0x46
+// CMD_COPY_TRACK_LIVE_TO_SLOT — the SAVE (keep-generators) companion to
+// CMD_CAPTURE_TO_SLOT_TRACK (FLATTEN). Deposits the LIVING src_track (full CC +
+// source par/trg + generator pool) into dst_track of slot (bank, pattern),
+// preserving the slot's other 3 tracks. payload [src_track, dst_track, dst_bank,
+// dst_pattern] -> reply [src_track, dst_track, ok, dispatch_status]. Fills 0x45.
+#define CMD_COPY_TRACK_LIVE_TO_SLOT 0x45
 
 // Encoder indices match MBSEQ's internal numbering:
 //   0  = Datawheel
@@ -180,6 +186,7 @@ typedef enum {
   BTN_COPY      = 0x15,
   BTN_PASTE     = 0x16,
   BTN_UTILITY   = 0x17,   // hosts the retroactive-CAPTURE span gesture (UTILITY held)
+  BTN_PHRASE    = 0x18,   // PHRASE-view / song page (SONG is now the Capture page)
   // DIRECT_TRACK (the midiphy select row) 1..16: BTN_DIRECT_TRACK_BASE + (n - 1).
   BTN_DIRECT_TRACK_BASE = 0x20,
   // GP1..GP16 are contiguous: BTN_GP_BASE + (n - 1).
@@ -311,6 +318,7 @@ static u16 lookup_button_pin(u8 id)
     case BTN_COPY:     return seq_hwcfg_button.copy;
     case BTN_PASTE:    return seq_hwcfg_button.paste;
     case BTN_UTILITY:  return seq_hwcfg_button.utility;
+    case BTN_PHRASE:   return seq_hwcfg_button.phrase;
     default:           return 0xFFFF;
   }
 }
@@ -1354,7 +1362,8 @@ static void cmd_capture_to_track(mios32_midi_port_t port, const u8 *payload, u8 
 }
 
 
-// CMD_CAPTURE_TO_SLOT_TRACK payload: [src_track, dst_track, dst_bank, dst_pattern, (k)]
+// CMD_CAPTURE_TO_SLOT_TRACK payload: [src_track, dst_track, dst_bank, dst_pattern, (k), (fit_mode)]
+//   fit_mode (6th byte, span path only): 0=FILL (tile to canvas), 1=LOOP (loop the window)
 // Reply payload: [src_track, dst_track, ok, dispatch_status]
 //   ok 0x01 = the verb returned >=0, 0x00 = returned <0.
 //   dispatch_status 0x01 = ok, 0x02 = bad payload.
@@ -1375,9 +1384,10 @@ static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload
   u8 dst_bank    = payload[2] & 0x07;
   u8 dst_pattern = payload[3] & 0x7f;
   u8 k           = (plen >= 5) ? (payload[4] & 0x7f) : 0;
+  u8 fit_mode    = (plen >= 6) ? (payload[5] & 0x01) : 0; // FILL default; LOOP=1 (span path only)
 
   s32 r = (k > 0)
-    ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst_bank, dst_pattern, k)
+    ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst_bank, dst_pattern, k, fit_mode)
     : SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern);
 
   reply[0] = src_track;
@@ -1385,6 +1395,36 @@ static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload
   reply[2] = (r >= 0) ? 0x01 : 0x00;
   reply[3] = 0x01;
   send_reply(port, CMD_CAPTURE_TO_SLOT_TRACK, reply, sizeof(reply));
+}
+
+
+// CMD_COPY_TRACK_LIVE_TO_SLOT payload: [src_track, dst_track, dst_bank, dst_pattern]
+// Reply payload: [src_track, dst_track, ok, dispatch_status]
+//   ok 0x01 = the verb returned >=0, 0x00 = returned <0.
+//   dispatch_status 0x01 = ok, 0x02 = bad payload.
+//
+// SAVE the LIVING src_track (full CC incl. generative axis + source par/trg + the
+// generator pool) into dst_track of slot (bank, pattern), persisted, preserving
+// the slot's other 3 tracks. Recall regenerates the deposited track. Synchronous.
+static void cmd_copy_track_live_to_slot(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[4] = { 0, 0, 0, 0x02 };
+  if( plen < 4 ) {
+    send_reply(port, CMD_COPY_TRACK_LIVE_TO_SLOT, reply, sizeof(reply));
+    return;
+  }
+  u8 src_track   = payload[0];
+  u8 dst_track   = payload[1];
+  u8 dst_bank    = payload[2] & 0x07;
+  u8 dst_pattern = payload[3] & 0x7f;
+
+  s32 r = SEQ_CORE_CopyTrackLiveToSlot(src_track, dst_track, dst_bank, dst_pattern);
+
+  reply[0] = src_track;
+  reply[1] = dst_track;
+  reply[2] = (r >= 0) ? 0x01 : 0x00;
+  reply[3] = 0x01;
+  send_reply(port, CMD_COPY_TRACK_LIVE_TO_SLOT, reply, sizeof(reply));
 }
 
 
@@ -2713,6 +2753,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_CAPTURE_TO_SLOT_TRACK:
             cmd_capture_to_slot_track(port, payload_buf, payload_len);
+            break;
+          case CMD_COPY_TRACK_LIVE_TO_SLOT:
+            cmd_copy_track_live_to_slot(port, payload_buf, payload_len);
             break;
           case CMD_UI_TRACK_GET:
             cmd_ui_track_get(port, payload_buf, payload_len);

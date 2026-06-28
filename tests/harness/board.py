@@ -43,6 +43,7 @@ from .sysex import (
     CMD_GENERATOR_MULT_SET,
     CMD_CAPTURE_TO_TRACK,
     CMD_CAPTURE_TO_SLOT_TRACK,
+    CMD_COPY_TRACK_LIVE_TO_SLOT,
     DIAL_RANGE_MIN,
     DIAL_RANGE_MAX,
     DIAL_RATE,
@@ -959,6 +960,7 @@ class Board:
         dst_bank: int,
         dst_pattern: int,
         k: int = 0,
+        fit_mode: int = 0,
         timeout: float = 5.0,
     ) -> bool:
         """Trigger capture → track-in-slot, saved.
@@ -980,9 +982,13 @@ class Board:
             raise ValueError(f"dst_pattern out of range: {dst_pattern}")
         if not 0 <= k <= 127:
             raise ValueError(f"k out of range: {k}")
+        if fit_mode not in (0, 1):
+            raise ValueError(f"fit_mode must be 0 (FILL) or 1 (LOOP): {fit_mode}")
         body = [src_track, dst_track, dst_bank, dst_pattern]
         if k > 0:
             body.append(k)
+            if fit_mode:
+                body.append(fit_mode)  # 6th byte: LOOP (FILL is the default, omitted)
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_CAPTURE_TO_SLOT_TRACK, bytes(body)))
         payload = self.wait_for_sysex(CMD_CAPTURE_TO_SLOT_TRACK, timeout=timeout, since=since)
@@ -990,6 +996,41 @@ class Board:
             raise RuntimeError(f"short CAPTURE_TO_SLOT_TRACK reply: {payload!r}")
         if payload[3] != CMD_STATUS_OK:
             raise RuntimeError(f"CAPTURE_TO_SLOT_TRACK dispatch status {payload[3]:#04x}")
+        return payload[2] == CMD_STATUS_OK
+
+    def copy_track_live_to_slot(
+        self,
+        src_track: int,
+        dst_track: int,
+        dst_bank: int,
+        dst_pattern: int,
+        timeout: float = 5.0,
+    ) -> bool:
+        """SAVE the LIVING src_track into dst_track of slot (dst_bank, dst_pattern).
+
+        SEQ_CORE_CopyTrackLiveToSlot — the keep-generators companion to
+        capture_to_slot_track (which FLATTENS). Deposits the full living track
+        (CC incl. the generative axis + SOURCE par/trg + the generator pool),
+        persisted to SD, preserving the slot's other 3 tracks and restoring the
+        dst group's live RAM afterward. Recall regenerates the deposited track.
+        Returns True on success.
+        """
+        if not 0 <= src_track <= 15:
+            raise ValueError(f"src_track out of range: {src_track}")
+        if not 0 <= dst_track <= 15:
+            raise ValueError(f"dst_track out of range: {dst_track}")
+        if not 0 <= dst_bank <= 7:
+            raise ValueError(f"dst_bank out of range: {dst_bank}")
+        if not 0 <= dst_pattern <= 127:
+            raise ValueError(f"dst_pattern out of range: {dst_pattern}")
+        body = [src_track, dst_track, dst_bank, dst_pattern]
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_COPY_TRACK_LIVE_TO_SLOT, bytes(body)))
+        payload = self.wait_for_sysex(CMD_COPY_TRACK_LIVE_TO_SLOT, timeout=timeout, since=since)
+        if len(payload) < 4:
+            raise RuntimeError(f"short COPY_TRACK_LIVE_TO_SLOT reply: {payload!r}")
+        if payload[3] != CMD_STATUS_OK:
+            raise RuntimeError(f"COPY_TRACK_LIVE_TO_SLOT dispatch status {payload[3]:#04x}")
         return payload[2] == CMD_STATUS_OK
 
     def pattern_load(

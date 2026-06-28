@@ -443,6 +443,36 @@ tracks.
 
 ---
 
+## The Capture Page (SONG button)
+
+The **SONG** button opens the **Capture page** (a latched toggle — press again to
+go back where you were; the song-arrangement page moved to **PHRASE**). It is the
+one place to grab what's playing and drop it somewhere:
+
+- **Source = the track you're on.** The page doesn't move it — change tracks the
+  normal way, then SONG back in.
+- **Select-row (B-row) = destination track.** Pick where the grab lands; it does
+  *not* change the track you're hearing.
+- **GP row = destination pattern.** GP1–8 = letter A–H, GP9–16 = number 1–8.
+  **Pressing a number commits the grab.**
+- **Datawheel = the GRAB dial.** `Save` (the pass-through detent) deposits the
+  *living* track — it keeps generating when you recall it. Turn up to `1b…Kb` to
+  **freeze** that many bars of what actually played. The availability bar on the
+  LCD shows how much is grabbable right now.
+- **GP1 encoder = `Fit`** (shown on the LCD-left):
+  - **FILL** — the grab tiles to fill the destination's whole length and loops at
+    that length, so it stays **locked to the grid** with your other tracks. When the
+    grab doesn't divide evenly you get a little seam at the loop — sometimes that
+    hiccup is exactly the thing.
+  - **LOOP** — loops at *exactly* the length you grabbed, so an odd loop **drifts**
+    against everything else (polymeter).
+
+The grab **never changes the destination track's max length** — it paints into the
+length that's already there, so you never get a broken/`!!!` length. Commit
+**live-loads** the result onto the destination track so it plays immediately —
+perform on one track, stamp it onto another, carry on. **Chord tracks capture their
+chords** (the whole progression travels, in key).
+
 ## The Pull (track-grain load)
 
 Patterns store and load four tracks at a time — until now, getting one stored

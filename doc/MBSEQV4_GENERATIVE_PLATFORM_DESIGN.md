@@ -3009,6 +3009,39 @@ landed in two halves with a different reach each:
   multi-measure PHASE needs a note-for-note HIL pin, not just success/determinism.** Plan +
   full bug write-ups: `doc/plans/2026-06-26-multimeasure-capture.md` (not retired — A2/synch remain).
 
+**2026-06-28 — Unified CAPTURE page → the CANVAS model; chord-aware; by-ear GO ("working great").**
+The SONG button (a redundant PHRASE twin) became a unified Capture page: source = the live visible
+track, B-row = destination track, GP row = destination pattern (number commits), datawheel = the GRAB
+dial (`Save` detent = living deposit via `SEQ_CORE_CopyTrackLiveToSlot` / `1b..Kb` = frozen grab).
+The build surfaced a reproducible **`!!!`** (TRKLEN `LENGTH > num_steps`) on real odd-length tracks —
+and chasing it reframed the whole deposit:
+- **Root cause (load-bearing, not cosmetic):** a frozen grab sized the dst to `dst_steps = K·spm`,
+  but the TRG layer is bit-packed (`num_steps8 = steps/8`) so a non-÷8 `dst_steps` FLOORS the trg
+  geometry while LENGTH is set unclamped → `!!!`. Worse, `SEQ_TRG_Set` REFUSES gate writes past
+  `num_steps8`, so the tail-bar steps got par values but **no gate = silently muted notes**. A
+  13-step source made it obvious — only K=8,16 are ÷8-clean (13 ⟂ 8), everything else broke.
+- **The fix is a model, not a patch (user's call):** capture **NEVER resizes the dst's max length.**
+  The grab tiles its `W=K·spm` window into the dst's **fixed canvas** (`SEQ_CORE_TileWindowToCanvas`,
+  byte-faithful), so the floor mismatch is *structurally impossible*. Two fit modes, **GP1 encoder
+  toggles `Fit:FILL/LOOP`**: FILL tiles across the whole canvas + loops at the canvas (grid-locked
+  with the other tracks; the seam when `W∤canvas` is a wanted "rad hiccup"), LOOP loops at the window
+  (drifts free, polymetric). LENGTH ≤ canvas always.
+- **Chord-aware:** a CHORD event-mode source stores chord INDICES (`SEQ_PAR_Type_Chord1`), which the
+  note-stream materialize can't round-trip (it writes raw notes into the index slot). `SEQ_CORE_
+  CaptureChordWindow` bypasses the tape and copies the source's chord par loop directly (indices +
+  velocity + gates), tiled. Freezes the chord loop *as it stands at grab*; static transpose re-applied
+  (the index carries none); held-key transposer dropped (a live gesture).
+- **Three adversarial review workflows were load-bearing again** (§2 #8): caught the canvas-overflow
+  RE-INTRODUCING the bug (clamp the canvas ×8 to the captured layout's buffer budget), the chord
+  synch-tiling garbage read (tile by `min(length+1, spm)` clamped to allocation, not `gspm`), and the
+  chord transpose-loss. The first would have re-shipped the very bug the redesign removes.
+- **UNCOMMITTED at GO**; HIL capture family 71/71 + 4 new canvas pins green, full suite re-run before
+  commit. **Deferred (none block):** #3 "as-heard" windowing for note grabs (still loop-aligned;
+  phase-offset = mid-run-restart edge); the pre-existing `phrase_drift` leak in all three slot verbs
+  (one extra ~290 ms save on the recall after a capture); cross-pattern canvas uses the LIVE dst
+  geometry not the slot's stored; NOTE-mode multi-bar grabs stay mono (the melodic-mono fence — chords
+  only via the chord path or `Save`). Plan: `doc/plans/2026-06-27-unified-capture.md` (retire on commit).
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3437,6 +3470,10 @@ fire). Real levers, each gated:
   live keys, real timing). While STOPPED = **re-sim** (re-drives the generative frame to
   regenerate the span; reproduction has open preconditions — polymetry/global-RNG, §10).
   Converging with BOUNCE as emission effects migrate to the render stack (§9 2026-06-20).
+  Now also a unified **Capture page** (SONG button) whose grab follows the **canvas model**: it
+  never resizes the destination's max length — it **tiles** the window into the dst's fixed canvas
+  (`Fit:FILL` = loop at canvas, grid-locked / `Fit:LOOP` = loop at window, drifts; GP1 encoder).
+  A **chord** source copies its chord-index loop directly rather than re-quantizing notes. (§9 2026-06-28.)
 - **Ring / tape** — the always-on retroactive buffers CAPTURE reads from: `seq_core_cap_ring`
   (per-bar generative frames, 17 deep) and `seq_core_cap_tape` (flat note-on stream). Buffers,
   not verbs.

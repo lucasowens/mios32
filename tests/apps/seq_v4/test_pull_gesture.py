@@ -205,8 +205,9 @@ def test_pull_arm_blocked_in_phrase_view(board):
     board.track_drum_par_set(6, 0, 0, 96)
     board.cc_set(6, CC.LENGTH, 11)
 
-    # Enter PHRASE sel-view (the SONG button sets it; it sticks).
-    board.press(Button.SONG)
+    # Enter PHRASE sel-view (the PHRASE button sets it; it sticks). NB: SONG is now the
+    # unified Capture page (sel-view TRACKS) since 2026-06-28 — PHRASE is the phrase view.
+    board.press(Button.PHRASE)
     time.sleep(0.1)
 
     undo_before = board.track_undo_query()

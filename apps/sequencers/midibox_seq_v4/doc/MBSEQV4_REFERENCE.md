@@ -665,6 +665,29 @@ silently skipped the source track on reload (leaving the sanitized RAM in place)
 the SD reload couldn't restore it at all. The snapshot path makes source byte-identical
 after the capture regardless.
 
+**Canvas-model span capture (Capture page, 2026-06-28).**
+`SEQ_CORE_CaptureSpanToSlotTrack(src, dst_track, dst_bank, dst_pattern, k, fit_mode)` is the
+recorder/while-playing companion. It grabs a `W=k·spm` window and **tiles** it into `dst_track`'s
+EXISTING canvas — it **never resizes** the dst (the key change from the static verbs). Because
+`num_steps` never changes, the trg-floor `!!!` (LENGTH > num_steps — a non-÷8 `dst_steps` floors the
+bit-packed trg geometry `num_steps8=steps/8` while LENGTH is set unclamped, and `SEQ_TRG_Set` then
+silently drops the tail-bar gates → muted notes) is **structurally impossible**.
+- `fit_mode`: `SEQ_CORE_CAP_FIT_FILL` tiles across the whole canvas + loops at it (LENGTH=canvas-1,
+  grid-locked; seam when W∤canvas); `_LOOP` loops at the window (LENGTH=min(W,canvas)-1; rest beyond).
+- The canvas = the LIVE dst geometry (snapshotted pre-load), **clamped ×8 to the captured layout's
+  par/trg byte budget** so the dst `TrackInit`s can't silently no-op-and-leave-stale-geometry
+  (`canvas × cap_par_layers × cap_num_instr ≤ SEQ_PAR_MAX_BYTES`, likewise trg vs `SEQ_TRG_MAX_BYTES`).
+- `SEQ_CORE_TileWindowToCanvas` does the byte-faithful tile, reading the RAW `seq_par/trg_layer_value`
+  (NOT `SEQ_PAR/TRG_Get` — the output-mirror gotcha above).
+- A **CHORD event-mode source** routes to `SEQ_CORE_CaptureChordWindow`: it bypasses the note tape and
+  copies the source's chord-INDEX par loop directly (tiled by `min(length+1, spm)` clamped to the
+  allocation; static transpose re-applied — the index carries none). The note materialize can't
+  round-trip a chord (it would write raw note values into the `SEQ_PAR_Type_Chord1` index slot).
+- UI: the **Capture page** (`seq_ui_capture.c`, repurposed SONG button) — datawheel = GRAB
+  (`Save`=living `CopyTrackLiveToSlot` / `1b..Kb`=frozen), B-row = dst track, GP row = dst pattern
+  (number commits), **GP1 encoder = `Fit:FILL/LOOP`** (LCD-left). testctrl `CMD_CAPTURE_TO_SLOT_TRACK`
+  optional 6th byte = fit_mode. (design §9 2026-06-28.)
+
 ### Track-grain load (the pull) + track undo (RECOMBINE bundle, shipped + by-ear GO 2026-06-12)
 
 The mirror of the capture verbs: load ONE stored track section into an arbitrary

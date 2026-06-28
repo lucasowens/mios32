@@ -833,7 +833,7 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     // keep freezing the static render (unchanged, works with no playback history).
     // dst_track defaults to src_track above => "same track, another pattern."
     s32 cap_r = SEQ_BPM_IsRunning()
-      ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst.bank, dst.pattern, 1)
+      ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst.bank, dst.pattern, 1, SEQ_CORE_CAP_FIT_FILL)
       : SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
     if( cap_r >= 0 ) {
       if( dst_group != src_group ) {
@@ -2056,19 +2056,27 @@ static s32 SEQ_UI_Button_Pattern_Remix(s32 depressed)
 	
 }
 
+// Where SONG was before it opened Capture, so a second press returns you there.
+static seq_ui_page_t capture_prev_page = SEQ_UI_PAGE_PATTERN;
+
 static s32 SEQ_UI_Button_Song(s32 depressed)
 {
-  if( !depressed ) { // to simplify phrase selection
-    seq_ui_sel_view = SEQ_UI_SEL_VIEW_PHRASE;
+  // Repurposed (fork, 2026-06-27): SONG TOGGLES the unified Capture page. First
+  // press enters (remembering the page you came from); pressing SONG again
+  // returns you there. The active track (= the Capture source) never moves on
+  // the page — the B-row only sets the destination — so only the page is
+  // restored. SONG and PHRASE were redundant (both navigated to
+  // SEQ_UI_PAGE_SONG); the song-arrangement page stays reachable via PHRASE
+  // (every song-page read of SONG_PRESSED is OR'd with PHRASE_PRESSED).
+  if( depressed ) return -1; // act on press only
+
+  if( ui_page == SEQ_UI_PAGE_CAPTURE ) {
+    SEQ_UI_PageSet((capture_prev_page == SEQ_UI_PAGE_CAPTURE) ? SEQ_UI_PAGE_PATTERN : capture_prev_page);
+    return 0;
   }
 
-  seq_ui_button_state.SONG_PRESSED = depressed ? 0 : 1;
-
-  if( depressed ) return -1; // ignore when button depressed
-
-  SEQ_UI_PageSet(SEQ_UI_PAGE_SONG);
-
-  return 0; // no error
+  capture_prev_page = ui_page;
+  return SEQ_UI_CAPTURE_Enter();
 }
 
 static s32 SEQ_UI_Button_Phrase(s32 depressed)
@@ -2409,6 +2417,24 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
       capture_dst_track = (u8)sel_button;
       capture_consumed = 1;
       seq_ui_display_update_req = 1;
+    }
+    return 0;
+  }
+
+  // Unified Capture page: the B-row picks the DESTINATION track only — it must
+  // NOT move the active/visible track, which is the SOURCE (it "actively tracks
+  // which track you are on"). Set the page's dst (the select-row LEDs follow it,
+  // special-cased below) and SWALLOW — must not fall through to the pull-arm /
+  // stock select, which would change the visible track AND arm a RECOMBINE pull
+  // whose later GP-number press would shadow the Capture commit. button_state
+  // maintained (stuck-bit hardening, as above).
+  if( ui_page == SEQ_UI_PAGE_CAPTURE ) {
+    if( depressed ) {
+      button_state |= (1 << sel_button);
+    } else {
+      button_state &= ~(1 << sel_button);
+      seq_ui_button_state.TAKE_OVER_SEL_VIEW = 0;
+      SEQ_UI_CAPTURE_SetDstTrack((u8)sel_button);
     }
     return 0;
   }
@@ -4201,10 +4227,10 @@ s32 SEQ_UI_LED_Handler(void)
   SEQ_LED_PinSet(seq_hwcfg_led.edit, ui_page == SEQ_UI_PAGE_EDIT);
   SEQ_LED_PinSet(seq_hwcfg_led.mute, ui_page == SEQ_UI_PAGE_MUTE || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_MUTE));
   SEQ_LED_PinSet(seq_hwcfg_led.pattern, ui_page == SEQ_UI_PAGE_PATTERN);
-  if( SEQ_SONG_ActiveGet() )
-    SEQ_LED_PinSet(seq_hwcfg_led.song, 1);
-  else
-    SEQ_LED_PinSet(seq_hwcfg_led.song, ui_cursor_flash ? 0 : (ui_page == SEQ_UI_PAGE_SONG));
+  // Repurposed SONG button: its LED now tracks the unified Capture page (fork
+  // 2026-06-27). The song page is reached via PHRASE; its LED reflects the
+  // PHRASE sel-view below.
+  SEQ_LED_PinSet(seq_hwcfg_led.song, ui_page == SEQ_UI_PAGE_CAPTURE);
   SEQ_LED_PinSet(seq_hwcfg_led.phrase, seq_ui_button_state.PHRASE_PRESSED || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE));
   SEQ_LED_PinSet(seq_hwcfg_led.mixer, ui_page == SEQ_UI_PAGE_MIXER);
 
@@ -4696,8 +4722,16 @@ s32 SEQ_UI_LED_Handler_Periodic()
 	// disabled: overlapping looks better with red/green LEDs
       } break;
       case SEQ_UI_SEL_VIEW_TRACKS:
-	select_leds_green = 0xf << (4*ui_selected_group);
-	select_leds_red = ui_selected_tracks;
+	if( ui_page == SEQ_UI_PAGE_CAPTURE ) {
+	  // Capture page: the B-row shows the DESTINATION track (green = its
+	  // group, red = the track), not the live selection (= the source).
+	  u8 d = SEQ_UI_CAPTURE_DstTrackGet();
+	  select_leds_green = 0xf << (4*(d/4));
+	  select_leds_red = 1 << d;
+	} else {
+	  select_leds_green = 0xf << (4*ui_selected_group);
+	  select_leds_red = ui_selected_tracks;
+	}
 	break;
       case SEQ_UI_SEL_VIEW_PAR:
 	select_leds_green = 1 << ui_selected_par_layer;
