@@ -1336,6 +1336,18 @@ class Board:
         last_recalled = -1 if payload[1] == 0x7f else payload[1]
         return (payload[0] == 1, last_recalled)
 
+    def phrase_drift_mask(self, timeout: float = 4.0) -> int:
+        """PHRASES drift as the raw PER-GROUP mask (bit n = group n deliberately
+        edited since the last recall/capture). The whole-mask phrase_drift() drives
+        the LED; this isolates a specific group — used to pin that a slot capture
+        into one group must not flag THAT group (§9 drift-leak regression)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_PHRASE_META, bytes([PHRASE_META_DRIFT])))
+        payload = self.wait_for_sysex(CMD_PHRASE_META, timeout=timeout, since=since)
+        if len(payload) < 4 or payload[2] != CMD_STATUS_OK:
+            raise RuntimeError(f"PHRASE_META drift-mask reply: {payload!r}")
+        return payload[3]
+
     def phrase_name_get(self, n: int, timeout: float = 4.0) -> str:
         """PHRASES Stage B: the in-RAM name of phrase n (trailing spaces stripped).
         Empty string => un-named (the UI shows the slot number)."""

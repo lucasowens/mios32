@@ -2744,10 +2744,13 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     slottrk_gen_count[t] = SEQ_GENERATOR_TrackSnapshot(dst_base+t, slottrk_gen_snap[t], SEQ_GENERATOR_PERSIST_SLOTS);
   }
   memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
-  // ...including the pattern-dirty bit: steps 3/4 replay CCs through the
-  // SEQ_CC_Set chokepoint, but the trample is fully restored below — a clean
-  // group must not come out flagged for auto-writeback.
+  // ...including the pattern-dirty bit AND the phrase-drift bit: steps 3/4 replay
+  // CCs through the SEQ_CC_Set chokepoint (which raises BOTH), but the trample is
+  // fully restored below — a clean group must not come out flagged for auto-
+  // writeback, NOR flagged "deliberately edited" (a spurious drift would cost the
+  // next recall an extra ~290 ms drift-gated writeback; design §9 leak note).
   u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
+  u8 drift_snap = SEQ_PATTERN_DriftGroupGet(dst_group);
 
   // 3. Read the target slot into the dst group (full load, remix_map=0).
   MUTEX_SDCARD_TAKE;
@@ -2813,6 +2816,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   MIOS32_IRQ_Disable();
   seq_pattern_dirty = (seq_pattern_dirty & ~(1 << dst_group)) | dirty_snap;
   MIOS32_IRQ_Enable();
+  SEQ_PATTERN_DriftGroupRestore(dst_group, drift_snap);
 
   return status;
 }
@@ -2992,6 +2996,10 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   }
   memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
   u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
+  // phrase_drift travels with the dirty bit: the staged slot-load's CC-replay
+  // raises it for dst_group, but the group's live RAM is fully restored below, so
+  // a clean group must not come out flagged "deliberately edited" (design §9 leak).
+  u8 drift_snap = SEQ_PATTERN_DriftGroupGet(dst_group);
 
   // 2/3. Fill the capture WINDOW: capture_par_snapshot/trg + cap_* geometry + slottrk_src_cc.
   //    CHORD event-mode source -> copy the chord-INDEX par loop directly (the note-stream
@@ -3119,6 +3127,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   MIOS32_IRQ_Disable();
   seq_pattern_dirty = (seq_pattern_dirty & ~(1 << dst_group)) | dirty_snap;
   MIOS32_IRQ_Enable();
+  SEQ_PATTERN_DriftGroupRestore(dst_group, drift_snap);
 
   return status;
 }
@@ -3184,6 +3193,10 @@ s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst
   }
   memcpy(slottrk_name_snap, seq_pattern_name[dst_group], 20);
   u8 dirty_snap = seq_pattern_dirty & (1 << dst_group);
+  // phrase_drift travels with the dirty bit: the staged slot-load's CC-replay
+  // raises it for dst_group, but the group's live RAM is fully restored below, so
+  // a clean group must not come out flagged "deliberately edited" (design §9 leak).
+  u8 drift_snap = SEQ_PATTERN_DriftGroupGet(dst_group);
 
   // 3. Read the target slot into the dst group (full load, remix_map=0).
   MUTEX_SDCARD_TAKE;
@@ -3235,6 +3248,7 @@ s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst
   MIOS32_IRQ_Disable();
   seq_pattern_dirty = (seq_pattern_dirty & ~(1 << dst_group)) | dirty_snap;
   MIOS32_IRQ_Enable();
+  SEQ_PATTERN_DriftGroupRestore(dst_group, drift_snap);
 
   return status;
 }

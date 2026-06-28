@@ -1766,10 +1766,14 @@ static void cmd_phrase_meta(mios32_midi_port_t port, u8 *payload, u32 len)
   switch( payload[0] ) {
     case 0x00: { // DRIFT_QUERY
       s32 lr = SEQ_PATTERN_PhraseLastRecalled();
-      u8 reply[3];
+      // reply[3] (per-group drift mask) is APPENDED after the status byte so the
+      // existing 3-byte parser (drifted/last_recalled/status) stays valid; new
+      // callers read reply[3] for the per-group view (§9 drift-leak regression).
+      u8 reply[4];
       reply[0] = SEQ_PATTERN_PhraseDrifted() ? 0x01 : 0x00;
       reply[1] = (lr < 0) ? 0x7f : (u8)lr;
       reply[2] = 0x01;
+      reply[3] = SEQ_PATTERN_PhraseDriftMask() & 0x7f;
       send_reply(port, CMD_PHRASE_META, reply, sizeof(reply));
     } break;
 

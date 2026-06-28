@@ -3037,10 +3037,23 @@ and chasing it reframed the whole deposit:
   chord transpose-loss. The first would have re-shipped the very bug the redesign removes.
 - **UNCOMMITTED at GO**; HIL capture family 71/71 + 4 new canvas pins green, full suite re-run before
   commit. **Deferred (none block):** #3 "as-heard" windowing for note grabs (still loop-aligned;
-  phase-offset = mid-run-restart edge); the pre-existing `phrase_drift` leak in all three slot verbs
-  (one extra ~290 ms save on the recall after a capture); cross-pattern canvas uses the LIVE dst
+  phase-offset = mid-run-restart edge); cross-pattern canvas uses the LIVE dst
   geometry not the slot's stored; NOTE-mode multi-bar grabs stay mono (the melodic-mono fence — chords
   only via the chord path or `Save`). Plan: `doc/plans/2026-06-27-unified-capture.md` (retire on commit).
+
+**2026-06-28 — `phrase_drift` leak in the three slot-capture verbs — FIXED.** `SEQ_CORE_
+CaptureToSlotTrack` / `CaptureSpanToSlotTrack` / `CopyTrackLiveToSlot` each do a staged
+load-modify-save: read the target slot INTO the live dst group (CC-replay through `SEQ_CC_Set`
+raises drift for that group), modify one track, write the slot, then restore the dst group's
+live RAM byte-identical. They already snapshot+restore `seq_pattern_dirty` around this; they did
+NOT restore `phrase_drift`, so a clean dst group came out flagged "deliberately edited" → the
+next phrase recall's drift-gated writeback paid one spurious ~290 ms flash SAVE. **Fix:** mirror
+the dirty dance for drift — snapshot `dst_group`'s drift bit before the slot load, restore it
+after (new `SEQ_PATTERN_DriftGroupGet` / `DriftGroupRestore` accessors, since `phrase_drift` is
+static to seq_pattern.c). The re-sim/tape drive can't leak the SOURCE group: generator wander
+during the drive runs inside the `seq_generator_in_automutate` window, which suppresses drift.
++32 B text, 0 RAM. New per-group drift mask on the `CMD_PHRASE_META` DRIFT_QUERY reply (`reply[3]`,
+backward-compatible) drives a 3-pin regression (`test_capture_drift_leak.py`, one per verb).
 
 ---
 

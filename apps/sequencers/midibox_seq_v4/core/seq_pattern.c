@@ -270,6 +270,36 @@ void SEQ_PATTERN_DirtyClearGroup(u8 group)
   MIOS32_IRQ_Enable();
 }
 
+// Snapshot / restore a single group's phrase_drift bit — the slot-capture verbs
+// in seq_core.c (CaptureToSlotTrack / CaptureSpanToSlotTrack / CopyTrackLiveToSlot)
+// do a staged load-modify-save into the dst group: they read the target slot INTO
+// the live dst group (CC-replay through SEQ_CC_Set raises drift for that group),
+// then restore the dst group's live RAM byte-identical. They already snapshot +
+// restore seq_pattern_dirty around this (a clean group must not come out flagged
+// for auto-writeback); phrase_drift has to travel with it, or a clean group comes
+// out flagged "deliberately edited" and the NEXT phrase recall pays a spurious
+// ~290 ms drift-gated writeback (design §9 leak note). phrase_drift is static here,
+// so the verbs can't do the read-modify-write inline like they do for the global
+// seq_pattern_dirty — hence this pair.
+u8 SEQ_PATTERN_DriftGroupGet(u8 group)
+{
+  if( group >= SEQ_CORE_NUM_GROUPS )
+    return 0;
+  return (phrase_drift & (1 << group)) ? 1 : 0;
+}
+
+void SEQ_PATTERN_DriftGroupRestore(u8 group, u8 drifted)
+{
+  if( group >= SEQ_CORE_NUM_GROUPS )
+    return;
+  MIOS32_IRQ_Disable();
+  if( drifted )
+    phrase_drift |= (1 << group);
+  else
+    phrase_drift &= ~(1 << group);
+  MIOS32_IRQ_Enable();
+}
+
 // Write the group's live state back to its working slot if dirty. The dirty
 // bit is cleared inside SEQ_PATTERN_Save (target == working slot). Safe in
 // both switch contexts: task context (immediate change) and inside
@@ -727,6 +757,15 @@ s32 SEQ_PATTERN_PhraseLastRecalled(void)
 s32 SEQ_PATTERN_PhraseDrifted(void)
 {
   return phrase_drift ? 1 : 0;
+}
+
+// The raw per-group drift mask (bit n = group n deliberately edited since the
+// last recall/capture). The whole-mask PhraseDrifted above drives the LED; this
+// per-group view lets the HIL pin a SPECIFIC group clean (e.g. a slot-capture
+// into group 1 must not flag group 1 — the §9 drift-leak regression).
+u8 SEQ_PATTERN_PhraseDriftMask(void)
+{
+  return phrase_drift;
 }
 
 // Pointer to phrase n's in-RAM name buffer (20 chars space-padded + NUL) — for

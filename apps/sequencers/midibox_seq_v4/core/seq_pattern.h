@@ -59,6 +59,8 @@ extern s32 SEQ_PATTERN_Save(u8 group, seq_pattern_t pattern);
 
 extern void SEQ_PATTERN_DirtySetTrack(u8 track);
 extern void SEQ_PATTERN_DirtyClearGroup(u8 group);
+extern u8 SEQ_PATTERN_DriftGroupGet(u8 group);
+extern void SEQ_PATTERN_DriftGroupRestore(u8 group, u8 drifted);
 extern s32 SEQ_PATTERN_WritebackIfDirty(u8 group);
 extern s32 SEQ_PATTERN_WritebackAllDirty(void);
 
@@ -82,6 +84,7 @@ extern s32 SEQ_PATTERN_PhrasePresent(u8 n);
 extern u16 SEQ_PATTERN_PhrasePresentMask(void);
 extern s32 SEQ_PATTERN_PhraseLastRecalled(void);
 extern s32 SEQ_PATTERN_PhraseDrifted(void);
+extern u8 SEQ_PATTERN_PhraseDriftMask(void);
 extern char *SEQ_PATTERN_PhraseName(u8 n);
 extern s32 SEQ_PATTERN_PhraseNameCommit(u8 n);
 extern void SEQ_PATTERN_PhraseResetState(void);
