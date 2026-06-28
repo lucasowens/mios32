@@ -169,3 +169,34 @@ Consequences:
 - Random-traversal: refuse (A1 default) vs synthetic fixed-step window (later).
 - Whether the `dst_steps > 256` ceiling ever bites a sub-measure case (it won't for short loops; a
   long odd loop like 240 steps caps k≈1) — accept as the k×length cap.
+
+## A2 attempt 2026-06-28 — STOPPED multi-bar re-sim: hit two walls, REVERTED
+
+Tried the minimal A2: lift the re-sim gate (`n_meas != 1` → `n_meas < 1`) so a whole-measure
+MULTI-bar loop drives k·n measures continuously from the loop-start frame. Built clean, authored
+HIL pins (plain 2-bar/3-bar forward + k=2). **Reverted — not committed.** Two walls:
+
+1. **Alignment is architectural, not a phase tweak.** The ring stores ONE frame per GLOBAL measure.
+   A multi-bar loop is reconstructable ONLY if its loop wrap coincides with a global-measure
+   boundary (measure-aligned). `clock_step` (no FIRST_CLK) leaves a non-aligned track → the window's
+   "loop-start at ctr≡1 (mod n)" picks a mid-loop frame → the grab comes out ROTATED (observed +24
+   for k=1, +8 for k=2; `dst[0]=NextStep(frame->step)`, frame->step was 23/7 not 31). A non-aligned
+   multi-bar loop has NO frame on its loop start, so per-measure frames fundamentally can't rebuild
+   it. The plan's "derive drive phase from the frame's global phase" CANNOT fix this within the
+   per-measure ring — it needs the **Approach-A-general** re-frame around the track's OWN loop wrap
+   (ring depth in LOOPS, frame at `cur==0 && prev!=0`). That is the real cost of stopped sub-measure/
+   odd AND non-aligned multi-bar.
+
+2. **The drive HANGS after real transport play (multi-bar only).** transport start → run → STOP →
+   2-bar grab times out (>10 s, no reply); the SAME 2-bar grab after `clock_step`-only history
+   REPLIES (rotated). A 1-bar grab after transport→stop is fine. So the hang is specific to the
+   multi-bar drive crossing its extra measure boundary (B+1536) when there is real emission/scheduler
+   history — a synchronous-drive timing/contention issue not seen by the n=1 path. Undiagnosed
+   (would need on-target instrumentation; risky to chase via HIL timeouts).
+
+**Decision (build less, listen sooner):** multi-bar grabs stay **while-PLAYING only** (the tape is
+note-for-note faithful for any length and has no alignment/hang issue). STOPPED re-sim stays
+**one-global-measure** with the clean `-8 "play to grab"` refusal. Reopening A2 means committing to
+the ring re-frame (wall 1) AND debugging the post-play multi-bar hang (wall 2) — a real project, not
+a tweak. The committed `n_meas`-based gate (foreign-clkdiv work, 8b40da9e) already routes correctly:
+1-bar (incl. foreign-clkdiv synch) stopped, everything else "play to grab".
