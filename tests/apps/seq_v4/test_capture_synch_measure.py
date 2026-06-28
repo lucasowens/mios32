@@ -34,7 +34,9 @@ SEQ_CC_DIRECTION = 0x48
 SEQ_CC_CLK_DIVIDER = 0x4C    # clkdiv.value; step_length = (value+1)*6 (non-triplet)
 SEQ_CC_CLKDIV_FLAGS = 0x4F   # bit 0 = SYNCH_TO_MEASURE
 TRKDIR_FORWARD = 0
-CLKDIV_16TH = 15             # (15+1)*6 = 96 ticks/step = one 16th
+CLKDIV_16TH = 15             # (15+1)*6 = 96 ticks/step = one 16th = the global grid
+CLKDIV_8TH = 31             # (31+1)*6 = 192 ticks/step = one 8th = 2x the global 16th (FOREIGN)
+DST_SPM_8TH = 8             # a global bar (16 sixteenths = 1536 ticks) holds 1536/192 = 8 eighths
 
 
 def _setup_synched_line(board: Board, n_steps: int) -> None:
@@ -142,6 +144,83 @@ def test_capture_dst_clockdiv_pinned_to_grid_not_transient_config(board):
         "dst clock divider must be pinned to the capture grid (16th), not the transient "
         f"config 0; got {board.cc_get(DST, SEQ_CC_CLK_DIVIDER)}"
     )
+
+
+def _setup_synched_line_8th(board: Board, n_steps: int) -> None:
+    """Same recognizable forward line, but on a FOREIGN clkdiv: 8th notes (step_length 192),
+    twice the 96-tick global 16th grid. SYNCH resets it every global bar (1536 ticks), so its
+    AUDIBLE loop is DST_SPM_8TH=8 of its OWN steps regardless of n_steps — not gspm=16."""
+    board.track_drum_init(TRACK)
+    board.cc_set(TRACK, CC.EVENT_MODE, EVENT_MODE_NOTE)
+    board.cc_set(TRACK, SEQ_CC_LENGTH, n_steps - 1)
+    board.cc_set(TRACK, SEQ_CC_DIRECTION, TRKDIR_FORWARD)
+    board.cc_set(TRACK, SEQ_CC_CLK_DIVIDER, CLKDIV_8TH)   # FOREIGN grid: tps=192 != 96
+    board.cc_set(TRACK, SEQ_CC_CLKDIV_FLAGS, 1)           # SYNCH_TO_MEASURE on
+    board.ui_track_set(TRACK)
+    for b in range((n_steps + 7) // 8):                  # gate every step
+        board.trg_byte_set(TRACK, b, 0xFF)
+    board.track_par_set(TRACK, NOTE_LAYER, 0, 0, 72)     # downbeat accent
+    for step in range(1, n_steps):
+        board.track_par_set(TRACK, NOTE_LAYER, 0, step, 36 + step)
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("n_steps", [12, 6])
+def test_synch_foreign_clkdiv_while_playing_one_bar(board, n_steps):
+    """REGRESSION (foreign-clkdiv synch period-doubling): a SYNCH_TO_MEASURE track on an 8th
+    clkdiv (tps=192) must capture a TRUE 1-bar loop of 8 steps, NOT a 16-step / 2-bar loop.
+    The bug dimensioned the dst by gspm=16 at the 192-tick step (16*192 = 3072 = 2 bars) so
+    the tape grab came out as the bar + a silent bar. dst_steps is now gspm*96/tps = 8."""
+    board.reset()
+    _setup_synched_line_8th(board, n_steps)
+    try:
+        board.transport(start=True)
+        _wait_ring_depth(board, 4)
+        status = board.capture_span(TRACK, 1, DST)        # one bar
+        assert status == 0x01, f"foreign-clkdiv synch tape capture should succeed, got {hex(status)}"
+    finally:
+        board.transport(start=False)
+
+    assert board.cc_get(DST, SEQ_CC_LENGTH) == DST_SPM_8TH - 1, (
+        f"dst must be ONE bar = {DST_SPM_8TH} steps (length {DST_SPM_8TH-1}), not period-doubled; "
+        f"got length {board.cc_get(DST, SEQ_CC_LENGTH)}"
+    )
+    assert board.cc_get(DST, SEQ_CC_CLK_DIVIDER) == CLKDIV_8TH, (
+        "dst must play at the source 8th grid (8 steps x 192 = 1536 = one bar)"
+    )
+    src = [board.track_par_get(TRACK, NOTE_LAYER, 0, s) for s in range(n_steps)]
+    dst = [board.track_par_get(DST, NOTE_LAYER, 0, s) for s in range(DST_SPM_8TH)]
+    assert any(dst), "captured dst has no notes"
+    for s in range(DST_SPM_8TH):
+        assert dst[s] == src[s % n_steps], (
+            f"foreign-clkdiv synch tape bar (len={n_steps}): dst[{s}]={dst[s]}, "
+            f"expected src[{s % n_steps}]={src[s % n_steps]}\n  src: {src}\n  dst: {dst}"
+        )
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("n_steps", [12, 6])
+def test_synch_foreign_clkdiv_stopped_resim_one_bar(board, n_steps):
+    """STOPPED re-sim companion: the drive runs ONE bar (dst_spm*tps = 8*192 = 1536), not
+    two, so the bar deposits ONCE into an 8-step dst. The bug drove 16*192 = 3072 ticks =
+    2 bars, re-applying the synch reset mid-drive -> the bar captured TWICE."""
+    board.reset()
+    _setup_synched_line_8th(board, n_steps)
+    board.clock_step(16000)   # settle cached step_length to 192 + fill the ring
+    status = board.capture_span(TRACK, 1, DST)
+    assert status == 0x01, f"foreign-clkdiv synch re-sim should succeed, got {hex(status)}"
+
+    assert board.cc_get(DST, SEQ_CC_LENGTH) == DST_SPM_8TH - 1, (
+        f"dst must be ONE bar = {DST_SPM_8TH} steps; got length {board.cc_get(DST, SEQ_CC_LENGTH)}"
+    )
+    src = [board.track_par_get(TRACK, NOTE_LAYER, 0, s) for s in range(n_steps)]
+    dst = [board.track_par_get(DST, NOTE_LAYER, 0, s) for s in range(DST_SPM_8TH)]
+    assert any(dst), "captured dst has no notes"
+    for s in range(DST_SPM_8TH):
+        assert dst[s] == src[s % n_steps], (
+            f"foreign-clkdiv synch re-sim bar (len={n_steps}): dst[{s}]={dst[s]}, "
+            f"expected src[{s % n_steps}]={src[s % n_steps]}\n  src: {src}\n  dst: {dst}"
+        )
 
 
 @pytest.mark.hardware

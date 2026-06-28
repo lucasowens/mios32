@@ -163,15 +163,18 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
 - **Multi-measure / odd-length CAPTURE (2026-06-26, by-ear GO; HIL 216/216).** Grab unit is now a
   **LOOP** (the src track's full length), not a global bar. Two reaches:
   - **While PLAYING → ANY length.** `SEQ_CORE_CaptureSpanTape` branches: a **whole-measure** track
-    (`spm % gspm == 0`) uses the per-measure `bar_start` markers (below); a **non-(whole-measure)**
-    track (sub-measure/odd/polymeter) slices by the track's own loop PERIOD in ticks **`P = spm·tps`**
-    — `win_end = (SEQ_BPM_TickGet()/P)·P`, `win_start = win_end − k·P`, `dst_steps = k·spm` — which is
+    (`SEQ_CORE_CaptureLoopMeasures(src) ≥ 1`, tick-based) uses the per-measure `bar_start` markers
+    (below); a **non-(whole-measure)** track (sub-measure/odd/polymeter) slices by the track's own loop
+    PERIOD in ticks **`P = spm·tps`** — `win_end = (SEQ_BPM_TickGet()/P)·P`, `win_start = win_end − k·P`,
+    `dst_steps = k·dst_spm` (see foreign-clkdiv entry below) — which is
     traversal-agnostic (records the emitted stream, so self-mod direction / random / ping-pong all
     work). Phase assumes a grid-aligned start at tick 0 (a mid-run SPP/synch offset is a documented,
     in-bounds edge). `clkdiv.SYNCH_TO_MEASURE` defaults 0 (`seq_cc.c:164`); a synch'd track's audible
-    loop is the global bar (queued: route it as a 1-bar loop).
-  - **While STOPPED → ONE global measure only.** `SEQ_CORE_CaptureSpanReSim` gates `spm != gspm → −8`
-    ("play to grab"). The re-sim drive phase-aligns to the global measure (`B = gspm·96`), so a
+    loop is one global bar — routed as a 1-bar loop via `SEQ_CORE_CaptureLoopSteps`/`CaptureDstLoopSteps`
+    (shipped 57dc55af; foreign-clkdiv geometry corrected 2026-06-28, see entry below).
+  - **While STOPPED → ONE global measure only.** `SEQ_CORE_CaptureSpanReSim` gates
+    `SEQ_CORE_CaptureLoopMeasures(src) != 1 → −8` ("play to grab"). The re-sim drive phase-aligns to
+    the global measure (`B = gspm·96`), so a
     **multi-bar** loop is driven at the wrong phase (HIL trace: a 2-bar fwd line rotated +11 steps).
     Lifting it (phase the drive to the track's own loop) is the queued **A2 kernel**; until then
     multi-bar/odd capture is via the while-PLAYING tape.
@@ -204,6 +207,22 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
   win_start/win_end/tps (5×7-bit LE / 2×7-bit) so the note-for-note pin derives the deposit rotation
   race-free. HIL: `test_capture_as_heard.py` (4 pins). `CaptureMaxK` unchanged (HEARD reaches no further
   back than GRID).
+- **Foreign-clkdiv CAPTURE geometry — synch + whole-measure classification (2026-06-28, by-ear GO; HIL 241/241).**
+  Two latent bugs on a track whose `step_length ≠ 96` (NOT the global 16th grid), both from mixing a
+  *global-16th-step* count with the source's *own* `tps`. Three new helpers in `seq_core.c` separate the
+  concerns: **`SEQ_CORE_CaptureTps`** (factored tps fallback); **`SEQ_CORE_CaptureDstLoopSteps`** = the
+  dst's step count per loop (`length+1` normally; for synch `gspm·96/tps` = the track's OWN steps per bar
+  — an 8th-note synch track is 8 steps/bar, not gspm=16); **`SEQ_CORE_CaptureLoopMeasures`** = global
+  measures per loop, judged in TICKS (`loop_ticks = (length+1)·tps`, `n = loop_ticks/(gspm·96)`, 0 =
+  not aligned, synch ⇒ 1). `CaptureLoopSteps` stays in global-16th units for the window n-math.
+  **(1) Synch period-doubling:** dst was sized `k·gspm` at the source's 192-tick step → a 2× loop
+  (re-sim drove 2 bars = bar twice; tape held 1 bar = bar + a silent bar). Fixed: `dst_steps = k·dst_spm`
+  at re-sim / tape / chord-window + the `CaptureMaxK` ceilings. **(2) Whole-measure misclassification:**
+  the old `(length+1) % gspm == 0` gate read an 8th 16-step loop (2 bars) as n=1 (captured half) and
+  refused an 8th 8-step loop (1 true bar). Fixed: all three gates (re-sim / tape / MaxK) use
+  `CaptureLoopMeasures` → a 2-bar 8th captures both bars playing / refuses stopped (multi-measure = the
+  deferred A2 kernel), a 1-bar 8th is grabbable in both states. Normal 16th-grid tracks byte-identical.
+  HIL: `test_capture_synch_measure.py` (+4 foreign-clkdiv), `test_capture_clkdiv_alignment.py` (3). design §9 2026-06-28.
 
 ### Persistence is versioned at the per-track level
 

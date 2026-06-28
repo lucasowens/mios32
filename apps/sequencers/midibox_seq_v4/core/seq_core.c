@@ -532,6 +532,63 @@ static u16 SEQ_CORE_CaptureLoopSteps(u8 src)
   return (u16)(seq_cc_trk[src].length + 1);          // the track's own loop
 }
 
+// Ticks per step (the capture GRID) for `src`: the cached step_length, falling back to
+// the configured clkdiv, then 96. Factored so every capture site quantizes identically
+// (was duplicated inline in re-sim / tape / MaxK). step_length = (value+1)*(TRIPLETS?4:6).
+static u16 SEQ_CORE_CaptureTps(u8 src)
+{
+  u16 tps = seq_core_trk[src].step_length;
+  if( tps == 0 ) {
+    seq_cc_trk_t *tcc = &seq_cc_trk[src];
+    tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
+  }
+  if( tps == 0 ) tps = 96;
+  return tps;
+}
+
+// Per-loop DST step count for `src` — how many steps the FROZEN copy needs to hold one
+// loop, at the source's own grid (tps). For a normal track this is its own loop length
+// (length+1), identical to SEQ_CORE_CaptureLoopSteps. For a SYNCH_TO_MEASURE track the
+// AUDIBLE loop is ONE GLOBAL MEASURE = gspm*96 ticks; that is gspm STEPS only at the
+// global 16th grid (tps==96). At any OTHER clkdiv the dst must hold (gspm*96 / tps) of
+// the track's OWN steps — e.g. an 8th-note synch track (tps=192) plays 8 steps/bar, so a
+// 1-bar grab is 8 steps, not gspm=16. Dimensioning by gspm there made the dst loop twice
+// the audible bar (the re-sim drove 2 bars -> bar captured twice; the tape window held 1
+// bar -> bar + a silent bar). SEQ_CORE_CaptureLoopSteps stays in global-16th units for the
+// "is this one measure?" gate + window n-math; THIS resolves the deposit/drive geometry.
+static u16 SEQ_CORE_CaptureDstLoopSteps(u8 src)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS ) return 0;
+  if( !seq_cc_trk[src].clkdiv.SYNCH_TO_MEASURE )
+    return (u16)(seq_cc_trk[src].length + 1);        // own loop, at its own grid
+
+  u16 tps = SEQ_CORE_CaptureTps(src);
+  if( tps == 0 ) return 1;
+  u32 bar_ticks = (u32)(seq_core_steps_per_measure + 1) * 96;  // one global measure
+  u16 steps = (u16)(bar_ticks / tps);                // source's own steps within the bar
+  return steps < 1 ? 1 : steps;                      // >=1 even for a >1-bar step_length
+}
+
+// Global MEASURES per loop for `src`, or 0 if the loop is NOT an integer number of global
+// measures (-> the non-aligned tape slice, or refuse the stopped re-sim). This is the
+// "whole-measure" classifier the bar-marker / re-sim-frame machinery keys on, and it MUST
+// be computed in TICKS: the old test `(length+1) % gspm == 0` compared the track's OWN step
+// count to gspm (a count of global 16th-steps), which only agrees at the 16th grid (tps==96).
+// A foreign-clkdiv track misfired both ways — an 8th-note 16-step loop (16*192 = 3072 = TWO
+// bars) read as `16 % 16 == 0, n = 1` (one measure: it captured half the loop), while an 8th
+// 8-step loop (one TRUE bar) read as `8 % 16 != 0` and was pushed to the non-aligned path /
+// refused stopped. loop_ticks = (length+1)*tps; a SYNCH_TO_MEASURE track is always exactly 1.
+static u16 SEQ_CORE_CaptureLoopMeasures(u8 src)
+{
+  if( src >= SEQ_CORE_NUM_TRACKS ) return 0;
+  if( seq_cc_trk[src].clkdiv.SYNCH_TO_MEASURE ) return 1;   // synch resets every global bar
+  u32 bar_ticks = (u32)(seq_core_steps_per_measure + 1) * 96;
+  if( bar_ticks == 0 ) return 0;
+  u32 loop_ticks = (u32)(seq_cc_trk[src].length + 1) * SEQ_CORE_CaptureTps(src);
+  if( loop_ticks == 0 || (loop_ticks % bar_ticks) != 0 ) return 0; // not whole-measure aligned
+  return (u16)(loop_ticks / bar_ticks);
+}
+
 // Max grabbable K (bars) for `src` right now: the SMALLER of the ring depth and
 // what the destination buffers can hold (the dst inherits src's layout, so a heavy
 // src — e.g. a 16-instrument drum track — caps the par buffer well below the ring).
@@ -542,23 +599,27 @@ u8 SEQ_CORE_CaptureMaxK(u8 src)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || src != seq_core_cap_ring_track ) return 0;
 
-  // spm = steps per LOOP; gspm = global Steps-per-Measure (stored as steps-1). A synch'd
-  // track reports gspm here (SEQ_CORE_CaptureLoopSteps) so the thermometer matches the grab.
+  // spm = src loop length in ITS OWN steps (used for the non-aligned tick period spm*tps);
+  // n_meas = global MEASURES per loop, tick-based (0 = not whole-measure aligned), so a
+  // foreign-clkdiv track is classified by loop_ticks not (length+1) vs gspm. dst_spm = the
+  // DST step count per loop (== spm except a foreign-clkdiv synch track) — the buffer/256
+  // ceilings below use it so the thermometer matches the grab's alloc (k*dst_spm), not k*spm.
   u16 spm  = SEQ_CORE_CaptureLoopSteps(src);
-  u16 gspm = (u16)(seq_core_steps_per_measure + 1);
-  if( spm == 0 ) return 0;
+  u16 dst_spm = SEQ_CORE_CaptureDstLoopSteps(src);
+  u16 n_meas = SEQ_CORE_CaptureLoopMeasures(src);
+  if( spm == 0 || dst_spm == 0 ) return 0;
   u8 running = SEQ_BPM_IsRunning();
 
   // Loop depth in LOOPS, by path:
   u8 max_k = 0;
-  if( gspm != 0 && (spm % gspm) == 0 ) {
+  if( n_meas >= 1 ) {
     // Whole-measure (Approach B): count the complete loop-aligned spans in the frame ring.
     // n = frames per loop. STOPPED re-sim grabs ONE-measure tracks only (n==1); a MULTI-
     // measure stopped grab is refused (drive-phase A2 deferred), so report 0 then. While
     // PLAYING the tape grabs any n. The generative-frame overflow only blocks the STOPPED
     // re-sim (it replays the frame); the tape records emitted notes regardless of gen count.
     if( seq_core_cap_ring_filled < 2 ) return 0;
-    u8 n = (u8)(spm / gspm);                              // frames per loop
+    u8 n = (u8)n_meas;                                    // frames per loop
     if( !running && (n != 1 || seq_core_cap_ring_overflow) ) return 0;
     u32 mctr = seq_core_trk[src].robotize_measure_ctr;
     if( SEQ_CORE_CaptureRingLoopWindow(src, mctr, n, 0, &max_k, NULL, NULL) != 0 || max_k == 0 )
@@ -569,22 +630,20 @@ u8 SEQ_CORE_CaptureMaxK(u8 src)
     // since transport start, capped at the ring depth (the tape-density cap is enforced at
     // grab time via -10).
     if( !running ) return 0;
-    u16 tps = seq_core_trk[src].step_length;
-    if( tps == 0 ) tps = (u16)((seq_cc_trk[src].clkdiv.value + 1) * (seq_cc_trk[src].clkdiv.TRIPLETS ? 4 : 6));
-    if( tps == 0 ) tps = 96;
+    u16 tps = SEQ_CORE_CaptureTps(src);
     u32 loops_done = (u32)SEQ_BPM_TickGet() / ((u32)spm * tps);
     if( loops_done == 0 ) return 0;
     max_k = (loops_done > (SEQ_CORE_CAP_RING_BARS - 1)) ? (SEQ_CORE_CAP_RING_BARS - 1) : (u8)loops_done;
   }
 
-  if( max_k > 256 / spm ) max_k = (u8)(256 / spm);         // dst_steps = K*spm <= 256
+  if( max_k > 256 / dst_spm ) max_k = (u8)(256 / dst_spm); // dst_steps = K*dst_spm <= 256
 
-  u32 par_unit = (u32)spm * SEQ_PAR_NumLayersGet(src) * SEQ_PAR_NumInstrumentsGet(src);
+  u32 par_unit = (u32)dst_spm * SEQ_PAR_NumLayersGet(src) * SEQ_PAR_NumInstrumentsGet(src);
   if( par_unit && max_k > SEQ_PAR_MAX_BYTES / par_unit )
     max_k = (u8)(SEQ_PAR_MAX_BYTES / par_unit);            // dst par buffer
 
   u32 trg_unit = (u32)SEQ_TRG_NumLayersGet(src) * SEQ_TRG_NumInstrumentsGet(src);
-  while( max_k > 0 && (u32)(((u16)max_k * spm + 7) / 8) * trg_unit > SEQ_TRG_MAX_BYTES )
+  while( max_k > 0 && (u32)(((u16)max_k * dst_spm + 7) / 8) * trg_unit > SEQ_TRG_MAX_BYTES )
     --max_k;                                               // dst trg buffer (exact ceil)
 
   return max_k;
@@ -2333,28 +2392,30 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // the emitted stream and is traversal- AND phase-correct for ANY length (n=1/n>=2/odd),
   // verified note-for-note. The multi-measure/non-aligned STOPPED re-sim drive-phase is the
   // deferred A2 kernel. seq_core_steps_per_measure is stored as (steps-1).
-  // A SYNCH_TO_MEASURE track resolves to gspm (1-bar loop) via SEQ_CORE_CaptureLoopSteps,
-  // so it passes the gate below and re-sims through the n==1 path; the drive re-applies the
-  // synch reset at tick B (it runs the real tick logic), reproducing the audible measure.
-  u16 spm  = SEQ_CORE_CaptureLoopSteps(src);
+  // STOPPED re-sim supports a ONE-global-measure loop only (multi-measure drive-phase = the
+  // deferred A2 kernel). The "is this one measure?" test is TICK-based (SEQ_CORE_CaptureLoopMeasures):
+  // a SYNCH_TO_MEASURE track is always 1; a foreign-clkdiv track is judged by loop_ticks, so an
+  // 8th-note 16-step loop (2 bars) is correctly refused here and an 8th 8-step loop (1 true bar)
+  // is correctly accepted. The drive re-applies the synch reset at tick B (it runs the real tick
+  // logic), reproducing the audible measure.
   u16 gspm = (u16)(seq_core_steps_per_measure + 1);
-  if( spm != gspm ) return -8;                          // not ONE measure: play to grab (A2 pending)
-  u16 dst_steps = (u16)k * spm;
+  u16 n_meas = SEQ_CORE_CaptureLoopMeasures(src);
+  if( n_meas != 1 ) return -8;                          // not ONE measure: play to grab (A2 pending)
+  u16 tps = SEQ_CORE_CaptureTps(src);
+  u16 dst_spm = SEQ_CORE_CaptureDstLoopSteps(src);      // dst steps per loop (foreign-clkdiv synch:
+                                                        // gspm*96/tps source-own steps, not gspm)
+  u16 dst_steps = (u16)k * dst_spm;
   if( dst_steps == 0 || dst_steps > 256 ) return -7;    // exceeds max track steps
 
   // Window-START = the loop boundary k complete loops back (skipping any in-progress
-  // partial loop). n = frames per loop = spm/gspm (gate above guarantees spm%gspm==0).
-  // Frozen ctr (STOPPED) -> no race; the helper reduces to FrameBack(k) for n==1.
-  u8 n = (u8)(spm / gspm);
+  // partial loop). n = frames per loop = n_meas (==1 here). Frozen ctr (STOPPED) -> no race;
+  // the helper reduces to FrameBack(k) for n==1.
+  u8 n = (u8)n_meas;
   u32 mctr = seq_core_trk[src].robotize_measure_ctr;
   u8 win_o;
   if( SEQ_CORE_CaptureRingLoopWindow(src, mctr, n, k, NULL, &win_o, NULL) != 0 )
     return -6;                                          // not enough aligned history
   const seq_core_cap_frame_t *frame = &seq_core_cap_ring[(mctr - win_o) % SEQ_CORE_CAP_RING_BARS];
-
-  u16 tps = seq_core_trk[src].step_length;
-  if( tps == 0 ) tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
-  if( tps == 0 ) tps = 96;
 
   // par and trg carry INDEPENDENT instrument counts (a drum track is par 1-layer ×
   // 16-instr but trg 8-layer × 1-instr) — use each axis's own count for its TrackInit
@@ -2517,16 +2578,18 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
   // A SYNCH_TO_MEASURE track resolves to gspm via SEQ_CORE_CaptureLoopSteps, so it takes
   // the whole-measure (n==1) marker branch below — the per-global-measure tape markers are
   // exactly the synch'd track's loop boundaries (the reset re-aligns it every bar).
-  u16 spm  = SEQ_CORE_CaptureLoopSteps(src);
+  u16 spm  = SEQ_CORE_CaptureLoopSteps(src);            // global-16th loop length (gate + window)
   u16 gspm = (u16)(seq_core_steps_per_measure + 1);
   if( spm == 0 ) return -7;                             // degenerate length
-  u16 dst_steps = (u16)k * spm;
+  u16 tps = SEQ_CORE_CaptureTps(src);
+  u16 dst_spm = SEQ_CORE_CaptureDstLoopSteps(src);      // dst steps per loop (foreign-clkdiv synch:
+                                                        // gspm*96/tps source-own steps, not gspm)
+  u16 n_meas = SEQ_CORE_CaptureLoopMeasures(src);       // global measures/loop (0 = not aligned);
+                                                        // tick-based so a foreign clkdiv is judged
+                                                        // by loop_ticks, not (length+1) vs gspm
+  u16 dst_steps = (u16)k * dst_spm;
   if( dst_steps == 0 || dst_steps > 256 ) return -7;    // exceeds max track steps
   if( k < 1 ) return -6;
-
-  u16 tps = seq_core_trk[src].step_length;
-  if( tps == 0 ) tps = (u16)((tcc->clkdiv.value + 1) * (tcc->clkdiv.TRIPLETS ? 4 : 6));
-  if( tps == 0 ) tps = 96;
 
   // par/trg carry INDEPENDENT instrument counts — guard each axis with its own.
   u8  par_layers = (u8)SEQ_PAR_NumLayersGet(src);
@@ -2563,12 +2626,12 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
     if( (u32)k * P > now ) { MUTEX_MIDIOUT_GIVE; return -6; } // not enough played yet
     win_end   = now;
     win_start = now - (u32)k * P;                            // reaches no further back than GRID
-  } else if( gspm != 0 && (spm % gspm) == 0 ) {
+  } else if( n_meas >= 1 ) {
     // Whole-measure track (Approach B): the per-measure bar markers line up loop-by-loop.
-    // n = frames per loop = spm/gspm. Resolve the loop-aligned offsets against a single ctr
-    // read (the engine advances ctr while PLAYING). Reduces to {win_o=k, win_e=0} for n==1
-    // -> identical to the original window.
-    u8 n = (u8)(spm / gspm);
+    // n = frames per loop = n_meas (tick-based: an 8th 16-step loop is n=2, two real bars).
+    // Resolve the loop-aligned offsets against a single ctr read (the engine advances ctr
+    // while PLAYING). Reduces to {win_o=k, win_e=0} for n==1 -> identical to the original window.
+    u8 n = (u8)n_meas;
     u32 ctr = seq_core_trk[src].robotize_measure_ctr;
     u8 win_o, win_e;
     if( SEQ_CORE_CaptureRingLoopWindow(src, ctr, n, k, NULL, &win_o, &win_e) != 0 ) {
@@ -2918,9 +2981,10 @@ static s32 SEQ_CORE_CaptureChordWindow(u8 src, u8 k,
                                        u16 *o_par_steps, u8 *o_par_layers, u8 *o_par_instr,
                                        u16 *o_trg_steps, u8 *o_trg_layers, u8 *o_trg_instr)
 {
-  u16 spm = SEQ_CORE_CaptureLoopSteps(src);
-  if( spm == 0 || k == 0 ) return -7;
-  u16 W = (u16)k * spm;
+  u16 dst_spm = SEQ_CORE_CaptureDstLoopSteps(src);    // source-own steps per loop (foreign-clkdiv
+                                                      // synch: gspm*96/tps, not gspm)
+  if( dst_spm == 0 || k == 0 ) return -7;
+  u16 W = (u16)k * dst_spm;
   if( W == 0 || W > 256 ) return -7;                  // exceeds max track steps
 
   u8  par_layers = (u8)SEQ_PAR_NumLayersGet(src);
@@ -2931,13 +2995,13 @@ static s32 SEQ_CORE_CaptureChordWindow(u8 src, u8 k,
   u8  src_t8     = (u8)(SEQ_TRG_NumStepsGet(src) / 8);
   u8  cap_t8     = (u8)((W + 7) / 8);                  // window trg bytes per layer (x8 ceil)
 
-  // The tiling read period is the source's TRUE audible loop, NOT spm: a SYNCH_TO_MEASURE
-  // track has spm = gspm (the global measure), which can differ from the track's own par
-  // loop (length+1) and even exceed its par allocation — reading by gspm would tile steps
-  // the source never played, or run off the layer into the next one. Use min(length+1, spm)
+  // The tiling read period is the source's TRUE par loop, NOT dst_spm: a SYNCH_TO_MEASURE
+  // track's dst_spm is its steps-per-global-bar, which can differ from the track's own par
+  // loop (length+1) and even exceed its par allocation — reading by dst_spm would tile steps
+  // the source never played, or run off the layer into the next one. Use min(length+1, dst_spm)
   // clamped to the allocation so the read always stays within the real chord sequence.
   u16 period = (u16)(seq_cc_trk[src].length + 1);
-  if( period > spm ) period = spm;                    // synch'd-longer: audible loop is gspm
+  if( period > dst_spm ) period = dst_spm;            // synch'd-longer: audible loop is dst_spm steps
   if( period < 1 ) period = 1;
   if( period > src_psteps ) period = src_psteps;      // never read past the source allocation
 

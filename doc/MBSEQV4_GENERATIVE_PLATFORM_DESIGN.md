@@ -3078,6 +3078,28 @@ measure, = GRID's marker span). HIL: 4 new pins (`test_capture_as_heard.py` — 
 playhead, note-for-note rotation, GRID-still-aligned, slot-track phase threading). Plan +
 review write-up: `doc/plans/2026-06-28-as-heard-windowing.md`.
 
+**2026-06-28 — Foreign-clkdiv CAPTURE geometry — synch period-doubling + tick-based whole-measure
+classification — FIXED (by-ear GO "everything worked"; HIL 241/241).** A review/harden pass on the
+shipped synch-to-measure routing (57dc55af) found two latent bugs, both on a track whose `step_length
+≠ 96` (i.e. NOT the global 16th grid), both from conflating a *global-16th-step* count with the
+source's *own* `tps`. **(1) Synch period-doubling:** `SEQ_CORE_CaptureLoopSteps` returns `gspm` (a
+global-16th count) for a synch track, but the dst was dimensioned with the source's own `tps` — so an
+8th-note synch track (tps=192) got a 16-step dst at 192 ticks = 2 bars (re-sim drove two bars → the
+bar captured twice; the tape window held one bar → bar + a silent bar). **(2) Whole-measure
+misclassification:** the gate `(length+1) % gspm == 0` compared own-steps to global-16th-steps, valid
+only at tps=96 — so a non-synch 8th 16-step loop (16·192 = 3072 = TWO bars) read as one measure
+(captured half), and an 8th 8-step loop (one true bar) was refused stopped. **Fix = separate the
+units** with three helpers (`seq_core.c`): `SEQ_CORE_CaptureTps` (factored fallback),
+`SEQ_CORE_CaptureDstLoopSteps` (dst step count = `gspm·96/tps` for synch, `length+1` otherwise — the
+deposit/drive geometry), and `SEQ_CORE_CaptureLoopMeasures` (measures-per-loop judged in TICKS:
+`loop_ticks = (length+1)·tps`, `n = loop_ticks/(gspm·96)`, 0 = unaligned, synch ⇒ 1 — the
+gate/classifier). `CaptureLoopSteps` stays in global-16th units for the window n-math. Applied at
+re-sim, tape, chord-window, and the `CaptureMaxK` ceilings. Normal 16th-grid tracks are byte-identical
+(dst_spm == length+1, n_meas == length+1/gspm). Bonus: an 8th 1-bar loop is now grabbable STOPPED (was
+refused). HIL: +7 pins (`test_capture_synch_measure.py` foreign-clkdiv ×4, `test_capture_clkdiv_alignment.py`
+×3), full suite **241/241**. **Lesson reaffirmed (review-before-commit):** the original synch bundle's
+tests all ran at the 16th grid, masking the tps≠96 case; the adversarial harden pass surfaced it.
+
 ---
 
 ## 10. Open questions (unresolved forks)
