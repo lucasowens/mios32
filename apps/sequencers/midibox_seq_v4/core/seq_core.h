@@ -547,10 +547,28 @@ extern s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k);
 // While-PLAYING counterpart: quantize the last `k` bars of `src` from the live
 // tape (the recording of what actually sounded) into `dst`. Transport must be
 // RUNNING. Same refusal codes as re-sim, plus -10 = span scrolled out of the tape.
-extern s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k);
+// `phase` (below): GRID = loop-aligned (last k COMPLETED loops); HEARD = the window
+// ends at the playhead (the last k bars exactly as heard, deposited restarting mid-run).
+extern s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase);
 
-// Dispatcher used by the gesture + testctrl: PLAYING -> tape, STOPPED -> re-sim.
-extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k);
+// Dispatcher used by the gesture + testctrl: PLAYING -> tape (honours `phase`),
+// STOPPED -> re-sim (no playhead, always GRID — `phase` ignored).
+extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k, u8 phase);
+
+// CAPTURE window phase (2026-06-28): where a while-PLAYING grab's window ENDS. GRID
+// snaps to the last loop downbeat (the shipped behaviour — grid-locked, the natural
+// fit for FILL tiling). HEARD ends at the playhead, keeping the last k bars exactly
+// as they sounded (the deposited loop restarts from the grab phase, off the downbeat —
+// the natural fit for LOOP). Tape path only; STOPPED re-sim is always GRID.
+#define SEQ_CORE_CAP_PHASE_GRID  0
+#define SEQ_CORE_CAP_PHASE_HEARD 1
+
+// HIL telemetry for the last CaptureSpanTape grab (CMD_CAPTURE_SPAN reply): the absolute
+// tick window the grab used + the src ticks-per-step, so a while-PLAYING note-for-note
+// phase pin computes the rotation from the firmware's own numbers (no read-vs-grab race).
+extern u32 SEQ_CORE_CaptureSpanWinStart(void);
+extern u32 SEQ_CORE_CaptureSpanWinEnd(void);
+extern u16 SEQ_CORE_CaptureSpanTps(void);
 
 // CAPTURE fit modes (2026-06-28): how the grabbed window maps onto the dst track's
 // FIXED canvas (its max length is NEVER resized — the geometry stays put, which makes
@@ -564,7 +582,7 @@ extern s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k);
 // Recorder -> SD pattern slot: span-capture src's last k loops, then TILE that window
 // into dst_track's existing canvas (never resized) per fit_mode, persisted, preserving
 // the slot's other tracks. The while-playing companion to SEQ_CORE_CaptureToSlotTrack.
-extern s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k, u8 fit_mode);
+extern s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k, u8 fit_mode, u8 phase);
 
 // SAVE the LIVING src_track (full CC incl. generative axis + SOURCE par/trg + the
 // generator pool) into dst_track of slot (bank, pattern), persisted, preserving

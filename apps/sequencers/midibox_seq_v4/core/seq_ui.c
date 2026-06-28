@@ -686,7 +686,7 @@ static void capture_span_msg(u8 src, u8 dst, u8 k)
     return;
   }
 
-  s32 r = SEQ_CORE_CaptureSpan(src, dst, k);
+  s32 r = SEQ_CORE_CaptureSpan(src, dst, k, SEQ_CORE_CAP_PHASE_GRID); // legacy gesture: loop-aligned
   if( r == 0 ) {
     char msg[12];
     sprintf(msg, ">T%d %dL", dst + 1, k);                 // L = loops (k loops of src)
@@ -833,7 +833,7 @@ static s32 SEQ_UI_Button_GP(s32 depressed, u32 gp)
     // keep freezing the static render (unchanged, works with no playback history).
     // dst_track defaults to src_track above => "same track, another pattern."
     s32 cap_r = SEQ_BPM_IsRunning()
-      ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst.bank, dst.pattern, 1, SEQ_CORE_CAP_FIT_FILL)
+      ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst.bank, dst.pattern, 1, SEQ_CORE_CAP_FIT_FILL, SEQ_CORE_CAP_PHASE_GRID)
       : SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst.bank, dst.pattern);
     if( cap_r >= 0 ) {
       if( dst_group != src_group ) {

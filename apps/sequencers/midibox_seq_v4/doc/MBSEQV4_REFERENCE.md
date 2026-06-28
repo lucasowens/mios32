@@ -188,6 +188,22 @@ The keystone's determinism made spans re-simulable; CAPTURE is the retroactive g
     via the helper (stopped→n=1 only), non-aligned via `loops_done` capped at `RING_BARS−1`. New
     refusal **−8 = "play to grab"** (was "not 1 measure"). HIL: the multi-measure success/phase pins
     live in `test_capture_while_playing.py` (note-for-note), stopped-refusal pins in `test_capture_span.py`.
+- **As-heard windowing — Phase GRID/HEARD (2026-06-28, by-ear GO; HIL 234/234).** A while-PLAYING grab
+  was always loop-aligned (the window ends at the last loop downbeat). `SEQ_CORE_CaptureSpanTape` gained
+  a `phase` param: **HEARD** ends the window at the **playhead** — `win_end = SEQ_BPM_TickGet()`,
+  `win_start = now − k·P` — keeping the last k bars exactly as heard (the deposit restarts from the grab
+  phase, rotated off the downbeat). No loop-boundary math (immune to the mid-run start phase the GRID
+  branches assume) and no step-snap (every source-grid note's residual offset is the same constant `< tps`,
+  so the floor bucket recovers each step; the capture is one inaudible sub-step global shift). **Tape only**
+  — `SEQ_CORE_CaptureSpanReSim` (STOPPED) has no playhead, stays GRID; `phase` is threaded through
+  `SEQ_CORE_CaptureSpan` / `CaptureSpanToSlotTrack` (chord path ignores it). **`P` for synch tracks** is the
+  global measure `gspm·96`, NOT `spm·tps` (a SYNCH_TO_MEASURE track reports `spm=gspm` but keeps its own
+  `step_length`, so `spm·tps` doubles the period on a foreign clkdiv → wrong window; the fix matches GRID's
+  marker span — adversarial-review catch, design §9 2026-06-28). UI: GP2 encoder on the Capture page
+  (`SEQ_CORE_CAP_PHASE_GRID/HEARD`, default GRID). `CMD_CAPTURE_SPAN` reply extended with
+  win_start/win_end/tps (5×7-bit LE / 2×7-bit) so the note-for-note pin derives the deposit rotation
+  race-free. HIL: `test_capture_as_heard.py` (4 pins). `CaptureMaxK` unchanged (HEARD reaches no further
+  back than GRID).
 
 ### Persistence is versioned at the per-track level
 

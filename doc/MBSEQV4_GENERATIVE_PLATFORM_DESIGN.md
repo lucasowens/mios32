@@ -3037,7 +3037,7 @@ and chasing it reframed the whole deposit:
   chord transpose-loss. The first would have re-shipped the very bug the redesign removes.
 - **UNCOMMITTED at GO**; HIL capture family 71/71 + 4 new canvas pins green, full suite re-run before
   commit. **Deferred (none block):** #3 "as-heard" windowing for note grabs (still loop-aligned;
-  phase-offset = mid-run-restart edge); cross-pattern canvas uses the LIVE dst
+  phase-offset = mid-run-restart edge) — **SHIPPED 2026-06-28, see below**; cross-pattern canvas uses the LIVE dst
   geometry not the slot's stored; NOTE-mode multi-bar grabs stay mono (the melodic-mono fence — chords
   only via the chord path or `Save`). Plan: `doc/plans/2026-06-27-unified-capture.md` (retire on commit).
 
@@ -3054,6 +3054,29 @@ static to seq_pattern.c). The re-sim/tape drive can't leak the SOURCE group: gen
 during the drive runs inside the `seq_generator_in_automutate` window, which suppresses drift.
 +32 B text, 0 RAM. New per-group drift mask on the `CMD_PHRASE_META` DRIFT_QUERY reply (`reply[3]`,
 backward-compatible) drives a 3-pin regression (`test_capture_drift_leak.py`, one per verb).
+
+**2026-06-28 — As-heard windowing (deferred #3) — SHIPPED, by-ear GO + HIL 234/234.** A
+while-PLAYING note grab was always **loop-aligned** (GRID): the tape window kept the last k
+COMPLETE loops, ending at the last loop downbeat. New **Phase: GRID/HEARD** toggle (GP2 encoder
+on the Capture page, **default GRID** — nothing existing changes feel). HEARD ends the window at
+the **playhead**: `win_end = now`, `win_start = now − k·P` — the last k bars exactly as they
+sounded, the deposit restarting from the grab phase (rotated off the source downbeat). It is
+*simpler* than the loop-aligned code (purely relative to `now`, no boundary math → immune to the
+mid-run synch/restart phase GRID assumes) and needs **no step-snap**: every source-grid note's
+residual offset within its dst step is the same constant `< tps`, so the floor bucketing recovers
+each step exactly — the capture is one global sub-step phase shift, inaudible on the dst's own
+grid. **Tape (PLAYING) only**; STOPPED re-sim has no playhead and stays GRID. `phase` threads
+through `SEQ_CORE_CaptureSpan` / `CaptureSpanToSlotTrack` (chord path ignores it — copies the
+chord-index loop directly, melodic-only); legacy gestures pass GRID. `CaptureMaxK` needs no
+change (HEARD reaches no further back than GRID). The `CMD_CAPTURE_SPAN` reply gained
+win_start/win_end/tps so the note-for-note pin derives the deposit rotation race-free.
+**Adversarial review (§2 #8, 4 lenses → verify) caught one real defect:** HEARD computed `P =
+spm·tps`, which for a SYNCH_TO_MEASURE track on a foreign clkdiv doubles the period (`spm` is
+forced to gspm while `tps` stays the track's own step_length) → wrong span/phase; GRID is immune
+(reads real `bar_start` markers). **Fixed:** synch tracks derive `P = gspm·96` (the global
+measure, = GRID's marker span). HIL: 4 new pins (`test_capture_as_heard.py` — window-ends-at-
+playhead, note-for-note rotation, GRID-still-aligned, slot-track phase threading). Plan +
+review write-up: `doc/plans/2026-06-28-as-heard-windowing.md`.
 
 ---
 

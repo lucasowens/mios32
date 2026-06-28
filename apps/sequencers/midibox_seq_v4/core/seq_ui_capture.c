@@ -54,6 +54,7 @@ static u8 cap_grab;         // 0 = Save (living), 1..K = capture that many bars
 static u8 cap_letter;       // dst pattern letter A..H (0..7), or 0xff = current
 static u8 cap_num;          // dst pattern number 1..8 (0..7), or 0xff = current
 static u8 cap_fit_mode;     // SEQ_CORE_CAP_FIT_FILL / _LOOP — how the grab fills the dst canvas (GP1 encoder)
+static u8 cap_phase;        // SEQ_CORE_CAP_PHASE_GRID / _HEARD — where a PLAYING grab's window ends (GP2 encoder)
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -119,7 +120,7 @@ static void Commit(void)
       return;
     }
     u8 k = (cap_grab > maxk) ? maxk : cap_grab;
-    r = SEQ_CORE_CaptureSpanToSlotTrack(src, dst, dst_bank, dst_pattern, k, cap_fit_mode);
+    r = SEQ_CORE_CaptureSpanToSlotTrack(src, dst, dst_bank, dst_pattern, k, cap_fit_mode, cap_phase);
   }
 
   if( r >= 0 ) {
@@ -160,6 +161,16 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
     u8 m = (incrementer > 0) ? SEQ_CORE_CAP_FIT_LOOP : SEQ_CORE_CAP_FIT_FILL;
     if( m == cap_fit_mode ) return 0;
     cap_fit_mode = m;
+    return 1;
+  }
+
+  // GP2 encoder = the Phase toggle: CW -> HEARD (window ends at the playhead — keep the
+  // last N bars exactly as heard, deposited restarts mid-run), CCW -> GRID (loop-aligned,
+  // the shipped default). Only bites a PLAYING N-bar grab; STOPPED re-sim is always GRID.
+  if( encoder == SEQ_UI_ENCODER_GP2 ) {
+    u8 p = (incrementer > 0) ? SEQ_CORE_CAP_PHASE_HEARD : SEQ_CORE_CAP_PHASE_GRID;
+    if( p == cap_phase ) return 0;
+    cap_phase = p;
     return 1;
   }
 
@@ -238,11 +249,15 @@ static s32 LCD_Handler(u8 high_prio)
   if( high_prio )
     return 0;   // only the bar needs the frequent refresh; the rest is static
 
-  // ---- line 0, LCD-R: source + destination + pattern (static, low-prio) ----
+  // ---- line 0, LCD-R: source + destination + pattern + grab phase (static, low-prio).
+  //      Ph: GRID (loop-aligned) / HEARD (window ends at the playhead, GP2 encoder); "--"
+  //      for Save and stopped (the STOPPED re-sim is always GRID — HEARD needs a playhead).
   u8 letter = ResolveLetter() & 0x07;
   u8 num    = ResolveNum() & 0x07;
+  const char *ph = (cap_grab == 0 || !SEQ_BPM_IsRunning()) ? "--"
+                   : (cap_phase == SEQ_CORE_CAP_PHASE_HEARD ? "HEARD" : "GRID");
   char r0[44];
-  sprintf(r0, "Src:T%d  Dst:T%d  Pat:%c%d", SrcTrack() + 1, cap_dst_track + 1, 'A' + letter, num + 1);
+  sprintf(r0, "Src:T%d Dst:T%d Pat:%c%d Ph:%s", SrcTrack() + 1, cap_dst_track + 1, 'A' + letter, num + 1, ph);
   SEQ_LCD_CursorSet(40, 0);
   Print40(r0);
 
@@ -293,6 +308,7 @@ s32 SEQ_UI_CAPTURE_Enter(void)
   cap_dst_track = SEQ_UI_VisibleTrackGet();   // default dst = the source track (same-track)
   cap_grab      = 0;                          // Save (pass-through)
   cap_fit_mode  = SEQ_CORE_CAP_FIT_FILL;      // default: grid-locked fill
+  cap_phase     = SEQ_CORE_CAP_PHASE_GRID;    // default: loop-aligned (shipped behaviour)
   cap_letter    = 0xff;                       // current dst-group letter
   cap_num       = 0xff;                       // current dst-group number
   seq_ui_sel_view = SEQ_UI_SEL_VIEW_TRACKS;   // B-row = destination track picker

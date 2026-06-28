@@ -961,6 +961,7 @@ class Board:
         dst_pattern: int,
         k: int = 0,
         fit_mode: int = 0,
+        phase: int = 0,
         timeout: float = 5.0,
     ) -> bool:
         """Trigger capture → track-in-slot, saved.
@@ -970,7 +971,8 @@ class Board:
         SEQ_CORE_CaptureSpanToSlotTrack — captures the live RECORDER (last k loops,
         the while-playing "capture to another pattern" path) instead. Both persist
         to SD preserving the slot's other tracks and restore the dst group's live
-        RAM afterward. Returns True on success.
+        RAM afterward. fit_mode 0=FILL/1=LOOP; phase 0=GRID (loop-aligned)/1=HEARD
+        (window ends at the playhead — PLAYING span only). Returns True on success.
         """
         if not 0 <= src_track <= 15:
             raise ValueError(f"src_track out of range: {src_track}")
@@ -984,11 +986,16 @@ class Board:
             raise ValueError(f"k out of range: {k}")
         if fit_mode not in (0, 1):
             raise ValueError(f"fit_mode must be 0 (FILL) or 1 (LOOP): {fit_mode}")
+        if phase not in (0, 1):
+            raise ValueError(f"phase must be 0 (GRID) or 1 (HEARD): {phase}")
         body = [src_track, dst_track, dst_bank, dst_pattern]
         if k > 0:
             body.append(k)
-            if fit_mode:
-                body.append(fit_mode)  # 6th byte: LOOP (FILL is the default, omitted)
+            # 6th byte (fit_mode) must be present if a 7th (phase) follows it.
+            if fit_mode or phase:
+                body.append(fit_mode)
+            if phase:
+                body.append(phase)  # 7th byte: HEARD (GRID is the default, omitted)
         since = time.monotonic() - self._t0
         self.send_raw(frame(CMD_CAPTURE_TO_SLOT_TRACK, bytes(body)))
         payload = self.wait_for_sysex(CMD_CAPTURE_TO_SLOT_TRACK, timeout=timeout, since=since)
@@ -1663,17 +1670,44 @@ class Board:
             "max_k": max_k,
         }
 
-    def capture_span(self, src: int, k: int, dst: int, timeout: float = 4.0) -> int:
+    def capture_span(
+        self, src: int, k: int, dst: int, phase: int = 0, full: bool = False, timeout: float = 4.0
+    ):
         """Retroactively capture the last `k` bars of the ring's track `src` into
-        the static `dst` track (re-sim + record emitted stream). Transport must be
-        STOPPED. Returns the firmware status byte (0x01 = ok; 0x10|code = refusal,
-        e.g. 0x13 transport-running, 0x14 wrong-track, 0x18 not-whole-measure)."""
+        the static `dst` track. STOPPED → re-sim (always GRID); PLAYING → live tape.
+        phase 0=GRID (loop-aligned, default) / 1=HEARD (window ends at the playhead —
+        PLAYING only). Returns the firmware status byte (0x01 = ok; 0x10|code = refusal,
+        e.g. 0x13 transport-running, 0x14 wrong-track, 0x18 not-whole-measure) by default;
+        with full=True returns {status, win_start, win_end, tps} — the grab's absolute tick
+        window + src ticks-per-step, from which the as-heard rotation is derived race-free."""
+        if phase not in (0, 1):
+            raise ValueError(f"phase must be 0 (GRID) or 1 (HEARD): {phase}")
         since = time.monotonic() - self._t0
-        self.send_raw(frame(CMD_CAPTURE_SPAN, bytes([0x00, src & 0x0f, k & 0x7f, dst & 0x0f])))
+        body = [0x00, src & 0x0f, k & 0x7f, dst & 0x0f]
+        if phase:
+            body.append(phase)  # 5th byte: HEARD (GRID is the default, omitted)
+        self.send_raw(frame(CMD_CAPTURE_SPAN, bytes(body)))
         payload = self.wait_for_sysex(CMD_CAPTURE_SPAN, timeout=timeout, since=since)
         if len(payload) < 3:
             raise RuntimeError(f"short CAPTURE_SPAN reply: {payload!r}")
-        return payload[2]
+        if not full:
+            return payload[2]
+
+        def _u32(o: int) -> int:  # 5x7-bit little-endian
+            return (
+                payload[o]
+                | (payload[o + 1] << 7)
+                | (payload[o + 2] << 14)
+                | (payload[o + 3] << 21)
+                | (payload[o + 4] << 28)
+            )
+
+        return {
+            "status": payload[2],
+            "win_start": _u32(3) if len(payload) >= 8 else None,
+            "win_end": _u32(8) if len(payload) >= 13 else None,
+            "tps": (payload[13] | (payload[14] << 7)) if len(payload) >= 15 else None,
+        }
 
     def pattern_change(
         self, group: int, bank: int, pattern: int, timeout: float = 6.0

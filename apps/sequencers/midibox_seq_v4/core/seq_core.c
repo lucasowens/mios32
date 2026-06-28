@@ -245,6 +245,12 @@ static u8  seq_core_cap_suppress_journal = 0; // 1 while CaptureSpanToSlotTrack 
                                               // dst is fully restored, so its undo arm must
                                               // not clobber the user's one-deep journal
 
+// HIL telemetry: the absolute tick window the last CaptureSpanTape grab used (+ src tps),
+// surfaced via SEQ_CORE_CaptureSpanWinStart/WinEnd/Tps for the as-heard phase pin.
+static u32 seq_core_cap_span_win_start = 0;
+static u32 seq_core_cap_span_win_end   = 0;
+static u16 seq_core_cap_span_tps       = 0;
+
 /////////////////////////////////////////////////////////////////////////////
 // Retroactive CAPTURE — while-PLAYING live tape (2026-06-20)
 //
@@ -2491,7 +2497,7 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
 // refusal codes as the re-sim path (negative; see CMD_CAPTURE_SPAN), plus -10 = the
 // span scrolled out of the tape ring (too many notes buffered). Runs under
 // MUTEX_MIDIOUT so the tape read + dst write are serialized against the live engine.
-s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
+s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || dst >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( src == dst ) return -2;
@@ -2532,9 +2538,32 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
 
   MUTEX_MIDIOUT_TAKE;
 
-  // Window [win_start, win_end) in absolute ticks = the last k COMPLETE loops.
+  // Window [win_start, win_end) in absolute ticks. GRID (the two branches below) = the
+  // last k COMPLETE loops, ending at the last loop downbeat. HEARD = the last k bars
+  // ending at the PLAYHEAD (this branch).
   u32 win_start, win_end;
-  if( gspm != 0 && (spm % gspm) == 0 ) {
+  if( phase == SEQ_CORE_CAP_PHASE_HEARD ) {
+    // AS-HEARD (2026-06-28): end the window at the playhead — keep the last k bars
+    // exactly as they sounded, not snapped to a loop downbeat. Purely relative to `now`:
+    // no loop-boundary math, so it is immune to the mid-run synch/restart phase the GRID
+    // branches assume (tick-0 alignment). The deposit's step 0 = (now - k*P), so the
+    // captured loop RESTARTS from the grab phase (off the source downbeat). No step-snap
+    // is needed — every source-grid note's residual offset within its dst step is the
+    // same constant (< tps), so the floor bucketing recovers each step index exactly; the
+    // whole capture is one global sub-step phase shift, inaudible on the dst's own grid.
+    if( k > (SEQ_CORE_CAP_RING_BARS - 1) ) { MUTEX_MIDIOUT_GIVE; return -6; } // match the MaxK cap
+    // Audible loop period in ticks. A SYNCH_TO_MEASURE track force-resets to step 0 every
+    // GLOBAL measure (CaptureLoopSteps reports gspm for it), so its loop is one global
+    // measure = gspm*96 ticks (the re-sim's `B`) REGARDLESS of its own clkdiv. spm*tps uses
+    // the track's step_length, which doubles the period for a foreign clkdiv (e.g. an 8th-
+    // note synch track) — wrong window + phase. Use the global measure for synch so HEARD
+    // matches GRID's bar_start-marker span (whole-measure branch); spm*tps for any other.
+    u32 P = seq_cc_trk[src].clkdiv.SYNCH_TO_MEASURE ? ((u32)gspm * 96) : ((u32)spm * tps);
+    u32 now = (u32)SEQ_BPM_TickGet();
+    if( (u32)k * P > now ) { MUTEX_MIDIOUT_GIVE; return -6; } // not enough played yet
+    win_end   = now;
+    win_start = now - (u32)k * P;                            // reaches no further back than GRID
+  } else if( gspm != 0 && (spm % gspm) == 0 ) {
     // Whole-measure track (Approach B): the per-measure bar markers line up loop-by-loop.
     // n = frames per loop = spm/gspm. Resolve the loop-aligned offsets against a single ctr
     // read (the engine advances ctr while PLAYING). Reduces to {win_o=k, win_e=0} for n==1
@@ -2564,6 +2593,12 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
     win_end   = loops_done * P;
     win_start = win_end - (u32)k * P;
   }
+
+  // Stash the window for HIL telemetry (the as-heard phase pin reads it back via
+  // SEQ_CORE_CaptureSpanWinStart/WinEnd/Tps to compute the deposit's rotation race-free).
+  seq_core_cap_span_win_start = win_start;
+  seq_core_cap_span_win_end   = win_end;
+  seq_core_cap_span_tps       = tps;
 
   // Eviction guard: when the tape ring is full, the head slot holds the OLDEST retained
   // event. If even that is newer than the window start, the span's early notes scrolled
@@ -2626,12 +2661,17 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k)
 // Dispatcher: while PLAYING grab the live tape (the recorded performance); while STOPPED
 // re-simulate the generative frame (regenerate the unrecorded past). The gesture + the
 // testctrl verb call this so the same "grab last K bars" surface works in both states.
-s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k)
+s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k, u8 phase)
 {
   if( SEQ_BPM_IsRunning() )
-    return SEQ_CORE_CaptureSpanTape(src, dst, k);
-  return SEQ_CORE_CaptureSpanReSim(src, dst, k);
+    return SEQ_CORE_CaptureSpanTape(src, dst, k, phase);
+  return SEQ_CORE_CaptureSpanReSim(src, dst, k); // STOPPED: no playhead -> always GRID
 }
+
+// HIL telemetry accessors for the last CaptureSpanTape grab (see CMD_CAPTURE_SPAN).
+u32 SEQ_CORE_CaptureSpanWinStart(void) { return seq_core_cap_span_win_start; }
+u32 SEQ_CORE_CaptureSpanWinEnd(void)   { return seq_core_cap_span_win_end; }
+u16 SEQ_CORE_CaptureSpanTps(void)      { return seq_core_cap_span_tps; }
 
 
 // Static snapshot of the destination group (4 tracks) for the capture-to-slot-
@@ -2961,7 +3001,7 @@ static s32 SEQ_CORE_CaptureChordWindow(u8 src, u8 k,
 // -3 wrong transport, -4 ring not recording src, -8 multi-bar stopped) or the
 // PatternRead status on failure (dst group left restored).
 /////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k, u8 fit_mode)
+s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pattern, u8 k, u8 fit_mode, u8 phase)
 {
   if( src >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
@@ -3010,6 +3050,8 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   u8  cap_par_layers = 0, cap_num_instr = 0, cap_trg_layers = 0, cap_trg_instr = 0;
 
   if( src_is_chord ) {
+    // Chord path copies the source chord-index loop directly (no tape, no playhead), so it
+    // is inherently loop-aligned — `phase` does not apply (melodic-only as-heard, plan §open).
     status = SEQ_CORE_CaptureChordWindow(src, k,
                                          &cap_par_steps, &cap_par_layers, &cap_num_instr,
                                          &cap_trg_steps, &cap_trg_layers, &cap_trg_instr);
@@ -3017,7 +3059,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
     // Non-destructive to src; writes scratch (in the snapshotted group). Suppress the
     // internal undo arm — scratch is restored, so it must not eat the user's one-deep.
     seq_core_cap_suppress_journal = 1;
-    status = SEQ_CORE_CaptureSpan(src, scratch, k);
+    status = SEQ_CORE_CaptureSpan(src, scratch, k, phase); // GRID/HEARD: where the tape window ends
     seq_core_cap_suppress_journal = 0;
     if( status >= 0 ) {
       // scratch holds the captured loop (static, ResetGen'd, length=k*spm, clock pinned to

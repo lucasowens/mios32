@@ -466,6 +466,15 @@ one place to grab what's playing and drop it somewhere:
     hiccup is exactly the thing.
   - **LOOP** — loops at *exactly* the length you grabbed, so an odd loop **drifts**
     against everything else (polymeter).
+- **GP2 encoder = `Phase`** (shown on the LCD-right, **while playing**):
+  - **GRID** (default) — the grab is **loop-aligned**: you keep the last whole loops,
+    ending on the downbeat, so the capture sits square on the grid. The natural partner
+    to `FILL`.
+  - **HEARD** — the grab ends **right where you are**: you keep the last few bars
+    *exactly as you just heard them*, and the deposit restarts from the moment you
+    grabbed (so it can sit off the downbeat). The natural partner to `LOOP` — catch a
+    phrase the instant it sounds right. (Only applies while playing; a stopped grab is
+    always GRID. Melodic tracks; chord tracks always grab loop-aligned.)
 
 The grab **never changes the destination track's max length** — it paints into the
 length that's already there, so you never get a broken/`!!!` length. Commit

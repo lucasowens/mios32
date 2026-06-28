@@ -1385,9 +1385,10 @@ static void cmd_capture_to_slot_track(mios32_midi_port_t port, const u8 *payload
   u8 dst_pattern = payload[3] & 0x7f;
   u8 k           = (plen >= 5) ? (payload[4] & 0x7f) : 0;
   u8 fit_mode    = (plen >= 6) ? (payload[5] & 0x01) : 0; // FILL default; LOOP=1 (span path only)
+  u8 phase       = (plen >= 7) ? (payload[6] & 0x01) : 0; // GRID default; HEARD=1 (span+PLAYING only)
 
   s32 r = (k > 0)
-    ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst_bank, dst_pattern, k, fit_mode)
+    ? SEQ_CORE_CaptureSpanToSlotTrack(src_track, dst_track, dst_bank, dst_pattern, k, fit_mode, phase)
     : SEQ_CORE_CaptureToSlotTrack(src_track, dst_track, dst_bank, dst_pattern);
 
   reply[0] = src_track;
@@ -2145,7 +2146,10 @@ static void cmd_render_perf(mios32_midi_port_t port, u8 *payload, u32 len)
 
 
 // CMD_CAPTURE_SPAN — retroactive CAPTURE. sub-op:
-//   0 = CAPTURE  [0, src, k, dst]  -> [src, dst, status]
+//   0 = CAPTURE  [0, src, k, dst, phase?]
+//         -> [src, dst, status, win_start(5x7 LE), win_end(5x7 LE), tps(2x7 LE)]
+//         phase (optional 5th byte): 0 GRID (loop-aligned, default), 1 HEARD (window ends at
+//           the playhead — PLAYING tape only; STOPPED re-sim is always GRID).
 //         status: 0x01 ok; else 0x10|(-r) for the SEQ_CORE_CaptureSpan dispatcher's
 //         refusal — STOPPED re-sims the frame, PLAYING grabs the live tape:
 //         (-1 args, -2 src==dst, -3 wrong-state, -4 wrong-track, -5 frame-overflow,
@@ -2153,6 +2157,9 @@ static void cmd_render_perf(mios32_midi_port_t port, u8 *payload, u32 len)
 //          -10 tape-scrolled-out, -11 arp, -12 trg-overflow). k is in LOOPS of src. While
 //          PLAYING the tape grabs ANY length (Approach A, tick-period slice); while STOPPED
 //          the re-sim is whole-measure only (-8 -> play to grab; the A2 phase kernel lifts it).
+//         win_start/win_end = the absolute tick window the grab used (the last tape grab's;
+//          stale on a refusal); tps = src ticks-per-step. The as-heard pin derives the deposit
+//          rotation from these without a read-vs-grab race.
 //   1 = RING QUERY [1]            -> [ring_track, ring_depth, ring_overflow, max_k]
 static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
 {
@@ -2160,11 +2167,23 @@ static void cmd_capture_span(mios32_midi_port_t port, u8 *payload, u32 len)
   switch( subop ) {
     case 0x00: {
       if( len < 4 ) { u8 r[3] = {0,0,0x02}; send_reply(port, CMD_CAPTURE_SPAN, r, 3); return; }
-      u8 src = payload[1] & 0x0f;
-      u8 k   = payload[2] & 0x7f;
-      u8 dst = payload[3] & 0x0f;
-      s32 r = SEQ_CORE_CaptureSpan(src, dst, k);
-      u8 reply[3] = { src, dst, (u8)((r == 0) ? 0x01 : (0x10 | ((-r) & 0x0f))) };
+      u8 src   = payload[1] & 0x0f;
+      u8 k     = payload[2] & 0x7f;
+      u8 dst   = payload[3] & 0x0f;
+      u8 phase = (len >= 5) ? (payload[4] & 0x01) : 0; // GRID default; HEARD=1 (PLAYING tape only)
+      s32 r = SEQ_CORE_CaptureSpan(src, dst, k, phase);
+      // Reply: [src, dst, status, win_start(5x7 LE), win_end(5x7 LE), tps(2x7 LE)]. The
+      // window + tps let the as-heard phase pin compute the deposit's rotation race-free
+      // (HEARD's win_end tracks the playhead; GRID's win_start sits on a loop downbeat).
+      u32 ws = SEQ_CORE_CaptureSpanWinStart();
+      u32 we = SEQ_CORE_CaptureSpanWinEnd();
+      u16 tps = SEQ_CORE_CaptureSpanTps();
+      u8 reply[15] = {
+        src, dst, (u8)((r == 0) ? 0x01 : (0x10 | ((-r) & 0x0f))),
+        (u8)((ws >> 0) & 0x7f), (u8)((ws >> 7) & 0x7f), (u8)((ws >> 14) & 0x7f), (u8)((ws >> 21) & 0x7f), (u8)((ws >> 28) & 0x0f),
+        (u8)((we >> 0) & 0x7f), (u8)((we >> 7) & 0x7f), (u8)((we >> 14) & 0x7f), (u8)((we >> 21) & 0x7f), (u8)((we >> 28) & 0x0f),
+        (u8)((tps >> 0) & 0x7f), (u8)((tps >> 7) & 0x7f),
+      };
       send_reply(port, CMD_CAPTURE_SPAN, reply, sizeof(reply));
     } break;
 
