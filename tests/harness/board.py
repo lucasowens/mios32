@@ -88,6 +88,7 @@ from .sysex import (
     CMD_TRANSPORT,
     CMD_CAPTURE_PERF,
     CMD_RENDER_PERF,
+    CMD_SWITCH_PERF,
     RNG_SEED_GEN_GET,
     RNG_SEED_GEN_SET,
     RNG_SEED_TRV_GET,
@@ -1577,6 +1578,71 @@ class Board:
             "freeze_fraction": (gap / wall) if wall else 0.0,
             "ui_gap": ui_gap,
             "ui_freeze_fraction": (ui_gap / wall) if wall else 0.0,
+        }
+
+    def switch_perf_arm(self, timeout: float = 1.0) -> bool:
+        """Arm the PASSIVE pattern-switch freeze probe: reset the +4 emission and +2 UI
+        service-gap peaks and stamp t0. Then trigger a switch (pattern_change() while playing,
+        or a physical GP-button switch on the unit), let a bar+ elapse so the synched boundary
+        fires the writeback+load on the +4 task, and call switch_perf_read(). Returns the
+        firmware is_running flag (the gap is only meaningful while the transport is running)."""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SWITCH_PERF, bytes([0x00])))
+        payload = self.wait_for_sysex(CMD_SWITCH_PERF, timeout=timeout, since=since)
+        if len(payload) < 2 or payload[0] != CMD_STATUS_OK:
+            raise RuntimeError(f"SWITCH_PERF arm failed: {payload!r}")
+        return bool(payload[1])
+
+    def switch_perf_read(self, timeout: float = 2.0) -> dict:
+        """Read the passive pattern-switch freeze probe (measure-first for the save/switch
+        hiccup). Call switch_perf_arm(), trigger a switch, let a bar+ pass, then this. Returns:
+          - running:        transport running at read time (gap meaningless if not)
+          - wall_ticks:     bpm_tick advance since arm = window length in ISR ticks
+          - max_gap:        peak +4 EMISSION service gap in ISR ticks = the AUDIBLE freeze
+          - freeze_fraction:max_gap / wall_ticks — the clock-fix target (~0 = clock stayed alive)
+          - ui_gap:         peak +2 UI service gap in ISR ticks = the visual (LED/LCD) freeze
+          - ui_freeze_fraction: ui_gap / wall_ticks
+          - measured_ms:    seq_core_pattern_switch_measured_ms — the (stale/65.5ms-saturating)
+                            stopwatch value the forward-delay margin is sized from (Amplifier 1)
+          - margin_ms:      SEQ_CORE_SwitchMarginMs() — effective forward-delay margin
+          - pre_ticks:      pre-fire window in ISR ticks, clamped to 95/96 of a beat (Amplifier 2:
+                            cannot cover a ~290ms write)
+          - grid16ths:      floor-clamped effective switch-quantize grid in 16ths"""
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_SWITCH_PERF, bytes([0x01])))
+        payload = self.wait_for_sysex(CMD_SWITCH_PERF, timeout=timeout, since=since)
+        if len(payload) < 24:
+            raise RuntimeError(f"short SWITCH_PERF read ({len(payload)}b): {payload!r}")
+        if payload[0] != CMD_STATUS_OK:
+            raise RuntimeError(f"SWITCH_PERF read status {payload[0]:#04x}: {payload!r}")
+
+        def u5(o: int) -> int:
+            return (
+                payload[o]
+                | (payload[o + 1] << 7)
+                | (payload[o + 2] << 14)
+                | (payload[o + 3] << 21)
+                | (payload[o + 4] << 28)
+            )
+
+        wall = u5(2)
+        gap = u5(7)
+        ui_gap = u5(12)
+        measured_ms = payload[17] | (payload[18] << 7)
+        margin_ms = payload[19] | (payload[20] << 7)
+        pre_ticks = payload[21]
+        grid16ths = payload[22] | (payload[23] << 7)
+        return {
+            "running": bool(payload[1]),
+            "wall_ticks": wall,
+            "max_gap": gap,
+            "freeze_fraction": (gap / wall) if wall else 0.0,
+            "ui_gap": ui_gap,
+            "ui_freeze_fraction": (ui_gap / wall) if wall else 0.0,
+            "measured_ms": measured_ms,
+            "margin_ms": margin_ms,
+            "pre_ticks": pre_ticks,
+            "grid16ths": grid16ths,
         }
 
     def render_perf_reset(self, timeout: float = 1.0) -> None:

@@ -83,6 +83,7 @@ CMD_TRANSPORT = 0x4a  # genuinely start/stop the master transport (play-button p
 CMD_TRACK_NOTE_INIT = 0x49  # build a melodic Note track w/ Note/Vel/Length/Roll layers (precise-gate HIL)
 CMD_CAPTURE_PERF = 0x48  # capture-while-performing freeze probe — fire phrase capture, report emission-task stall
 CMD_RENDER_PERF = 0x46  # all-16 force-dirty render-cost probe — DWT-timed per-track render, report duty + emission gap
+CMD_SWITCH_PERF = 0x44  # passive pattern-switch freeze probe — sub-op: 0=arm, 1=read (+4/+2 gap + margin state)
 CMD_COPY_TRACK_LIVE_TO_SLOT = 0x45  # SAVE the LIVING track (CC+par/trg+generators) into a slot's track, preserve others
 
 # CMD_RNG_SEED sub-ops — keep in sync with seq_testctrl.c

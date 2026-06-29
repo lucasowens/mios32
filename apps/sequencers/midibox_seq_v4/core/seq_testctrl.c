@@ -148,6 +148,16 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 // transport for a window, then READ. payload [mode] (0=reset+anchor, 1=read). 0x46 is the
 // last free low opcode below CMD_TRACK_REDO (0x47).
 #define CMD_RENDER_PERF          0x46
+
+// CMD_SWITCH_PERF — PASSIVE pattern-switch freeze probe (measure-first for the save/switch
+// hiccup). Unlike CMD_CAPTURE_PERF (which fires its own capture inline), this only arms/reads
+// the existing +4 emission and +2 UI service-gap probes, so it measures the freeze of WHATEVER
+// switch lands in the window — a harness CMD_PATTERN_CHANGE while playing, OR a physical
+// GP-button switch (the live trigger). Adds ZERO code to the switch critical section => no
+// observer effect (contrast seq_pattern_log_load_time, which does a blocking SysEx send INSIDE
+// portENTER_CRITICAL and lengthens the very freeze it reports). 0x44 = free low opcode.
+// payload[0] = sub-op: 0 = ARM, 1 = READ.
+#define CMD_SWITCH_PERF          0x44
 // CMD_COPY_TRACK_LIVE_TO_SLOT — the SAVE (keep-generators) companion to
 // CMD_CAPTURE_TO_SLOT_TRACK (FLATTEN). Deposits the LIVING src_track (full CC +
 // source par/trg + generator pool) into dst_track of slot (bank, pattern),
@@ -2082,6 +2092,68 @@ static void pack_u32_le7(u8 *dst, u32 v)
 }
 
 
+// CMD_SWITCH_PERF — passive pattern-switch freeze probe. ARM resets the +4 emission and +2 UI
+// service-gap peaks and stamps t0; READ reports the peaks over the window plus the forward-delay
+// margin subsystem state. Drive it: ARM -> (trigger a switch: harness pattern_change while
+// playing, or a physical GP-button switch) -> let a bar+ elapse so the boundary fires -> READ.
+//   max_gap   = peak +4 emission service gap in ISR ticks across the window = the AUDIBLE freeze.
+//   ui_gap    = peak +2 UI service gap in ISR ticks = the visual (LED/LCD/button) freeze.
+//   measured_ms / margin_ms / pre_ticks / grid16ths expose the margin subsystem: measured_ms is
+//   fed by a stale/65.5ms-saturating stopwatch (Amplifier 1); pre_ticks is clamped to 95 within
+//   one 96-tick window so it cannot cover a ~290ms write (Amplifier 2); grid16ths is the floor-
+//   clamped effective switch grid.
+// payload[0] = sub-op: 0 = ARM -> reply [status, running];
+//   1 = READ -> reply [status, running, wall(5x7), max_gap(5x7), ui_gap(5x7),
+//                      measured_ms(2x7), margin_ms(2x7), pre_ticks(1), grid16ths(2x7)]  (24 bytes)
+static u32 switch_perf_t0;
+static void cmd_switch_perf(mios32_midi_port_t port, u8 *payload, u32 len)
+{
+  if( len < 1 ) {
+    u8 reply[2] = { 0x02, 0x00 }; // malformed
+    send_reply(port, CMD_SWITCH_PERF, reply, sizeof(reply));
+    return;
+  }
+
+  u8 running = SEQ_BPM_IsRunning() ? 1 : 0;
+
+  if( payload[0] == 0x00 ) { // ARM
+    SEQ_CORE_ServiceGapReset();
+    SEQ_CORE_UIServiceGapReset();
+    switch_perf_t0 = SEQ_BPM_TickGet();
+    u8 reply[2] = { 0x01, running };
+    send_reply(port, CMD_SWITCH_PERF, reply, sizeof(reply));
+    return;
+  }
+
+  // READ
+  u32 wall      = SEQ_BPM_TickGet() - switch_perf_t0;
+  u32 gap       = SEQ_CORE_ServiceMaxGapGet();
+  u32 ui_gap    = SEQ_CORE_UIServiceMaxGapGet();
+  u16 measured  = seq_core_pattern_switch_measured_ms;
+  u16 margin    = SEQ_CORE_SwitchMarginMs();
+  u32 pre_ticks = SEQ_BPM_TicksFor_mS(margin);
+  if( pre_ticks >= 95 )
+    pre_ticks = 95; // mirror the fire-predicate clamp in SEQ_CORE_Tick (seq_core.c)
+  u16 grid16    = SEQ_CORE_SwitchQuantize16ths();
+
+  u8 reply[24];
+  memset(reply, 0, sizeof(reply));
+  reply[0] = 0x01;
+  reply[1] = running;
+  pack_u32_le7(&reply[2],  wall);
+  pack_u32_le7(&reply[7],  gap);
+  pack_u32_le7(&reply[12], ui_gap);
+  reply[17] = measured & 0x7f;
+  reply[18] = (measured >> 7) & 0x7f;
+  reply[19] = margin & 0x7f;
+  reply[20] = (margin >> 7) & 0x7f;
+  reply[21] = pre_ticks & 0x7f;
+  reply[22] = grid16 & 0x7f;
+  reply[23] = (grid16 >> 7) & 0x7f;
+  send_reply(port, CMD_SWITCH_PERF, reply, sizeof(reply));
+}
+
+
 // CMD_RENDER_PERF — all-16 force-dirty render-cost probe (play-readiness #5). See the define
 // above. Render time is measured with the DWT cycle counter (does NOT collide with the TIM6
 // stopwatch SEQ_STATISTICS brackets this handler with). RESET also re-anchors the emission
@@ -2881,6 +2953,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_RENDER_PERF:
             cmd_render_perf(port, payload_buf, payload_len);
+            break;
+          case CMD_SWITCH_PERF:
+            cmd_switch_perf(port, payload_buf, payload_len);
             break;
           default:
             // Unknown command — silently ignore. Harness will time out and surface
