@@ -207,6 +207,7 @@ typedef union {
     u16 INVERT_MUTE_LEDS:1;
     u16 ALL_FOR_STEP_VIEW_ONLY:1;
     u16 CV_DISPLAY_BIPOLAR:1;
+    u16 INSSEL_DRUM_TRIGGER:1;
   };
 } seq_ui_options_t;
 

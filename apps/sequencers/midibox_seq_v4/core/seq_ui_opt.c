@@ -76,8 +76,9 @@
 #define ITEM_MENU_SHORTCUTS               32
 #define ITEM_SCREEN_SAVER                 33
 #define ITEM_RECALL_MODE                  34
+#define ITEM_INSSEL_DRUM_TRIGGER          35
 
-#define NUM_OF_ITEMS                      35
+#define NUM_OF_ITEMS                      36
 
 
 static const char *item_text[NUM_OF_ITEMS][2] = {
@@ -256,6 +257,11 @@ static const char *item_text[NUM_OF_ITEMS][2] = {
     "Phrase Recall lands Seamless",
     NULL, // disabled = Quantize (bar restart); enabled = Seamless
   },
+
+  {//<-------------------------------------->
+    "Instrument-Sel buttons (Drum tracks):",
+    NULL, // Trigger drums (SELECT=pick) / Select instrument
+  },
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -352,6 +358,14 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 	seq_core_options.RECALL_SEAMLESS = (incrementer > 0) ? 1 : 0;
       else
 	seq_core_options.RECALL_SEAMLESS ^= 1;
+      ui_store_file_required = 1;
+      return 1;
+
+    case ITEM_INSSEL_DRUM_TRIGGER:
+      if( incrementer )
+	seq_ui_options.INSSEL_DRUM_TRIGGER = (incrementer > 0) ? 1 : 0;
+      else
+	seq_ui_options.INSSEL_DRUM_TRIGGER ^= 1;
       ui_store_file_required = 1;
       return 1;
 
@@ -989,6 +1003,15 @@ static s32 LCD_Handler(u8 high_prio)
 
   case ITEM_RECALL_MODE: {
     enabled_value = seq_core_options.RECALL_SEAMLESS;
+  } break;
+
+  ///////////////////////////////////////////////////////////////////////////
+  case ITEM_INSSEL_DRUM_TRIGGER: {
+    if( ui_cursor_flash ) {
+      SEQ_LCD_PrintSpaces(40);
+    } else {
+      SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_DRUM_TRIGGER ? "Trigger drums (SELECT=pick)" : "Select instrument", 40);
+    }
   } break;
 
   ///////////////////////////////////////////////////////////////////////////

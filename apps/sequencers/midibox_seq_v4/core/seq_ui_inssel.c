@@ -22,6 +22,8 @@
 
 #include "seq_trg.h"
 #include "seq_cc.h"
+#include "seq_live.h"
+#include "seq_record.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -74,6 +76,44 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Live drum trigger
+//
+// When the "Instrument-Sel buttons play drums" option is enabled and a Drum
+// track is selected, a GP button taps the matching drum instrument like a pad:
+// preview is always heard, and the hit is recorded into the track when REC is
+// armed. (Holding SELECT while tapping silently re-targets the selected
+// instrument instead - handled in the button callback below.)
+//
+// Routing mirrors a live note arriving over MIDI-in (see seq_midi_in.c): record
+// when armed (which also monitors per the FWD_MIDI option), otherwise preview.
+/////////////////////////////////////////////////////////////////////////////
+#define INSSEL_DRUM_TRIGGER_VELOCITY 100
+
+static s32 SEQ_UI_INSSEL_DrumTrigger(u8 track, u8 drum, s32 depressed)
+{
+  if( drum >= SEQ_TRG_NumInstrumentsGet(track) )
+    return -1; // no such drum instrument in this kit
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  mios32_midi_package_t p;
+  p.ALL = 0;
+  p.type = NoteOn;
+  p.event = NoteOn;
+  p.chn = tcc->midi_chn;
+  p.note = tcc->lay_const[0*16 + drum]; // drum instrument note (SEQ_CC_LAY_CONST_A1 + drum)
+  p.velocity = depressed ? 0x00 : INSSEL_DRUM_TRIGGER_VELOCITY;
+
+  if( seq_record_state.ENABLED )
+    SEQ_RECORD_Receive(p, track);
+  else
+    SEQ_LIVE_PlayEvent(track, p);
+
+  return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Local button callback function
 // Should return:
 //   1 if value has been changed
@@ -82,17 +122,36 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_UI_INSSEL_Button_Handler(seq_ui_button_t button, s32 depressed)
 {
-  if( depressed ) return 0; // ignore when button depressed
-
 #if 0
   // leads to: comparison is always true due to limited range of data type
   if( button >= SEQ_UI_BUTTON_GP1 && button <= SEQ_UI_BUTTON_GP16 ) {
 #else
   if( button <= SEQ_UI_BUTTON_GP16 ) {
 #endif
-    // -> same handling like for encoders
+    u8 visible_track = SEQ_UI_VisibleTrackGet();
+    u8 event_mode = SEQ_CC_Get(visible_track, SEQ_CC_MIDI_EVENT_MODE);
+
+    // drum-trigger surface (option enabled, Drum track):
+    if( seq_ui_options.INSSEL_DRUM_TRIGGER && event_mode == SEQ_EVENT_MODE_Drum ) {
+      if( seq_ui_button_state.SELECT_PRESSED ) {
+	// SELECT held: silently re-target the selected instrument (press only, stay on page)
+	if( depressed ) return 0;
+	if( (u8)button < SEQ_TRG_NumInstrumentsGet(visible_track) ) {
+	  ui_selected_instrument = (u8)button;
+	  return 1;
+	}
+	return 0;
+      }
+      // default: play (and record when armed) the drum like a pad
+      return SEQ_UI_INSSEL_DrumTrigger(visible_track, (u8)button, depressed);
+    }
+
+    // classic behaviour: select instrument (act on press only)
+    if( depressed ) return 0;
     return Encoder_Handler(button, 0);
   }
+
+  if( depressed ) return 0; // remaining buttons ignored when released
 
   switch( button ) {
     case SEQ_UI_BUTTON_Select:
@@ -100,12 +159,10 @@ s32 SEQ_UI_INSSEL_Button_Handler(seq_ui_button_t button, s32 depressed)
 
     case SEQ_UI_BUTTON_Right:
     case SEQ_UI_BUTTON_Up:
-      if( depressed ) return 0; // ignore when button depressed
       return Encoder_Handler(SEQ_UI_ENCODER_Datawheel, 1);
 
     case SEQ_UI_BUTTON_Left:
     case SEQ_UI_BUTTON_Down:
-      if( depressed ) return 0; // ignore when button depressed
       return Encoder_Handler(SEQ_UI_ENCODER_Datawheel, -1);
   }
 
