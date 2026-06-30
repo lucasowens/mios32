@@ -114,6 +114,55 @@ static s32 SEQ_UI_INSSEL_DrumTrigger(u8 track, u8 drum, s32 depressed)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// One-row isomorphic keyboard (melodic tracks)
+//
+// When the play option is enabled and a melodic (non-Drum) track is selected,
+// the 16 GP buttons become a chromatic row: GP1 = base, each next button +1
+// semitone. Plays like a pad (preview always; records into the track when REC
+// is armed) via the same MIDI-in-style routing as the drum surface, so the
+// track's transpose / force-to-scale / FX apply to both the live preview and
+// playback of the recorded note. SELECT + GP1/GP16 shift the whole row by an
+// octave (handled in the button callback below).
+/////////////////////////////////////////////////////////////////////////////
+#define INSSEL_KBD_BASE_NOTE 0x3c            // GP1 at octave offset 0 (middle C)
+#define INSSEL_KBD_TRIGGER_VELOCITY 100
+
+static s8 inssel_kbd_octave = 0;             // -5..+5, shifted via SELECT + GP1/GP16
+static u8 inssel_kbd_note_held[16];          // exact note emitted per key, for note-off
+
+static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  u8 note;
+  if( depressed ) {
+    note = inssel_kbd_note_held[key]; // release the exact note we started (octave may have moved)
+  } else {
+    int n = (int)INSSEL_KBD_BASE_NOTE + 12*(int)inssel_kbd_octave + (int)key;
+    if( n < 0 )   n = 0;
+    if( n > 127 ) n = 127;
+    note = (u8)n;
+    inssel_kbd_note_held[key] = note;
+  }
+
+  mios32_midi_package_t p;
+  p.ALL = 0;
+  p.type = NoteOn;
+  p.event = NoteOn;
+  p.chn = tcc->midi_chn;
+  p.note = note;
+  p.velocity = depressed ? 0x00 : INSSEL_KBD_TRIGGER_VELOCITY;
+
+  if( seq_record_state.ENABLED )
+    SEQ_RECORD_Receive(p, track);
+  else
+    SEQ_LIVE_PlayEvent(track, p);
+
+  return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // Local button callback function
 // Should return:
 //   1 if value has been changed
@@ -131,19 +180,31 @@ s32 SEQ_UI_INSSEL_Button_Handler(seq_ui_button_t button, s32 depressed)
     u8 visible_track = SEQ_UI_VisibleTrackGet();
     u8 event_mode = SEQ_CC_Get(visible_track, SEQ_CC_MIDI_EVENT_MODE);
 
-    // drum-trigger surface (option enabled, Drum track):
-    if( seq_ui_options.INSSEL_DRUM_TRIGGER && event_mode == SEQ_EVENT_MODE_Drum ) {
-      if( seq_ui_button_state.SELECT_PRESSED ) {
-	// SELECT held: silently re-target the selected instrument (press only, stay on page)
-	if( depressed ) return 0;
-	if( (u8)button < SEQ_TRG_NumInstrumentsGet(visible_track) ) {
-	  ui_selected_instrument = (u8)button;
-	  return 1;
+    // play surface (option enabled): GP buttons play the track instead of selecting
+    if( seq_ui_options.INSSEL_DRUM_TRIGGER ) {
+      if( event_mode == SEQ_EVENT_MODE_Drum ) {
+	// Drum track: pad row. SELECT+tap silently re-targets the instrument (stay on page).
+	if( seq_ui_button_state.SELECT_PRESSED ) {
+	  if( depressed ) return 0;
+	  if( (u8)button < SEQ_TRG_NumInstrumentsGet(visible_track) ) {
+	    ui_selected_instrument = (u8)button;
+	    return 1;
+	  }
+	  return 0;
 	}
-	return 0;
+	// default: play (and record when armed) the drum like a pad
+	return SEQ_UI_INSSEL_DrumTrigger(visible_track, (u8)button, depressed);
+      } else {
+	// Melodic track: one-row chromatic keyboard.
+	// SELECT + GP1/GP16 shift the whole row down/up an octave (press only).
+	if( seq_ui_button_state.SELECT_PRESSED ) {
+	  if( depressed ) return 0;
+	  if( button == SEQ_UI_BUTTON_GP1  && inssel_kbd_octave > -5 ) { --inssel_kbd_octave; return 1; }
+	  if( button == SEQ_UI_BUTTON_GP16 && inssel_kbd_octave <  5 ) { ++inssel_kbd_octave; return 1; }
+	  return 0;
+	}
+	return SEQ_UI_INSSEL_KbdNote(visible_track, (u8)button, depressed);
       }
-      // default: play (and record when armed) the drum like a pad
-      return SEQ_UI_INSSEL_DrumTrigger(visible_track, (u8)button, depressed);
     }
 
     // classic behaviour: select instrument (act on press only)

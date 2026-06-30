@@ -259,8 +259,8 @@ static const char *item_text[NUM_OF_ITEMS][2] = {
   },
 
   {//<-------------------------------------->
-    "Instrument-Sel buttons (Drum tracks):",
-    NULL, // Trigger drums (SELECT=pick) / Select instrument
+    "Instrument-Sel buttons PLAY the track:",
+    NULL, // Drum pads + 1-row keyboard / Select instrument
   },
 };
 
@@ -1010,7 +1010,7 @@ static s32 LCD_Handler(u8 high_prio)
     if( ui_cursor_flash ) {
       SEQ_LCD_PrintSpaces(40);
     } else {
-      SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_DRUM_TRIGGER ? "Trigger drums (SELECT=pick)" : "Select instrument", 40);
+      SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_DRUM_TRIGGER ? "Drum pads + 1-row keyboard" : "Select instrument", 40);
     }
   } break;
 
