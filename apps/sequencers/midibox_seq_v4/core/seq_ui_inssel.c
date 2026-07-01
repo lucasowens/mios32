@@ -21,9 +21,14 @@
 #include "seq_hwcfg.h"
 
 #include "seq_trg.h"
+#include "seq_par.h"
 #include "seq_cc.h"
 #include "seq_live.h"
 #include "seq_record.h"
+#include "seq_core.h"
+#include "seq_scale.h"
+#include "seq_bpm.h"
+#include "tasks.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -117,46 +122,186 @@ static s32 SEQ_UI_INSSEL_DrumTrigger(u8 track, u8 drum, s32 depressed)
 // One-row isomorphic keyboard (melodic tracks)
 //
 // When the play option is enabled and a melodic (non-Drum) track is selected,
-// the 16 GP buttons become a chromatic row: GP1 = base, each next button +1
-// semitone. Plays like a pad (preview always; records into the track when REC
-// is armed) via the same MIDI-in-style routing as the drum surface, so the
-// track's transpose / force-to-scale / FX apply to both the live preview and
-// playback of the recorded note. SELECT + GP1/GP16 shift the whole row by an
-// octave (handled in the button callback below).
+// the 16 GP buttons become a playable row. Three layouts (OPT "Melodic keyboard
+// layout"):
+//   - Chromatic (isomorphic): GP1 = base, each next button +1 semitone.
+//   - Scale degrees: GP1 = the track's tonic, each next button = the next note
+//     of the track's scale.
+//   - Diatonic chords: GP_k = the in-key triad stacked on scale degree k
+//     (degrees k, k+2, k+4) - up to 3 notes per button.
+// Scale/root are read live via SEQ_CORE_FTS_GetScaleAndRoot. Plays like a pad
+// (preview always; records into the track when REC is armed) via the same
+// MIDI-in-style routing as the drum surface, so the track's transpose /
+// force-to-scale / FX apply to both the live preview and playback. SELECT +
+// GP1/GP16 shift the whole row by an octave.
 /////////////////////////////////////////////////////////////////////////////
-#define INSSEL_KBD_BASE_NOTE 0x3c            // GP1 at octave offset 0 (middle C)
+#define INSSEL_KBD_BASE_NOTE 0x3c            // GP1 at octave offset 0 (middle C); multiple of 12
 #define INSSEL_KBD_TRIGGER_VELOCITY 100
+#define INSSEL_KBD_MAX_NOTES 3               // up to a triad per key
 
 static s8 inssel_kbd_octave = 0;             // -5..+5, shifted via SELECT + GP1/GP16
-static u8 inssel_kbd_note_held[16];          // exact note emitted per key, for note-off
+static u8 inssel_kbd_held[16][INSSEL_KBD_MAX_NOTES]; // notes held per key (0xff = empty), for note-off
+static u8 inssel_kbd_recorded_chord[16];     // 1 = this key's press used the atomic chord recorder (release just stops the live monitor)
 
-static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
+// play one note live on the track's port/chn (preview / monitoring)
+static void SEQ_UI_INSSEL_PlayLive(u8 track, u8 note, u8 velocity)
 {
-  seq_cc_trk_t *tcc = &seq_cc_trk[track];
-
-  u8 note;
-  if( depressed ) {
-    note = inssel_kbd_note_held[key]; // release the exact note we started (octave may have moved)
-  } else {
-    int n = (int)INSSEL_KBD_BASE_NOTE + 12*(int)inssel_kbd_octave + (int)key;
-    if( n < 0 )   n = 0;
-    if( n > 127 ) n = 127;
-    note = (u8)n;
-    inssel_kbd_note_held[key] = note;
-  }
-
   mios32_midi_package_t p;
   p.ALL = 0;
   p.type = NoteOn;
   p.event = NoteOn;
-  p.chn = tcc->midi_chn;
+  p.chn = seq_cc_trk[track].midi_chn;
   p.note = note;
-  p.velocity = depressed ? 0x00 : INSSEL_KBD_TRIGGER_VELOCITY;
+  p.velocity = velocity;
+  SEQ_LIVE_PlayEvent(track, p);
+}
 
-  if( seq_record_state.ENABLED )
+// emit one note: record via the stock path when armed (dead-accurate for single
+// notes, incl. length capture), else live preview
+static void SEQ_UI_INSSEL_EmitNote(u8 track, u8 note, u8 velocity)
+{
+  if( seq_record_state.ENABLED ) {
+    mios32_midi_package_t p;
+    p.ALL = 0;
+    p.type = NoteOn;
+    p.event = NoteOn;
+    p.chn = seq_cc_trk[track].midi_chn;
+    p.note = note;
+    p.velocity = velocity;
     SEQ_RECORD_Receive(p, track);
-  else
-    SEQ_LIVE_PlayEvent(track, p);
+  } else {
+    SEQ_UI_INSSEL_PlayLive(track, note, velocity);
+  }
+}
+
+// Record a whole chord onto ONE step, atomically. The stock per-note record path
+// (SEQ_RECORD_Receive x3) races the running sequencer: the step advances between
+// the notes, scattering a triad across steps / dropping the last one. Here we pick
+// the target step once (matching how single notes land - the record-quantize
+// forward-snap while playing) and write all notes to that step's note layers under
+// the MIDI-out mutex, so the chord always lands together.
+static void SEQ_UI_INSSEL_RecordChord(u8 track, u8 *notes, u8 num_notes, u8 velocity)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_core_trk_t *t = &seq_core_trk[track];
+
+  // determine the target step
+  u16 step;
+  if( SEQ_BPM_IsRunning() && !seq_record_options.STEP_RECORD ) {
+    step = t->step;
+    // snap forward to the next step if we're within the record-quantize window
+    u32 now = SEQ_BPM_TickGet();
+    u8 shift = 0;
+    if( t->timestamp_next_step_ref <= now ) {
+      shift = 1;
+    } else {
+      s32 diff = (s32)t->timestamp_next_step_ref - (s32)now;
+      s32 tolerance = ((s32)t->step_length * (s32)seq_record_quantize) / 100;
+      if( diff < tolerance )
+	shift = 1;
+    }
+    if( shift ) {
+      int ns = (int)step + 1;
+      if( ns > tcc->length )
+	ns = tcc->loop;
+      step = (u16)ns;
+    }
+  } else {
+    step = ui_selected_step;
+  }
+
+  u8 num_p_layers = SEQ_PAR_NumLayersGet(track);
+  u8 ni = 0;
+  int pl;
+
+  MUTEX_MIDIOUT_TAKE;
+  // fill the note-type layers with the chord notes; clear any extra note layers
+  for(pl=0; pl<num_p_layers; ++pl) {
+    u8 lt = tcc->lay_const[0*16 + pl];
+    if( lt == SEQ_PAR_Type_Note || lt == SEQ_PAR_Type_Chord1 || lt == SEQ_PAR_Type_Chord2 || lt == SEQ_PAR_Type_Chord3 ) {
+      SEQ_PAR_Set(track, step, pl, 0, (ni < num_notes) ? notes[ni] : 0x00);
+      if( ni < num_notes )
+	++ni;
+    }
+  }
+  SEQ_TRG_GateSet(track, step, 0, 1);
+  SEQ_TRG_AccentSet(track, step, 0, 0);
+  if( tcc->link_par_layer_velocity >= 0 )
+    SEQ_PAR_Set(track, step, tcc->link_par_layer_velocity, 0, velocity);
+  MUTEX_MIDIOUT_GIVE;
+}
+
+static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  int i;
+
+  if( depressed ) {
+    // release exactly the notes we started (octave/scale/layout may have moved meanwhile).
+    // A chord that was recorded atomically was only monitored live -> just stop the live
+    // note; everything else goes back through the same path that started it.
+    u8 as_chord = inssel_kbd_recorded_chord[key];
+    inssel_kbd_recorded_chord[key] = 0;
+    for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i) {
+      if( inssel_kbd_held[key][i] != 0xff ) {
+	if( as_chord )
+	  SEQ_UI_INSSEL_PlayLive(track, inssel_kbd_held[key][i], 0x00);
+	else
+	  SEQ_UI_INSSEL_EmitNote(track, inssel_kbd_held[key][i], 0x00);
+	inssel_kbd_held[key][i] = 0xff;
+      }
+    }
+    return 0;
+  }
+
+  // press: build the note list for this key
+  u8 notes[INSSEL_KBD_MAX_NOTES];
+  u8 num_notes = 0;
+
+  if( seq_ui_options.INSSEL_KBD_SCALE_DEGREE || seq_ui_options.INSSEL_KBD_CHORD ) {
+    u8 scale, root_selection, root;
+    SEQ_CORE_FTS_GetScaleAndRoot(track, seq_core_trk[track].step, 0, tcc, &scale, &root_selection, &root);
+    int base = (int)INSSEL_KBD_BASE_NOTE + 12*(int)inssel_kbd_octave + (int)root; // tonic in anchor octave
+    if( base < 0 )   base = 0;
+    if( base > 127 ) base = 127;
+
+    if( seq_ui_options.INSSEL_KBD_CHORD ) {
+      // diatonic triad on scale degree 'key' (degrees key, key+2, key+4)
+      notes[num_notes++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)key);
+      notes[num_notes++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)(key + 2));
+      notes[num_notes++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)(key + 4));
+    } else {
+      // single scale degree: GP_k = k scale steps above the tonic
+      notes[num_notes++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)key);
+    }
+  } else {
+    // chromatic isomorphic row: GP1 = base, +1 semitone per button
+    int n = (int)INSSEL_KBD_BASE_NOTE + 12*(int)inssel_kbd_octave + (int)key;
+    if( n < 0 )   n = 0;
+    if( n > 127 ) n = 127;
+    notes[num_notes++] = (u8)n;
+  }
+
+  // store the exact notes (for note-off)
+  for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i)
+    inssel_kbd_held[key][i] = 0xff;
+  for(i=0; i<num_notes; ++i)
+    inssel_kbd_held[key][i] = notes[i];
+
+  if( seq_record_state.ENABLED && num_notes > 1 ) {
+    // recording a chord: write the whole chord to one step atomically (the stock
+    // per-note record path races the running step and scatters/drops notes), then
+    // monitor it live so you still hear what you played.
+    SEQ_UI_INSSEL_RecordChord(track, notes, num_notes, INSSEL_KBD_TRIGGER_VELOCITY);
+    inssel_kbd_recorded_chord[key] = 1;
+    for(i=0; i<num_notes; ++i)
+      SEQ_UI_INSSEL_PlayLive(track, notes[i], INSSEL_KBD_TRIGGER_VELOCITY);
+  } else {
+    // single note, or preview-only: the proven per-note path
+    inssel_kbd_recorded_chord[key] = 0;
+    for(i=0; i<num_notes; ++i)
+      SEQ_UI_INSSEL_EmitNote(track, notes[i], INSSEL_KBD_TRIGGER_VELOCITY);
+  }
 
   return 0; // no error
 }
@@ -183,8 +328,11 @@ s32 SEQ_UI_INSSEL_Button_Handler(seq_ui_button_t button, s32 depressed)
     // play surface (option enabled): GP buttons play the track instead of selecting
     if( seq_ui_options.INSSEL_DRUM_TRIGGER ) {
       if( event_mode == SEQ_EVENT_MODE_Drum ) {
-	// Drum track: pad row. SELECT+tap silently re-targets the instrument (stay on page).
-	if( seq_ui_button_state.SELECT_PRESSED ) {
+	// Drum track: pad row. Holding INSTR while tapping silently re-targets the
+	// selected instrument; a bare tap plays. INS_SEL is the hold-mode INSTR
+	// latch (true only while the INSTR button is physically held), so this frees
+	// SELECT and matches the stock "INSTR + key = pick instrument" muscle memory.
+	if( seq_ui_button_state.INS_SEL ) {
 	  if( depressed ) return 0;
 	  if( (u8)button < SEQ_TRG_NumInstrumentsGet(visible_track) ) {
 	    ui_selected_instrument = (u8)button;
@@ -195,12 +343,21 @@ s32 SEQ_UI_INSSEL_Button_Handler(seq_ui_button_t button, s32 depressed)
 	// default: play (and record when armed) the drum like a pad
 	return SEQ_UI_INSSEL_DrumTrigger(visible_track, (u8)button, depressed);
       } else {
-	// Melodic track: one-row chromatic keyboard.
-	// SELECT + GP1/GP16 shift the whole row down/up an octave (press only).
+	// Melodic track: one-row keyboard. SELECT + GP1/GP16 shift the whole row
+	// down/up an octave (press only). Pop a transient readout so the shift is
+	// visible - it is otherwise silent until the next note is played.
 	if( seq_ui_button_state.SELECT_PRESSED ) {
 	  if( depressed ) return 0;
-	  if( button == SEQ_UI_BUTTON_GP1  && inssel_kbd_octave > -5 ) { --inssel_kbd_octave; return 1; }
-	  if( button == SEQ_UI_BUTTON_GP16 && inssel_kbd_octave <  5 ) { ++inssel_kbd_octave; return 1; }
+	  s8 prev_octave = inssel_kbd_octave;
+	  if( button == SEQ_UI_BUTTON_GP1  && inssel_kbd_octave > -5 ) --inssel_kbd_octave;
+	  if( button == SEQ_UI_BUTTON_GP16 && inssel_kbd_octave <  5 ) ++inssel_kbd_octave;
+	  if( inssel_kbd_octave != prev_octave ) {
+	    char buf[21];
+	    int mag = (inssel_kbd_octave < 0) ? -inssel_kbd_octave : inssel_kbd_octave;
+	    sprintf(buf, "Octave %c%d", (inssel_kbd_octave < 0) ? '-' : '+', mag);
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Keyboard transpose", buf);
+	    return 1;
+	  }
 	  return 0;
 	}
 	return SEQ_UI_INSSEL_KbdNote(visible_track, (u8)button, depressed);
@@ -314,6 +471,16 @@ s32 SEQ_UI_INSSEL_Init(u32 mode)
 
   // we want to show horizontal VU meters
   SEQ_LCD_InitSpecialChars(SEQ_LCD_CHARSET_HBars);
+
+  // mark all keyboard keys as not-held (0xff), so a release never emits a phantom note
+  {
+    int k, i;
+    for(k=0; k<16; ++k) {
+      inssel_kbd_recorded_chord[k] = 0;
+      for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i)
+	inssel_kbd_held[k][i] = 0xff;
+    }
+  }
 
   return 0; // no error
 }

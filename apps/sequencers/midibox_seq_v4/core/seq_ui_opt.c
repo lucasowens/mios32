@@ -77,8 +77,9 @@
 #define ITEM_SCREEN_SAVER                 33
 #define ITEM_RECALL_MODE                  34
 #define ITEM_INSSEL_DRUM_TRIGGER          35
+#define ITEM_INSSEL_KBD_LAYOUT            36
 
-#define NUM_OF_ITEMS                      36
+#define NUM_OF_ITEMS                      37
 
 
 static const char *item_text[NUM_OF_ITEMS][2] = {
@@ -262,6 +263,11 @@ static const char *item_text[NUM_OF_ITEMS][2] = {
     "Instrument-Sel buttons PLAY the track:",
     NULL, // Drum pads + 1-row keyboard / Select instrument
   },
+
+  {//<-------------------------------------->
+    "Melodic keyboard layout:",
+    NULL, // Scale degrees / Chromatic (isomorphic)
+  },
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -368,6 +374,21 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 	seq_ui_options.INSSEL_DRUM_TRIGGER ^= 1;
       ui_store_file_required = 1;
       return 1;
+
+    case ITEM_INSSEL_KBD_LAYOUT: {
+      // 0 = chromatic, 1 = scale degrees, 2 = diatonic chords
+      u8 layout = seq_ui_options.INSSEL_KBD_CHORD ? 2 : (seq_ui_options.INSSEL_KBD_SCALE_DEGREE ? 1 : 0);
+      if( incrementer ) {
+	if( SEQ_UI_Var8_Inc(&layout, 0, 2, incrementer) < 1 )
+	  return 0;
+      } else {
+	layout = (layout + 1) % 3;
+      }
+      seq_ui_options.INSSEL_KBD_SCALE_DEGREE = (layout == 1) ? 1 : 0;
+      seq_ui_options.INSSEL_KBD_CHORD = (layout == 2) ? 1 : 0;
+      ui_store_file_required = 1;
+      return 1;
+    } break;
 
     case ITEM_PATTERN_RESEND_PC:
       if( incrementer )
@@ -1011,6 +1032,16 @@ static s32 LCD_Handler(u8 high_prio)
       SEQ_LCD_PrintSpaces(40);
     } else {
       SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_DRUM_TRIGGER ? "Drum pads + 1-row keyboard" : "Select instrument", 40);
+    }
+  } break;
+
+  ///////////////////////////////////////////////////////////////////////////
+  case ITEM_INSSEL_KBD_LAYOUT: {
+    if( ui_cursor_flash ) {
+      SEQ_LCD_PrintSpaces(40);
+    } else {
+      SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_KBD_CHORD ? "Diatonic chords (in key)" :
+				(seq_ui_options.INSSEL_KBD_SCALE_DEGREE ? "Scale degrees (in key)" : "Chromatic (isomorphic)"), 40);
     }
   } break;
 

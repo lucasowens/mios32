@@ -188,10 +188,10 @@ With **OPT → "Drum pads + 1-row keyboard"** on (`INSSEL_DRUM_TRIGGER`), the **
 the **INSTR** page becomes a playable surface — the first "get" of the fusion instrument.
 RECORD-armed = records into the track; else previews. (`seq_ui_inssel.c`)
 
-| Track type | GP row plays | SELECT + GP |
+| Track type | row plays | held-modifier + key |
 |---|---|---|
-| **Drum** | TR-909-style pads (one drum per GP), vel 100 on press | **SELECT + tap = silent retarget** of the selected instrument (stay on page) |
-| **Melodic** | a one-row keyboard; layout set by **OPT → "Melodic keyboard layout"** | **SELECT+GP1 / SELECT+GP16 = octave down / up** |
+| **Drum** | TR-909-style pads (one drum per key), vel 100 on press | **INSTR-held + tap = silent retarget** of the selected instrument (`INS_SEL`; bare tap plays). Frees SELECT. |
+| **Melodic** | a one-row keyboard; layout set by **OPT → "Melodic keyboard layout"** | **SELECT + GP1 / GP16 = octave down / up** (±5; transient "Octave ±n" readout) |
 
 Melodic layouts (`INSSEL_KBD_LAYOUT`, base = middle C `0x3c`):
 **Chromatic (isomorphic)** GP1=tonic +1 semitone/key · **Scale degrees (in key)** ·
@@ -233,8 +233,9 @@ The forward-looking layer — where new gestures can land, and what's already sa
 
 ### Saturated / contended controls (handle with care)
 - **SELECT ("Shift")** — the master modifier. Already gates UNDO/REDO, CHECKPOINT/REVERT,
-  morph-arm, INSSEL octave/retarget, layer-context copy/paste. New SELECT+X must not
-  collide with these and must respect the deliberate-two-button idiom.
+  morph-arm, INSSEL melodic-keyboard octave, layer-context copy/paste. (Drum-pad silent
+  retarget moved off SELECT to **INSTR-hold** — `INS_SEL` — to relieve this.) New SELECT+X
+  must not collide with these and must respect the deliberate-two-button idiom.
 - **GP row** — the most overloaded surface: steps, value-picker, capture/pull targets,
   drum pads/keyboard, morph bar, page-specific actions. Always context-gated by page +
   sel-view; new GP meanings need a clear page/sel-view scope.

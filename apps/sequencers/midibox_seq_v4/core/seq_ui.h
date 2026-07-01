@@ -208,6 +208,8 @@ typedef union {
     u16 ALL_FOR_STEP_VIEW_ONLY:1;
     u16 CV_DISPLAY_BIPOLAR:1;
     u16 INSSEL_DRUM_TRIGGER:1;
+    u16 INSSEL_KBD_SCALE_DEGREE:1;
+    u16 INSSEL_KBD_CHORD:1;
   };
 } seq_ui_options_t;
 
