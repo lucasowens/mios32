@@ -1436,11 +1436,16 @@ s32 SEQ_PATTERN_Handler(void)
   MIOS32_BOARD_LED_Set(0x00000001, 1);
 #endif
 
-  MUTEX_SDCARD_TAKE; // take SD Card Mutex before entering critical section, because within the section we won't get it anymore -> hangup
-  portENTER_CRITICAL();
-
+  // Tier-1 fix (2026-07-01 P1 #53): this used to wrap the whole write+load loop in
+  // MUTEX_SDCARD_TAKE + portENTER_CRITICAL. That masks BASEPRI-and-below for the
+  // entire SD I/O (tens of ms), which stalls the RTOS tick that wakes TASK_MIDI's
+  // 1ms cadence -- an audible clock/note freeze regardless of which task calls this
+  // Handler (synched mode calls it inline from the +4 emission task itself). Mirror
+  // SEQ_PATTERN_Change's immediate-load branch (above) and SnapshotRead: call
+  // WritebackIfDrifted/Load directly and let each take MUTEX_SDCARD internally,
+  // interrupts on throughout -- the SD mutex still serializes against other SD users.
   if( seq_pattern_log_load_time ) {
-    MIOS32_STOPWATCH_Reset(); // note: conflicts with SEQ_STATISTICS_Stopwatch, but can be accepted if executed in critical section
+    MIOS32_STOPWATCH_Reset(); // note: conflicts with SEQ_STATISTICS_Stopwatch, but accepted (soft heuristic, ratchet-max only)
   }
 
   for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
@@ -1451,7 +1456,13 @@ s32 SEQ_PATTERN_Handler(void)
       // anything replaces it. Must precede SEQ_PATTERN_Load (which updates
       // seq_pattern[group] to the incoming slot). The forward-delay margin
       // covers the added SD write (seq_core_pattern_switch_margin_ms).
-      SEQ_PATTERN_WritebackIfDirty(group);
+      //
+      // Drift-gated (Tier-1 (b), was WritebackIfDirty): only a deliberate edit
+      // (phrase_drift) writes back on switch -- ambient generator wander is not
+      // auto-saved (matches the recall-freeze cure's rationale, design §9
+      // 2026-06-22). Cuts how often the ~290ms SD write fires at all, on top of
+      // the write no longer masking interrupts.
+      SEQ_PATTERN_WritebackIfDrifted(group);
 
       if( seq_core_options.PATTERN_MIXER_MAP_COUPLING ) {
 	u8 mixer_num = 0;
@@ -1497,9 +1508,7 @@ s32 SEQ_PATTERN_Handler(void)
     }
   }
   u32 stopwatch_delta = MIOS32_STOPWATCH_ValueGet();
-  portEXIT_CRITICAL();
-  MUTEX_SDCARD_GIVE;
-  
+
 #if LED_PERFORMANCE_MEASURING
   MIOS32_BOARD_LED_Set(0x00000001, 0);
 #endif
