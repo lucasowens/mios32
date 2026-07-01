@@ -213,11 +213,11 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
         // copy the name of group 1 pattern to all other pattern groups
         for(group=1; group<SEQ_CORE_NUM_GROUPS; ++group) {
 					//SEQ_LABEL_CopyPresetCategory(seq_pattern[0].num, (char *)&seq_pattern_name[group][0]);
-					sprintf(seq_pattern_name[group], seq_pattern_name[0]);
+					memcpy(seq_pattern_name[group], seq_pattern_name[0], 20); seq_pattern_name[group][20] = 0;
         }
 				
 				// copy the pattern name
-				sprintf(pattern_name, seq_pattern_name[0]);
+				memcpy(pattern_name, seq_pattern_name[0], 20); pattern_name[20] = 0;
 				
       }
 
@@ -348,7 +348,7 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 					}
 					
 					// copy the pattern name for future reference
-					sprintf(pattern_name, seq_pattern_name[0]);
+					memcpy(pattern_name, seq_pattern_name[0], 20); pattern_name[20] = 0;
 					
 					// getting back
 					seq_pattern_remix_map = remix_map_tmp;
@@ -435,9 +435,9 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 
 	  // copy the pattern name
 	  if (remix_mode == 1) {
-	    sprintf(pattern_name_copypaste, pattern_name);
+	    memcpy(pattern_name_copypaste, pattern_name, 20); pattern_name_copypaste[20] = 0;
 	  } else {
-	    sprintf(pattern_name_copypaste, seq_pattern_name[0]);
+	    memcpy(pattern_name_copypaste, seq_pattern_name[0], 20); pattern_name_copypaste[20] = 0;
 	  }
 
 	  
@@ -456,7 +456,7 @@ static s32 Button_Handler(seq_ui_button_t button, s32 depressed)
 	  SEQ_UI_PATTERN_MultiPaste(0);
 
 	  // paste the pattern name
-	  sprintf(seq_pattern_name[0], pattern_name_copypaste);
+	  memcpy(seq_pattern_name[0], pattern_name_copypaste, 20); seq_pattern_name[0][20] = 0;
 
 	  // paste mixer
 	  SEQ_UI_MIXER_Paste();

@@ -1917,9 +1917,16 @@ s32 SEQ_CORE_CaptureTrackOutput(u8 track, u8 *par_dst, u8 *trg_dst)
   if( par_dst == NULL || trg_dst == NULL ) return -1;
 
   // Full quiet render → OutputActive current across the track's used region.
+  // Fence render+flip against the +4 emission task's own RenderTrack for this track:
+  // both write the same inactive half and flip the same active_buf byte, so a concurrent
+  // pair tears the output mirror (wrong live pitch/gate) or double-flips to a stale half.
+  // The BPM ISR is above BASEPRI and keeps ticking; only the schedulable emission task —
+  // the writer we race — is excluded, for one bounded single-track render.
+  portENTER_CRITICAL();
   seq_render_touched_ms[track] = 0;
   seq_render_dirty[track] = 1;
   SEQ_CORE_RenderTrack(track);
+  portEXIT_CRITICAL();
 
   // The render refreshes only [0, used); the [used, MAX) tail is unused by any track read
   // (reads are bounded to the layout). Snapshot the fresh rendered region from the output
@@ -3492,9 +3499,13 @@ static s32 journal_restore(const seq_core_track_undo_t *u)
 
   // Force a full quiet render — same emission-freshness contract as the pull
   // verb (a sweep-regime tick could consume the dirty flag window-only).
+  // Fence render+flip against the +4 emission task's RenderTrack for this track
+  // (same double-buffer race as the capture primitive; UNDO/REDO can fire while playing).
+  portENTER_CRITICAL();
   seq_render_touched_ms[track] = 0;
   seq_render_dirty[track] = 1;
   SEQ_CORE_RenderTrack(track);
+  portEXIT_CRITICAL();
 
   // The restore is itself a track-grain load — mirror the pull verb's external
   // fan rows, or the rig stays on the prior track's program/bank and the

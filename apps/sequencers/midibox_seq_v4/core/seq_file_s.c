@@ -305,6 +305,16 @@ s32 SEQ_FILE_S_Open(char *session)
     return SEQ_FILE_S_ERR_READ;
   }
 
+  // reject a corrupt/foreign bank whose song_size is smaller than the song header:
+  // SongRead computes num_entries = (song_size - header)/step, which would underflow in unsigned
+  // arithmetic and overrun seq_song_steps[] with a multi-hundred-MB write otherwise.
+  if( info->header.song_size < sizeof(seq_file_s_song_header_t) ) {
+#if DEBUG_VERBOSE_LEVEL >= 1
+    DEBUG_MSG("[SEQ_FILE_S] invalid song_size %d (< header %d), bank rejected\n", info->header.song_size, (int)sizeof(seq_file_s_song_header_t));
+#endif
+    return SEQ_FILE_S_ERR_FORMAT;
+  }
+
   // bank is valid! :)
   info->valid = 1;
 
@@ -362,11 +372,15 @@ s32 SEQ_FILE_S_SongRead(u8 song)
   u16 song_size_max = (sizeof(seq_file_s_song_header_t) + sizeof(seq_song_step_t) * SEQ_SONG_NUM_STEPS);
   if( song_size > song_size_max )
     song_size = song_size_max;
+  if( song_size < sizeof(seq_file_s_song_header_t) )
+    song_size = sizeof(seq_file_s_song_header_t); // guard: prevent unsigned underflow of num_entries below
 
   // reading song steps
   u32 entry;
   seq_song_step_t *s = (seq_song_step_t *)&seq_song_steps[0];
   u32 num_entries = (song_size - sizeof(seq_file_s_song_header_t)) / sizeof(seq_song_step_t);
+  if( num_entries > SEQ_SONG_NUM_STEPS )
+    num_entries = SEQ_SONG_NUM_STEPS; // defensive clamp against seq_song_steps[] overrun
   for(entry=0; entry<num_entries; ++entry, ++s) {
     status |= FILE_ReadWord((u32 *)&s->ALL_L); // ensure proper endianess - therefore two word reads
     status |= FILE_ReadWord((u32 *)&s->ALL_H); // via functions which are aligning the bytes correctly

@@ -323,10 +323,15 @@ s32 SEQ_MIDI_OUT_Send(mios32_midi_port_t port, mios32_midi_package_t midi_packag
 
 
 #if SEQ_MIDI_OUT_SUPPORT_DELAY
-  if( port < PPQN_DELAY_NUM ) {
+  // NOTE: 0xffffffff is a "park forever" sentinel used by sustained/stretched Note-Off events
+  // (rescheduled later by SEQ_MIDI_OUT_ReSchedule). A positive port delay would wrap it past u32
+  // max into the near-future drain window and cut the note off instantly -> leave the sentinel alone.
+  if( port < PPQN_DELAY_NUM && timestamp != 0xffffffff ) {
     s8 delay = ppqn_delay[port];
     if( (delay < 0) && (timestamp < -delay) ) {
       timestamp = 0;
+    } else if( (delay > 0) && (timestamp > (0xffffffff - delay)) ) {
+      timestamp = 0xfffffffe; // saturate just below the sentinel instead of wrapping
     } else {
       timestamp += delay;
     }

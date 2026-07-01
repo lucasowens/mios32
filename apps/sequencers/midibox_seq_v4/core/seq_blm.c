@@ -891,6 +891,12 @@ static s32 SEQ_BLM_LED_UpdateKeyboardMode(void)
 
 static s32 SEQ_BLM_BUTTON_GP_KeyboardMode(u8 button_row, u8 button_column, u8 depressed)
 {
+  // the wire can deliver button_column up to 63 (32/64-column BLM), but the blm_keyboard_* arrays
+  // are only BLM_SCALAR_MASTER_NUM_ROWS wide and are indexed by button_column on every path below
+  // (velocity read/emit, note write) -> reject an out-of-range column up front to avoid OOB access.
+  if( button_column >= BLM_SCALAR_MASTER_NUM_ROWS )
+    return 0;
+
   u8 visible_track = SEQ_UI_VisibleTrackGet();
   seq_cc_trk_t *tcc = &seq_cc_trk[visible_track];
   u8 event_mode = SEQ_CC_Get(visible_track, SEQ_CC_MIDI_EVENT_MODE);

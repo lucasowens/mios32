@@ -184,7 +184,12 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
 	      DEBUG_MSG("[SEQ_FILE_T] ERROR %s %03x: missing parameter %d\n", addr_offset, parameter, i);
 #endif
 	    } else {
-	      if( flags.STEPS ) {
+	      // bound base+16 against the layer row so a crafted/corrupt preset offset can't wild-write
+	      // past seq_par/trg_layer_value[track][] (the earlier >= check only logs and falls through)
+	      if( flags.STEPS &&
+		  addr_offset >= 0 &&
+		  (par_layer ? (addr_offset + 16 <= SEQ_PAR_MAX_BYTES)
+			     : (addr_offset + 16 <= SEQ_TRG_MAX_BYTES)) ) {
 		if( par_layer ) {
 		  for(i=0; i<16; ++i)
 		    seq_par_layer_value[track][addr_offset + i] = values[i];
