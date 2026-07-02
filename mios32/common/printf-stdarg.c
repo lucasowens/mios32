@@ -32,11 +32,13 @@
 #include <stdarg.h>
 #include <mios32.h>
 
-static void printchar(char **str, int c)
+static void printchar(char **str, int c, char *end)
 {
   //	extern int putchar(int c);
 	
 	if (str) {
+		if (end && *str >= end)
+			return; // bounded output (see vsnprintf): drop chars which would overflow the buffer
 		**str = c;
 		++(*str);
 	}
@@ -48,7 +50,7 @@ static void printchar(char **str, int c)
 #define PAD_RIGHT 1
 #define PAD_ZERO 2
 
-static int prints(char **out, const char *string, int width, int pad)
+static int prints(char **out, const char *string, int width, int pad, char *end)
 {
 	register int pc = 0, padchar = ' ';
 
@@ -62,16 +64,16 @@ static int prints(char **out, const char *string, int width, int pad)
 	}
 	if (!(pad & PAD_RIGHT)) {
 		for ( ; width > 0; --width) {
-			printchar (out, padchar);
+			printchar (out, padchar, end);
 			++pc;
 		}
 	}
 	for ( ; *string ; ++string) {
-		printchar (out, *string);
+		printchar (out, *string, end);
 		++pc;
 	}
 	for ( ; width > 0; --width) {
-		printchar (out, padchar);
+		printchar (out, padchar, end);
 		++pc;
 	}
 
@@ -85,7 +87,7 @@ static int prints(char **out, const char *string, int width, int pad)
 #define PRINT_BUF_LEN 12
 #endif
 
-static int printi(char **out, int i, int b, int sg, int width, int pad, int letbase)
+static int printi(char **out, int i, int b, int sg, int width, int pad, int letbase, char *end)
 {
 	char print_buf[PRINT_BUF_LEN];
 	register char *s;
@@ -95,7 +97,7 @@ static int printi(char **out, int i, int b, int sg, int width, int pad, int letb
 	if (i == 0) {
 		print_buf[0] = '0';
 		print_buf[1] = '\0';
-		return prints (out, print_buf, width, pad);
+		return prints (out, print_buf, width, pad, end);
 	}
 
 	if (sg && b == 10 && i < 0) {
@@ -116,7 +118,7 @@ static int printi(char **out, int i, int b, int sg, int width, int pad, int letb
 
 	if (neg) {
 		if( width && (pad & PAD_ZERO) ) {
-			printchar (out, '-');
+			printchar (out, '-', end);
 			++pc;
 			--width;
 		}
@@ -125,10 +127,10 @@ static int printi(char **out, int i, int b, int sg, int width, int pad, int letb
 		}
 	}
 
-	return pc + prints (out, s, width, pad);
+	return pc + prints (out, s, width, pad, end);
 }
 
-static int print( char **out, const char *format, va_list args )
+static int print( char **out, char *end, const char *format, va_list args )
 {
 	register int width, pad;
 	register int pc = 0;
@@ -154,28 +156,28 @@ static int print( char **out, const char *format, va_list args )
 			}
 			if( *format == 's' ) {
 				register char *s = (char *)va_arg( args, int );
-				pc += prints (out, s?s:"(null)", width, pad);
+				pc += prints (out, s?s:"(null)", width, pad, end);
 				continue;
 			}
 			if( *format == 'd' ) {
-				pc += printi (out, va_arg( args, int ), 10, 1, width, pad, 'a');
+				pc += printi (out, va_arg( args, int ), 10, 1, width, pad, 'a', end);
 				continue;
 			}
 			if( *format == 'x' ) {
-				pc += printi (out, va_arg( args, int ), 16, 0, width, pad, 'a');
+				pc += printi (out, va_arg( args, int ), 16, 0, width, pad, 'a', end);
 				continue;
 			}
 			if( *format == 'X' ) {
-				pc += printi (out, va_arg( args, int ), 16, 0, width, pad, 'A');
+				pc += printi (out, va_arg( args, int ), 16, 0, width, pad, 'A', end);
 				continue;
 			}
 			if( *format == 'u' ) {
-				pc += printi (out, va_arg( args, int ), 10, 0, width, pad, 'a');
+				pc += printi (out, va_arg( args, int ), 10, 0, width, pad, 'a', end);
 				continue;
 			}
 			#ifdef PRINT_SUPPORT_BINARY
 			if( *format == 'b' ) {
-				pc += printi (out, va_arg( args, int ), 2, 0, width, pad, 'A');
+				pc += printi (out, va_arg( args, int ), 2, 0, width, pad, 'A', end);
 				continue;
 			}
 			#endif
@@ -183,13 +185,13 @@ static int print( char **out, const char *format, va_list args )
 				/* char are converted to int then pushed on the stack */
 				scr[0] = (char)va_arg( args, int );
 				scr[1] = '\0';
-				pc += prints (out, scr, width, pad);
+				pc += prints (out, scr, width, pad, end);
 				continue;
 			}
 		}
 		else {
 		out:
-			printchar (out, *format);
+			printchar (out, *format, end);
 			++pc;
 		}
 	}
@@ -203,13 +205,13 @@ int printf(const char *format, ...)
         va_list args;
         
         va_start( args, format );
-        return print( 0, format, args );
+        return print( 0, 0, format, args );
 }
 
 // TK: added for alternative parameter passing
 int vprintf(const char *format, va_list args)
 {
-  return print( 0, format, args );
+  return print( 0, 0, format, args );
 }
 
 int sprintf(char *out, const char *format, ...)
@@ -217,7 +219,7 @@ int sprintf(char *out, const char *format, ...)
         va_list args;
         
         va_start( args, format );
-        return print( &out, format, args );
+        return print( &out, 0, format, args );
 }
 
 // TK: added for alternative parameter passing
@@ -225,7 +227,24 @@ int vsprintf(char *out, const char *format, va_list args)
 {
   char *_out;
   _out = out;
-  return print( &_out, format, args );
+  return print( &_out, 0, format, args );
+}
+
+// bounded version: in distance to vsprintf never writes more than count bytes
+// (incl. terminating zero) to out - the output is truncated instead.
+// Returns the number of chars which would have been written (like C99).
+// count == 0 writes nothing and returns 0.
+int vsnprintf(char *out, size_t count, const char *format, va_list args)
+{
+  char *_out;
+  
+  if( count == 0 ) {
+    va_end( args );   // print() owns va_end on every other path; this bypass must match
+    return 0;
+  }
+
+  _out = out;
+  return print( &_out, out + count - 1, format, args );
 }
 
 
@@ -233,10 +252,8 @@ int snprintf( char *buf, size_t count, const char *format, ... )
 {
         va_list args;
         
-        ( void ) count;
-        
         va_start( args, format );
-        return print( &buf, format, args );
+        return vsnprintf( buf, count, format, args );
 }
 
 

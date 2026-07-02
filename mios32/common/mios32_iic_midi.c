@@ -208,7 +208,7 @@ s32 MIOS32_IIC_MIDI_ScanInterfaces(void)
       s32 error = -1;
 
       while( error < 0 && retries-- ) {
-	s32 error = MIOS32_IIC_Transfer(MIOS32_IIC_MIDI_PORT, IIC_Write, MIOS32_IIC_MIDI_ADDR_BASE + 2*iic_port, NULL, 0);
+	error = MIOS32_IIC_Transfer(MIOS32_IIC_MIDI_PORT, IIC_Write, MIOS32_IIC_MIDI_ADDR_BASE + 2*iic_port, NULL, 0);
 	if( !error )
 	  error = MIOS32_IIC_TransferWait(MIOS32_IIC_MIDI_PORT);
 	if( !error )
@@ -454,12 +454,6 @@ static s32 _MIOS32_IIC_MIDI_PackageReceive(u8 iic_port, mios32_midi_package_t *p
     error = MIOS32_IIC_TransferWait(MIOS32_IIC_MIDI_PORT);
 
   if( !error ) {
-    error = MIOS32_MIDI_SendPackageToRxCallback(IIC0 + iic_port, *package);
-    if( error )
-      return error < 0 ? -4 : 0; // don't forward error if package has been filtered
-  }
-
-  if( !error ) {
     package->type  = buffer[0];
     package->evnt0 = buffer[1];
     package->evnt1 = buffer[2];
@@ -472,6 +466,14 @@ static s32 _MIOS32_IIC_MIDI_PackageReceive(u8 iic_port, mios32_midi_package_t *p
 
   // release IIC port
   MIOS32_IIC_TransferFinished(MIOS32_IIC_MIDI_PORT);
+
+  // forward package to Rx callback AFTER it has been filled from buffer[]
+  // (and after the IIC port has been released, so the callback can't hold up the bus)
+  if( !error ) {
+    s32 callback_status = MIOS32_MIDI_SendPackageToRxCallback(IIC0 + iic_port, *package);
+    if( callback_status )
+      error = (callback_status < 0) ? -4 : -1; // Rx callback error / package has been filtered -> don't forward to caller
+  }
 
   return error;
 #endif

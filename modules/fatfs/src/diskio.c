@@ -96,7 +96,8 @@ DRESULT disk_read (
       MIOS32_MIDI_SendDebugMessage("[disk_read] sector %d (#%d/%d)\n", sector+i, i+1, count);
 #endif
 
-      if( MIOS32_SDCARD_SectorRead(sector + i, buff + i*512) < 0 ) {
+      // R1 error bits arrive as POSITIVE values (timeouts as negative) - any nonzero status is a failed read
+      if( MIOS32_SDCARD_SectorRead(sector + i, buff + i*512) != 0 ) {
 #if DEBUG_VERBOSE_LEVEL >= 1
 	MIOS32_MIDI_SendDebugMessage("[disk_read] error while reading sector %d\n", sector+i);
 #endif
@@ -134,7 +135,8 @@ DRESULT disk_write (
 #if DEBUG_VERBOSE_LEVEL >= 2
       MIOS32_MIDI_SendDebugMessage("[disk_write] sector %d (#%d/%d)\n", sector+i, i+1, count);
 #endif
-      if( MIOS32_SDCARD_SectorWrite(sector + i, (u8 *)buff + 512*i) < 0 ) {
+      // R1 error bits arrive as POSITIVE values (timeouts as negative) - any nonzero status is a failed write
+      if( MIOS32_SDCARD_SectorWrite(sector + i, (u8 *)buff + 512*i) != 0 ) {
 #if DEBUG_VERBOSE_LEVEL >= 1
 	MIOS32_MIDI_SendDebugMessage("[disk_write] error while writing to sector %d\n", sector+i);
 #endif

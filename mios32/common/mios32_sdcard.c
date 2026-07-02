@@ -338,8 +338,13 @@ s32 MIOS32_SDCARD_CheckAvailable(u8 was_available)
 
     MIOS32_SDCARD_MUTEX_GIVE;  
     // run power-on sequence (negative return = not available)
+    // NOTE: PowerOn() takes/gives the mutex itself and its epilogue already
+    // deactivates chip select + clocks the dummy byte, so return directly:
+    // falling through to not_available would touch the bus outside the mutex
+    // and give the already-given mutex a second time
     ret=MIOS32_SDCARD_PowerOn();
 
+    return (ret == 0) ? 1 : 0; // 1=available, 0=not available.
   }
 
 not_available:
@@ -645,8 +650,10 @@ s32 MIOS32_SDCARD_CIDRead(mios32_sdcard_cid_t *cid)
     if( ret != 0xff )
       break;
   }
-  if( i == 65536 ) 
+  if( i == 65536 ) {
     status= -257;
+    goto error;
+  }
   
 
   // read 16 bytes via DMA

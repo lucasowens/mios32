@@ -523,15 +523,14 @@ static s32 RandomGenerator(u32 req)
       ///////////////////////////////////////////////////////////////////////
       } else {
 	u8 layer = i-16;
+	u8 instrument = ui_selected_instrument;
 
 	if( event_mode == SEQ_EVENT_MODE_Drum ) {
 	  layer = 0;
-	  ui_selected_instrument = i - 16;
+	  instrument = i - 16; // target drum stays local -- don't clobber the drum cursor (#29)
 	} else {
 	  ui_selected_trg_layer = layer;
 	}
-
-	u8 instrument = ui_selected_instrument;
 
 	// don't touch if probability is 0
 	u8 probability = trg_layer_range[i-16];

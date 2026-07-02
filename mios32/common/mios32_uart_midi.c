@@ -240,7 +240,9 @@ s32 MIOS32_UART_MIDI_Periodic_mS(void)
       ++midi_rec[uart_port].timeout_ctr;
   }
   MIOS32_IRQ_Enable();
-  // (atomic operation not required in MIOS32_UART_MIDI_PackageSend_NonBlocking() due to single-byte accesses)
+  // (rs_expire_ctr is a u16, not a single-byte value - therefore
+  // MIOS32_UART_MIDI_PackageSend_NonBlocking() guards its rs_expire_ctr/rs_last
+  // accesses with the same MIOS32_IRQ_Disable window)
 #endif
 
   return 0; // no error
@@ -270,6 +272,10 @@ s32 MIOS32_UART_MIDI_PackageSend_NonBlocking(u8 uart_port, mios32_midi_package_t
   if( len ) {
     u8 buffer[3] = {package.evnt0, package.evnt1, package.evnt2};
 
+    // rs_expire_ctr/rs_last are also accessed by MIOS32_UART_MIDI_Periodic_mS(),
+    // which runs in a different task - guard the read-decide-update sequence.
+    // (MIOS32_IRQ_Disable is nestable, so the RS_Reset() call below is fine)
+    MIOS32_IRQ_Disable();
     if( rs_expire_ctr[uart_port] > 1000 ) {
       // the current RS is expired each second to ensure that a status byte will be sent
       // if the MIDI cable is (re)connected during runtime
@@ -301,6 +307,7 @@ s32 MIOS32_UART_MIDI_PackageSend_NonBlocking(u8 uart_port, mios32_midi_package_t
     // only realtime events won't touch it (according to MIDI spec)
     if( package.evnt0 < 0xf8 )
       rs_last[uart_port] = package.evnt0;
+    MIOS32_IRQ_Enable();
 
 
     switch( MIOS32_UART_TxBufferPutMore(uart_port, buffer, len) ) {

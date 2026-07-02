@@ -946,17 +946,18 @@ s32 MIOS32_MIDI_SendDebugMessage(const char *format, ...)
   va_list args;
 
   // failsave: if format string is longer than 100 chars, break here
-  // note that this is a weak protection: if %s is used, or a lot of other format tokens,
-  // the resulting string could still lead to a buffer overflow
-  // other the other hand we don't want to allocate too many byte for buffer[] to save stack
+  // (the expanded output itself is bounded by vsnprintf below in any case - this
+  // check only keeps the explicit error message for oversized format strings)
   if( strlen(format) > 100 ) {
     // exit with less costly message
     return MIOS32_MIDI_SendDebugString("(ERROR: string passed to MIOS32_MIDI_SendDebugMessage() is longer than 100 chars!\n");
   } else {
-    // transform formatted string into string
+    // transform formatted string into string (truncated if the expanded output
+    // would exceed the buffer)
     va_start(args, format);
-    vsprintf(str, format, args);
+    vsnprintf(str, sizeof(str), format, args);
   }
+
 
   u32 len = strlen(str);
   u8 *str_ptr = (u8 *)str;

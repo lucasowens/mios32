@@ -454,21 +454,32 @@ static USBH_Status USBH_InterfaceInit(USB_OTG_CORE_HANDLE *pdev, void *phost)
     if( (pphost->device_prop.Itf_Desc[i].bInterfaceClass == 1) &&
 	(pphost->device_prop.Itf_Desc[i].bInterfaceSubClass == 3) ) {
 
-      if( pphost->device_prop.Ep_Desc[i][0].bEndpointAddress & 0x80 ) {
-	USBH_BulkInEp = (pphost->device_prop.Ep_Desc[i][0].bEndpointAddress);
-	USBH_BulkInEpSize  = pphost->device_prop.Ep_Desc[i][0].wMaxPacketSize;
-      } else {
-	USBH_BulkOutEp = (pphost->device_prop.Ep_Desc[i][0].bEndpointAddress);
-	USBH_BulkOutEpSize  = pphost->device_prop.Ep_Desc[i] [0].wMaxPacketSize;
+      // some devices expose a MIDI interface with less than 2 endpoints; only
+      // read the endpoint descriptors which were actually populated for this
+      // interface, and require one IN + one OUT endpoint before opening the
+      // channels (Ep_Desc[i][1] otherwise holds stale/zero data)
+      u8 num_ep = pphost->device_prop.Itf_Desc[i].bNumEndpoints;
+      u8 ep;
+      u8 ep_in_found = 0;
+      u8 ep_out_found = 0;
+
+      if( num_ep > USBH_MAX_NUM_ENDPOINTS )
+	num_ep = USBH_MAX_NUM_ENDPOINTS;
+
+      for(ep=0; ep<num_ep; ++ep) {
+	if( pphost->device_prop.Ep_Desc[i][ep].bEndpointAddress & 0x80 ) {
+	  USBH_BulkInEp = (pphost->device_prop.Ep_Desc[i][ep].bEndpointAddress);
+	  USBH_BulkInEpSize  = pphost->device_prop.Ep_Desc[i][ep].wMaxPacketSize;
+	  ep_in_found = 1;
+	} else {
+	  USBH_BulkOutEp = (pphost->device_prop.Ep_Desc[i][ep].bEndpointAddress);
+	  USBH_BulkOutEpSize  = pphost->device_prop.Ep_Desc[i][ep].wMaxPacketSize;
+	  ep_out_found = 1;
+	}
       }
 
-      if( pphost->device_prop.Ep_Desc[i][1].bEndpointAddress & 0x80 ) {
-	USBH_BulkInEp = (pphost->device_prop.Ep_Desc[i][1].bEndpointAddress);
-	USBH_BulkInEpSize  = pphost->device_prop.Ep_Desc[i][1].wMaxPacketSize;
-      } else {
-	USBH_BulkOutEp = (pphost->device_prop.Ep_Desc[i][1].bEndpointAddress);
-	USBH_BulkOutEpSize  = pphost->device_prop.Ep_Desc[i][1].wMaxPacketSize;
-      }
+      if( !ep_in_found || !ep_out_found )
+	continue; // no complete IN/OUT endpoint pair - check remaining interfaces
 
       USBH_hc_num_out = USBH_Alloc_Channel(pdev, USBH_BulkOutEp);
       USBH_hc_num_in = USBH_Alloc_Channel(pdev, USBH_BulkInEp);
@@ -493,7 +504,7 @@ static USBH_Status USBH_InterfaceInit(USB_OTG_CORE_HANDLE *pdev, void *phost)
     }
   }
 
-  if( MIOS32_USB_MIDI_CheckAvailable(0) ) {
+  if( !MIOS32_USB_MIDI_CheckAvailable(0) ) {
     pphost->usr_cb->DeviceNotSupported();
   }
 	

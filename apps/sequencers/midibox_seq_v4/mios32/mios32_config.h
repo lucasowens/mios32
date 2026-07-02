@@ -156,6 +156,13 @@ extern void APP_SendDebugMessage(char *format, ...);
 # define MIOS32_UART_NUM 4
 #endif
 
+// enlarged MIDI IN buffers: the default 64 bytes only cover ~20ms of a saturated
+// 31250 baud stream; if TASK_MIDI_Hooks (+3) is starved longer (+4 emission, SD
+// work) the UART ISR drops bytes and the running-status parser misframes the
+// following events. 128 doubles the headroom for +256 bytes RAM (4 UARTs).
+// NOTE: must stay <= 255 — the driver's ring counters are u8!
+#define MIOS32_UART_RX_BUFFER_SIZE 128
+
 
 // configure IIC_MIDI
 #define MIOS32_IIC_MIDI_NUM 4

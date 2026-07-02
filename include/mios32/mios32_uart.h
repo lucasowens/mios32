@@ -127,6 +127,7 @@ extern s32 MIOS32_UART_RxBufferUsed(u8 uart);
 extern s32 MIOS32_UART_RxBufferGet(u8 uart);
 extern s32 MIOS32_UART_RxBufferPeek(u8 uart);
 extern s32 MIOS32_UART_RxBufferPut(u8 uart, u8 b);
+extern s32 MIOS32_UART_RxBufferOverflowsGet(u8 uart);
 extern s32 MIOS32_UART_TxBufferFree(u8 uart);
 extern s32 MIOS32_UART_TxBufferUsed(u8 uart);
 extern s32 MIOS32_UART_TxBufferGet(u8 uart);

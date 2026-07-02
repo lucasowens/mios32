@@ -450,7 +450,7 @@ static s32 SEQ_MIDI_SYSEX_Cmd_Remote(mios32_midi_port_t port, sysex_cmd_state_t 
 	SEQ_MIDI_SYSEX_SendAck(port, MIOS32_MIDI_SYSEX_ACK, sysex_state.remote_lcd.REMOTE_CMD);
 
       // Refresh has been received: send Client Mode request to clear timeout counter at the client side
-      if( sysex_state.remote_lcd.REMOTE_CMD_VALID && sysex_state.remote_lcd.REMOTE_CMD == sysex_state.remote_lcd.REMOTE_CMD_COMPLETE && SYSEX_REMOTE_CMD_REFRESH ) {
+      if( sysex_state.remote_lcd.REMOTE_CMD_VALID && sysex_state.remote_lcd.REMOTE_CMD_COMPLETE && sysex_state.remote_lcd.REMOTE_CMD == SYSEX_REMOTE_CMD_REFRESH ) {
 	SEQ_MIDI_SYSEX_REMOTE_SendMode(SEQ_MIDI_SYSEX_REMOTE_MODE_CLIENT);
       }
   }

@@ -322,6 +322,10 @@ s32 SEQ_MIDI_OUT_Send(mios32_midi_port_t port, mios32_midi_package_t midi_packag
   };
 
 
+  // remember the caller's timestamp: the >16bit OnOff split below re-enters
+  // SEQ_MIDI_OUT_Send, which would apply the per-port delay a second time
+  u32 pre_delay_timestamp = timestamp;
+
 #if SEQ_MIDI_OUT_SUPPORT_DELAY
   // NOTE: 0xffffffff is a "park forever" sentinel used by sustained/stretched Note-Off events
   // (rescheduled later by SEQ_MIDI_OUT_ReSchedule). A positive port delay would wrap it past u32
@@ -347,7 +351,10 @@ s32 SEQ_MIDI_OUT_Send(mios32_midi_port_t port, mios32_midi_package_t midi_packag
     new_item->package = midi_package;
     new_item->event_type = event_type;
     new_item->timestamp = timestamp;
-    new_item->len = len;
+    // >16bit len doesn't fit into the u16 record; the split below queues a genuine
+    // Off event instead -> store 0 so the handler won't schedule a premature Off
+    // from the truncated residue
+    new_item->len = (event_type == SEQ_MIDI_OUT_OnOffEvent && len > 0xffff) ? 0 : len;
     new_item->next = NULL;
   }
 
@@ -429,7 +436,11 @@ s32 SEQ_MIDI_OUT_Send(mios32_midi_port_t port, mios32_midi_package_t midi_packag
 
   // schedule off event now if length > 16bit (since it cannot be stored in event record)
   if( event_type == SEQ_MIDI_OUT_OnOffEvent && len > 0xffff ) {
-    return SEQ_MIDI_OUT_Send(port, midi_package, event_type, timestamp+len, 0);
+    // a genuine Off event, matching the handler's Off construction: velocity 0 and
+    // the pre-delay timestamp so the recursive call applies the per-port delay only
+    // once. As an Off event it also passes the almost-full failsafe above.
+    midi_package.velocity = 0;
+    return SEQ_MIDI_OUT_Send(port, midi_package, SEQ_MIDI_OUT_OffEvent, pre_delay_timestamp+len, 0);
   }
 
   // display queue

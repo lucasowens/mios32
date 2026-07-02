@@ -90,6 +90,7 @@ static u8 rx_buffer[NUM_SUPPORTED_UARTS][MIOS32_UART_RX_BUFFER_SIZE];
 static volatile u8 rx_buffer_tail[NUM_SUPPORTED_UARTS];
 static volatile u8 rx_buffer_head[NUM_SUPPORTED_UARTS];
 static volatile u8 rx_buffer_size[NUM_SUPPORTED_UARTS];
+static volatile u32 rx_buffer_overflows[NUM_SUPPORTED_UARTS]; // bytes dropped because the RX buffer was full
 
 static u8 tx_buffer[NUM_SUPPORTED_UARTS][MIOS32_UART_TX_BUFFER_SIZE];
 static volatile u8 tx_buffer_tail[NUM_SUPPORTED_UARTS];
@@ -138,6 +139,7 @@ s32 MIOS32_UART_Init(u32 mode)
     u8 uart;
     for(uart=0; uart<NUM_SUPPORTED_UARTS; ++uart) {
       rx_buffer_tail[uart] = rx_buffer_head[uart] = rx_buffer_size[uart] = 0;
+      rx_buffer_overflows[uart] = 0;
       tx_buffer_tail[uart] = tx_buffer_head[uart] = tx_buffer_size[uart] = 0;
 
       MIOS32_UART_InitPortDefault(uart);
@@ -580,6 +582,26 @@ s32 MIOS32_UART_RxBufferPut(u8 uart, u8 b)
 
 
 /////////////////////////////////////////////////////////////////////////////
+//! returns number of received bytes which had to be dropped because the
+//! receive buffer was full (counted in the UART receive ISRs)
+//! \param[in] uart UART number (0..3)
+//! \return >= 0: number of dropped bytes since startup
+//! \return 0 if uart not available
+/////////////////////////////////////////////////////////////////////////////
+s32 MIOS32_UART_RxBufferOverflowsGet(u8 uart)
+{
+#if NUM_SUPPORTED_UARTS == 0
+  return 0; // no UART available
+#else
+  if( uart >= NUM_SUPPORTED_UARTS )
+    return 0;
+  else
+    return rx_buffer_overflows[uart];
+#endif
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 //! returns number of free bytes in transmit buffer
 //! \param[in] uart UART number (0..2)
 //! \return number of free bytes
@@ -773,7 +795,8 @@ MIOS32_UART0_IRQHANDLER_FUNC
     s32 status = MIOS32_UART_IsAssignedToMIDI(0) ? MIOS32_MIDI_SendByteToRxCallback(UART0, b) : 0;
 
     if( status == 0 && MIOS32_UART_RxBufferPut(0, b) < 0 ) {
-      // here we could add some error handling
+      // buffer full: byte has been dropped - count it so the loss is observable
+      ++rx_buffer_overflows[0];
     }
   }
 
@@ -806,7 +829,8 @@ MIOS32_UART1_IRQHANDLER_FUNC
     s32 status = MIOS32_UART_IsAssignedToMIDI(1) ? MIOS32_MIDI_SendByteToRxCallback(UART1, b) : 0;
 
     if( status == 0 && MIOS32_UART_RxBufferPut(1, b) < 0 ) {
-      // here we could add some error handling
+      // buffer full: byte has been dropped - count it so the loss is observable
+      ++rx_buffer_overflows[1];
     }
   }
   
@@ -862,7 +886,8 @@ MIOS32_UART2_RX_IRQHANDLER_FUNC
     s32 status = MIOS32_UART_IsAssignedToMIDI(2) ? MIOS32_MIDI_SendByteToRxCallback(UART2, b) : 0;
 
     if( status == 0 && MIOS32_UART_RxBufferPut(2, b) < 0 ) {
-      // here we could add some error handling
+      // buffer full: byte has been dropped - count it so the loss is observable
+      ++rx_buffer_overflows[2];
     }
   }
   
@@ -886,7 +911,8 @@ MIOS32_UART3_IRQHANDLER_FUNC
     s32 status = MIOS32_UART_IsAssignedToMIDI(3) ? MIOS32_MIDI_SendByteToRxCallback(UART3, b) : 0;
 
     if( status == 0 && MIOS32_UART_RxBufferPut(3, b) < 0 ) {
-      // here we could add some error handling
+      // buffer full: byte has been dropped - count it so the loss is observable
+      ++rx_buffer_overflows[3];
     }
   }
   

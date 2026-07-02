@@ -514,7 +514,8 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
 
 
 // CMD_PAGE_SET payload: [page_id]
-// Reply payload: [page_id, status]   status 0x01 = set, 0x02 = bad payload.
+// Reply payload: [page_id, status]
+//   status 0x01 = set, 0x02 = bad payload, 0x03 = page id out of range.
 //
 // SEQ_UI_PageSet only flips ui_page and clears the encoder/button/LED callbacks;
 // the new page's *Init function reinstalls them on the next UI task iteration.
@@ -530,6 +531,17 @@ static void cmd_page_set(mios32_midi_port_t port, const u8 *payload, u8 plen)
   }
   u8 page = payload[0] & 0x7f;
   reply[0] = page;
+
+  // SEQ_UI_PageSet has no range guard: a wild id would be installed into
+  // ui_page with every UI callback NULLed, and PAGES_CallInit (page >=
+  // SEQ_UI_PAGES -> -1) would never reinstall them — control surface dead
+  // until the next valid page set. Reject at this boundary instead (#26).
+  if( page >= SEQ_UI_PAGES ) {
+    reply[1] = 0x03;
+    send_reply(port, CMD_PAGE_SET, reply, sizeof(reply));
+    return;
+  }
+
   SEQ_UI_PageSet((seq_ui_page_t)page);
   SEQ_UI_PAGES_CallInit((seq_ui_page_t)page);
   reply[1] = 0x01;
@@ -2727,6 +2739,15 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
     parser_state = STATE_IDLE;
     header_ctr = 0;
     return 0;
+  }
+
+  // A fresh F0 always starts a new message. If the previous one lost its F7
+  // (dropped packet) we'd otherwise consume this F0 as header/cmd/payload of
+  // the stale message and swallow the new command — resync to IDLE so the
+  // STATE_IDLE case below re-arms on it as header byte 0.
+  if( midi_in == 0xf0 ) {
+    parser_state = STATE_IDLE;
+    header_ctr = 0;
   }
 
   switch( parser_state ) {

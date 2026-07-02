@@ -409,12 +409,22 @@ static void SEQ_CORE_CaptureRingReset(void)
 // reproduces the precise articulation, not a fixed default.
 static s32 SEQ_CORE_CaptureTapeTap(mios32_midi_port_t port, mios32_midi_package_t p, u32 timestamp)
 {
-  (void)port;
   if( seq_core_cap_resim_active ) return 0;                 // re-sim uses the redirect sink, not the tee
   if( seq_core_cap_ring_track >= SEQ_CORE_NUM_TRACKS ) return 0; // no recording track
   if( !SEQ_BPM_IsRunning() ) return 0;                      // tape only while playing
   if( p.cable != seq_core_cap_ring_track ) return 0;        // only the recording track (cable carries it)
   if( p.event != 0x9 ) return 0;                            // note events only
+
+  // The metronome borrows track #16's tag (p.cable=15, metronome emit in SEQ_CORE_Tick),
+  // so when track 16 IS the recording track the cable guard can't reject the click.
+  // Filter it by its exact emission identity (port+chn+note) while the metronome is
+  // enabled; the vel-0 running-status off carries the same identity, so ons and offs
+  // are rejected as a pair (no orphan gate back-fill).
+  if( p.cable == 15 && seq_core_state.METRONOME && seq_core_metronome_chn &&
+      port == seq_core_metronome_port && p.chn == (seq_core_metronome_chn-1) &&
+      ((seq_core_metronome_note_b && p.note == seq_core_metronome_note_b) ||
+       (seq_core_metronome_note_m && p.note == seq_core_metronome_note_m)) )
+    return 0;                                               // engine click, not a performed note
 
   if( p.velocity == 0 ) {
     // Note-off (running-status: every engine note-off is the same package with vel 0,
@@ -582,6 +592,11 @@ static u16 SEQ_CORE_CaptureTps(u8 src)
 // the audible bar (the re-sim drove 2 bars -> bar captured twice; the tape window held 1
 // bar -> bar + a silent bar). SEQ_CORE_CaptureLoopSteps stays in global-16th units for the
 // "is this one measure?" gate + window n-math; THIS resolves the deposit/drive geometry.
+// Returns 0 — every caller already refuses on 0 (MaxK thermometer 0; dst_steps==0 -> -7
+// before any dst mutation) — when tps does NOT divide the bar (#66): a fractional
+// steps-per-bar floors away the bar's LAST audible step (the tape/sink drop
+// step >= dst_steps onsets, the re-sim never drives the tail ticks), so the config is
+// unrepresentable on the frozen grid and is refused like other unrepresentable grabs.
 static u16 SEQ_CORE_CaptureDstLoopSteps(u8 src)
 {
   if( src >= SEQ_CORE_NUM_TRACKS ) return 0;
@@ -592,6 +607,8 @@ static u16 SEQ_CORE_CaptureDstLoopSteps(u8 src)
   if( tps == 0 ) return 1;
   u32 bar_ticks = (u32)(seq_core_steps_per_measure + 1) * 96;  // one global measure
   u16 steps = (u16)(bar_ticks / tps);                // source's own steps within the bar
+  if( steps >= 1 && (bar_ticks % tps) != 0 )         // tps doesn't divide the bar: the last
+    return 0;                                        // audible step is unrepresentable -> refuse
   return steps < 1 ? 1 : steps;                      // >=1 even for a >1-bar step_length
 }
 
@@ -4173,9 +4190,10 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 
   //check that there are more than 0 additional channels, that it's not just one channel and FX starting on current channel, check disable flag, check for robotizer
   if( ! ( tcc->fx_midi_num_chn & 0x3f ) || ( ( tcc->fx_midi_num_chn & 0x3f ) == 1 && tcc->fx_midi_chn == midi_package.chn  ) || ( ( tcc->fx_midi_num_chn & 0x40 ) && !robotize_flags.DUPLICATE ) ) {
-    status |= SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, event_type, timestamp, len);
+    s32 on_status = SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, event_type, timestamp, len);
+    status |= on_status;
 
-    if( event_type == SEQ_MIDI_OUT_OnEvent ) { // schedule off event at same port
+    if( event_type == SEQ_MIDI_OUT_OnEvent && on_status >= 0 ) { // schedule off event at same port -- only if the On actually queued (dropped On must not deposit a sentinel Off)
       midi_package.velocity = 0;
       status |= SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
     }
@@ -4197,9 +4215,10 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 	  midi_package.chn = (( tcc->fx_midi_chn & 0x3f ) + (t->fx_midi_ctr-1)) % 16;
 	}
 
-	status |= SEQ_MIDI_OUT_Send(midi_port, midi_package, event_type, timestamp, len);
+	s32 on_status = SEQ_MIDI_OUT_Send(midi_port, midi_package, event_type, timestamp, len);
+	status |= on_status;
 
-	if( event_type == SEQ_MIDI_OUT_OnEvent ) { // schedule off event at same port
+	if( event_type == SEQ_MIDI_OUT_OnEvent && on_status >= 0 ) { // schedule off event at same port -- only if the On actually queued
 	  midi_package.velocity = 0;
 	  status |= SEQ_MIDI_OUT_Send(midi_port, midi_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
 	}
@@ -4216,9 +4235,10 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 	  midi_package.chn = (( tcc->fx_midi_chn & 0x3f ) + ix-1) % 16;
 	}
 
-	status |= SEQ_MIDI_OUT_Send(midi_port, midi_package, event_type, timestamp, len);
+	s32 on_status = SEQ_MIDI_OUT_Send(midi_port, midi_package, event_type, timestamp, len);
+	status |= on_status;
 
-	if( event_type == SEQ_MIDI_OUT_OnEvent ) { // schedule off event at same port
+	if( event_type == SEQ_MIDI_OUT_OnEvent && on_status >= 0 ) { // schedule off event at same port -- only if the On actually queued
 	  midi_package.velocity = 0;
 	  status |= SEQ_MIDI_OUT_Send(midi_port, midi_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
 	}
@@ -4228,22 +4248,31 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 	// forward to all channels
 
 	// original channel
-	status |= SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, event_type, timestamp, len);
+	s32 on_status = SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, event_type, timestamp, len);
+	status |= on_status;
 
 	// all other channels
+	u32 fx_on_failed = 0; // bit per ix: On definitively dropped -> suppress its paired Off
 	int ix;
 	for(ix=0; ix < ( tcc->fx_midi_num_chn & 0x3f ); ++ix) {
 	  midi_package.chn = (tcc->fx_midi_chn + ix) % 16;
-	  status |= SEQ_MIDI_OUT_Send(fx_midi_port, midi_package, event_type, timestamp, len);
+	  s32 fx_status = SEQ_MIDI_OUT_Send(fx_midi_port, midi_package, event_type, timestamp, len);
+	  status |= fx_status;
+	  if( fx_status < 0 && ix < 32 )
+	    fx_on_failed |= (1u << ix);
 	}
 
-	if( event_type == SEQ_MIDI_OUT_OnEvent ) { // schedule off event at same port
+	if( event_type == SEQ_MIDI_OUT_OnEvent ) { // schedule off events at same ports -- only for Ons that actually queued
 	  midi_package.velocity = 0;
 
-	  midi_package.chn = tcc->midi_chn % 16;
-	  status |= SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
+	  if( on_status >= 0 ) {
+	    midi_package.chn = tcc->midi_chn % 16;
+	    status |= SEQ_MIDI_OUT_Send(tcc->midi_port, midi_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
+	  }
 
 	  for(ix=0; ix< ( tcc->fx_midi_num_chn & 0x3f ); ++ix) {
+	    if( ix < 32 && (fx_on_failed & (1u << ix)) )
+	      continue;
 	    midi_package.chn = (tcc->fx_midi_chn + ix) % 16;
 	    status |= SEQ_MIDI_OUT_Send(fx_midi_port, midi_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
 	  }
@@ -4279,9 +4308,10 @@ s32 SEQ_CORE_ScheduleEvent(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc, mios3
 
     // duplicate to shadow channel
     if( shadow_enabled ) {
-      status |= SEQ_MIDI_OUT_Send(seq_core_shadow_out_port, shadow_package, event_type, timestamp, len);
+      s32 on_status = SEQ_MIDI_OUT_Send(seq_core_shadow_out_port, shadow_package, event_type, timestamp, len);
+      status |= on_status;
 
-      if( event_type == SEQ_MIDI_OUT_OnEvent ) { // schedule off event at same port
+      if( event_type == SEQ_MIDI_OUT_OnEvent && on_status >= 0 ) { // schedule off event at same port -- only if the On actually queued
 	shadow_package.velocity = 0;
 	status |= SEQ_MIDI_OUT_Send(seq_core_shadow_out_port, shadow_package, SEQ_MIDI_OUT_OffEvent, 0xffffffff, 0);
       }
@@ -4726,6 +4756,8 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
   // increment reference step on each 16th note
   // set request flag on overrun (tracks can synch to measure)
   u8 synch_to_measure_req = 0;
+  u16 reset_trkpos_done = 0; // tracks re-phased via reset_trkpos_req in THIS tick
+
   if( (bpm_tick % (384/4)) == 0 ) {
     // SWITCH-QUANTIZE (Phase 2): land a deferred phrase-recall re-phase on the
     // selected grid. The recall already loaded its content at tap; here, on the
@@ -4746,6 +4778,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
       if( seq_core_state.reset_trkpos_req & (1 << track) ) {
 	SEQ_CORE_ResetTrkPos(track, t, tcc);
 	++t->bar;
+	reset_trkpos_done |= (1 << track);
       }
 
       // NEW: temporary layer mutes on incoming MIDI
@@ -4977,7 +5010,12 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 
       // if "synch to measure" flag set: reset track if master has reached the selected number of steps
       // MEMO: we could also provide the option to synch to another track
-      if( synch_to_measure_req && (tcc->clkdiv.SYNCH_TO_MEASURE || t->state.SYNC_MEASURE) ) {
+      // (skip tracks already re-phased via reset_trkpos_req in this very tick —
+      // a quantized recall re-phase / RATOPC landing ON the measure boundary
+      // already reset the position and bumped t->bar above; a second ++t->bar
+      // here would make the Nth1/Nth2 bar cycle skip a bar)
+      if( synch_to_measure_req && (tcc->clkdiv.SYNCH_TO_MEASURE || t->state.SYNC_MEASURE)
+          && !(reset_trkpos_done & (1 << track)) ) {
         SEQ_CORE_ResetTrkPos(track, t, tcc);
 	++t->bar;
       }
@@ -5274,7 +5312,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 	  u16 prev_bpm_tick_delay = t->bpm_tick_delay;
 	  u8 gen_on_events = 0; // new On Events will be generated
 	  u8 gen_sustained_events = 0; // new sustained On Events will be generated
-	  u8 gen_off_events = 0; // Off Events of previous step will be generated, the variable contains the remaining gatelength
+	  u16 gen_off_events = 0; // Off Events of previous step will be generated, the variable contains the remaining gatelength (ticks; step_length*95/96 reaches 1520)
 
           seq_layer_evnt_t *e = &layer_events[0];
           for(i=0; i<number_of_events; ++e, ++i) {
@@ -5673,7 +5711,10 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 		      gatelength = (8 - 2*(roll2_mode >> 5)) * ((roll2_mode&0x1f)+1);
 
 		      // scale length (0..95) over next clock counter to consider the selected clock divider
-		      int gatelength = (4 - (roll2_mode >> 5)) * ((roll2_mode&0x1f)+1);
+		      // (outer gatelength above intentionally stays unscaled for the Echo Post-FX below)
+		      int gatelength = ((4 - (roll2_mode >> 5)) * ((roll2_mode&0x1f)+1) * t->step_length) / 96;
+		      if( !gatelength )
+			gatelength = 1;
 
 		      u32 half_gatelength = gatelength/2;
 		      if( !half_gatelength )
@@ -6393,6 +6434,11 @@ s32 SEQ_CORE_Echo(u8 track, u8 instrument, seq_core_trk_t *t, seq_cc_trk_t *tcc,
 	
   if( echo_repeats & 0x40 && !robotize_flags.ECHO) // disable flag
     echo_repeats = 0;
+
+  // only bits 0..5 encode the repeat count; a raw bank-file byte can carry
+  // bit 7 through SEQ_CC_Set (no clamp) and would otherwise schedule 128+
+  // echo events per note, flooding the MIDI-out pool (#59)
+  echo_repeats &= 0x3f;
     
     
   int i;
