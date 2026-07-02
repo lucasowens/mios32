@@ -1,6 +1,6 @@
 # Deep Adversarial Review — MIOS32 platform + MIDIbox SEQ V4
 
-_Generated 2026-07-01. Scope: all MIDIbox-authored code + vendor integration seams, deepest on the real-time hot path and the newest fork features. **Follow-up 2026-07-01** — 7 of 8 P1s fixed + pushed to main (commits ff2505c5, 905f93a3). **Follow-up 2026-07-01 (input-hardening pass)** — the Story-2 sweep landed as one pass (commit 4b4fbd71): #4 #9 #10 #11 #12 #18 #21 #25 #32 #33 #34 #56 #57 #67 fixed at the SD-load / MIDI-in boundary (TrackInit is the geometry source-kill). Static fixes, build clean; HIL pending next flash._
+_Generated 2026-07-01. Scope: all MIDIbox-authored code + vendor integration seams, deepest on the real-time hot path and the newest fork features. **Follow-up 2026-07-01** — 7 of 8 P1s fixed + pushed to main (commits ff2505c5, 905f93a3). **Follow-up 2026-07-01 (input-hardening pass)** — the Story-2 sweep landed as one pass (commit 4b4fbd71): #4 #9 #10 #11 #12 #18 #21 #25 #32 #33 #34 #56 #57 #67 fixed at the SD-load / MIDI-in boundary (TrackInit is the geometry source-kill). Build clean, flashed, HIL 241/241 green._
 
 ## Executive summary
 
