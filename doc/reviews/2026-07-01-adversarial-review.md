@@ -1,6 +1,6 @@
 # Deep Adversarial Review — MIOS32 platform + MIDIbox SEQ V4
 
-_Generated 2026-07-01. Scope: all MIDIbox-authored code + vendor integration seams, deepest on the real-time hot path and the newest fork features. **Follow-up 2026-07-01** — 7 of 8 P1s fixed + pushed to main (commits ff2505c5, 905f93a3)._
+_Generated 2026-07-01. Scope: all MIDIbox-authored code + vendor integration seams, deepest on the real-time hot path and the newest fork features. **Follow-up 2026-07-01** — 7 of 8 P1s fixed + pushed to main (commits ff2505c5, 905f93a3). **Follow-up 2026-07-01 (input-hardening pass)** — the Story-2 sweep landed as one pass (commit 4b4fbd71): #4 #9 #10 #11 #12 #18 #21 #25 #32 #33 #34 #56 #57 #67 fixed at the SD-load / MIDI-in boundary (TrackInit is the geometry source-kill). Static fixes, build clean; HIL pending next flash._
 
 ## Executive summary
 
@@ -19,7 +19,7 @@ Persistence and MIDI-in trust their inputs; the bound is assumed, not checked.
 - **#30 (P1, FIXED):** track-preset Par/Trg address offset wild write. Fixed: gate write on `addr_offset+16<=MAX` (seq_file_t.c).
 - **#31 (P1, FIXED):** `song_size < 20` underflow overruns `seq_song_steps[128]`. Fixed: reject bank if `song_size < header`, clamp `num_entries` (seq_file_s.c).
 - **#27 (P1, FIXED):** BLM keyboard mode indexes 16-element arrays with un-clamped button_column (0..63). Fixed: clamp `button_column < BLM_SCALAR_MASTER_NUM_ROWS` at function entry (seq_blm.c).
-- **#9 (P2):** drum track claiming >16 instruments overruns `layer_events[16]` — carried forward for input-hardening pass.
+- **#9 (P2, FIXED 4b4fbd71):** drum track claiming >16 instruments overruns `layer_events[16]` — killed at the source: `SEQ_*_TrackInit` now rejects >16 instruments/layers + zero factors with u32 size math, plus local clamps in the drum event loop.
 
 ### Two more that will bite in ordinary use
 - **#63 (P1, FIXED):** a positive per-port MIDI-clock delay wraps the `0xffffffff` sentinel used for Note-Off scheduling → sustained/stretched notes are cut off instantly. Fixed: sentinel exempt from delay add; positive delays saturate instead of wrap (seq_midi_out.c).
@@ -27,7 +27,7 @@ Persistence and MIDI-in trust their inputs; the bound is assumed, not checked.
 
 ### Where to start
 The remediation plan below sequences all 72 into waves. Highest leverage:
-1. **One input-hardening pass** that clamps track / instrument / scale / geometry indices and masks note/CC bytes to 7 bits at every SD-load and MIDI-in entry point kills most of Story 2 at the source (#9, #27, #30, #31, #11, #18, #21, #56, #10, #32).
+1. **One input-hardening pass** that clamps track / instrument / scale / geometry indices and masks note/CC bytes to 7 bits at every SD-load and MIDI-in entry point kills most of Story 2 at the source (#9, #27, #30, #31, #11, #18, #21, #56, #10, #32). **DONE 4b4fbd71** — shipped as one sweep, also covering #4, #12, #25, #33, #34, #57, #67.
 2. **Two small self-contained user-facing fixes:** the `sprintf(dst, name)` format string (#28) and the sentinel-timestamp wrap (#63).
 3. **The Story-1 races** want the treatment `journal_restore` already models — a short `portENTER_CRITICAL` around the buffer read, or deferring the UI-task render to the tick when `SEQ_BPM_IsRunning()` (#6, #19, #15, #16), plus moving the blocking SD/UART work off the +4 critical path (#53, #35).
 
@@ -65,9 +65,9 @@ These are static verdicts — source-read and triple-refuted, but **not reproduc
 | 31 | ✓ P1 | memory-safety | persistence | `seq_file_s.c` — SEQ_FILE_S_SongRead :369 | **[FIXED ff2505c5]** Corrupt song bank with song_size < 20 underflows num_entries and overruns seq_song_steps[128]. Fixed: reject if song_size<header, clamp num_entries. |
 | 46 | P2←P1 | persistence | timers/sys/iic/bsl | `bsl_sysex.c` — BSL_SYSEX_WriteMem :574 | STM32F4 flash write only erases on exact sector-base match and never verifies -> silent corrupt program on non-base write |
 | 51 | P2 | concurrency | LENS concurrency | `seq_live.c` — SEQ_LIVE_PlayEvent :226 | Unguarded read-modify-write on seq_live_played_notes[]/live_keyboard_*[] widened to a +2/+3 cross-task race by the new play surface _(dup of #21)_ |
-| 9 | P2←P0 | memory-safety | layer/transforms | `seq_layer.c` — SEQ_LAYER_GetEvents (drum-mode note loop) :422 | Drum-mode event loop overruns layer_events[16] when a track reports >16 instruments |
+| 9 | ✓ P2←P0 | memory-safety | layer/transforms | `seq_layer.c` — SEQ_LAYER_GetEvents (drum-mode note loop) :422 | **[FIXED 4b4fbd71]** Drum-mode event loop overruns layer_events[16] when a track reports >16 instruments. Fixed: TrackInit rejects >16 instruments (source-kill) + local clamps and 83-guard re-entry fix in the drum loops. |
 | 35 | P3←P1 | rt-timing | UART MIDI | `mios32_uart_midi.c` — MIOS32_UART_MIDI_PackageSend_NonBlocking :306 | "NonBlocking" UART send busy-waits inside the +4 emission task when the DIN TX FIFO fills. [Downgraded: verification found proposed fix named wrong function (HELD pending re-derivation).] |
-| 21 | P2 | memory-safety | play/record | `seq_ui_inssel.c` — SEQ_UI_INSSEL_DrumTrigger :109 | Drum-pad preview note is an unmasked u8 from lay_const -> OOB write in SEQ_LIVE_PlayEvent |
+| 21 | ✓ P2 | memory-safety | play/record | `seq_ui_inssel.c` — SEQ_UI_INSSEL_DrumTrigger :109 | **[FIXED 4b4fbd71]** Drum-pad preview note is an unmasked u8 from lay_const -> OOB write in SEQ_LIVE_PlayEvent. Fixed: note masked to 7 bits at dispatch (+ #56 guard in PlayEvent). |
 | 62 | P2 | logic | render stack | `seq_core.c` — SEQ_CORE_RenderTouched / SEQ_CORE_RenderTrack :934 | Stopped-edit synchronous render takes the SWEEP path, refreshing only a 4-step window instead of the full buffer — stale output mirror for GRIP/GRAVITY/transpose/limit edits while transport is stopped |
 | 65 | P2←P1 | logic | CAPTURE | `seq_core.c` — SEQ_CORE_CaptureTapeTap / metronome emit in SEQ_CORE_Tick :4741 | Metronome click notes are captured into the pattern when the recording track is track 16 (index 15) |
 | 13 | P2 | logic | CAPTURE | `seq_core.c` — SEQ_CORE_CaptureMaterializeNote :345 | Captured note of an exact-integer-step duration (gate % tps == 0) is written as an unterminated Glide and over-holds into the following rests |
@@ -83,9 +83,9 @@ These are static verdicts — source-read and triple-refuted, but **not reproduc
 | 54 | P2 | rt-timing | LENS rt-timing | `seq_core.c` — SEQ_CORE_Handler :4357 | Catch-up/prefetch loop can run ~120 SEQ_CORE_Tick iterations (each rendering 16 tracks) in one 1ms emission slot while holding MUTEX_MIDIOUT |
 | 68 | P2 | concurrency | MIDI in/route | `seq_midi_in.c` — SEQ_MIDI_IN_ArpNoteGet :1261 | Non-HOLD arp read latches num_notes from live ARP_SORTED.len, then indexes items across a possible concurrent NOTESTACK_Pop |
 | 70 | P3←P2 | concurrency | HIL sysex | `seq_testctrl.c` — cmd_reset_state :493 | Unprotected read-modify-write of the shared seq_core_state bitfield word can clobber +4-task transport/trigger flags |
-| 4 | P2 | memory-safety | core tick+emit | `seq_core.c` — SEQ_CORE_Tick (glide_notes bitmask) :5481 | Glide/stretch note bitmask indexed by note/32 into 4-word arrays with an 8-bit note field and no defensive bound |
-| 12 | P2 | memory-safety | layer/transforms | `seq_layer.c` — SEQ_LAYER_GetEvents (Combined mode) :708 | Combined event-mode note/chord layer reads seq_cc_trk/par arrays at track+1/track+2 without bounding track to a group base |
-| 57 | P3←P2 | persistence | LENS memory | `seq_par.c` — SEQ_PAR_TrackInit :182 | Signed-int overflow in TrackInit geometry check can accept pathological layer size from a corrupt bank file |
+| 4 | ✓ P2 | memory-safety | core tick+emit | `seq_core.c` — SEQ_CORE_Tick (glide_notes bitmask) :5481 | **[FIXED 4b4fbd71]** Glide/stretch note bitmask indexed by note/32 into 4-word arrays with an 8-bit note field and no defensive bound. Fixed: word index masked to 0x7f at all 4 tick sites + the ReSchedule filter (seq_midi_out.c). |
+| 12 | ✓ P2 | memory-safety | layer/transforms | `seq_layer.c` — SEQ_LAYER_GetEvents (Combined mode) :708 | **[FIXED 4b4fbd71]** Combined event-mode note/chord layer reads seq_cc_trk/par arrays at track+1/track+2 without bounding track to a group base. Fixed: note/chord layers refuse group offsets 6/7. |
+| 57 | ✓ P3←P2 | persistence | LENS memory | `seq_par.c` — SEQ_PAR_TrackInit :182 | **[FIXED 4b4fbd71]** Signed-int overflow in TrackInit geometry check can accept pathological layer size from a corrupt bank file. Fixed: u32 math + factor bounds (≤16 layers/instruments, no zero factors) in both SEQ_PAR_ and SEQ_TRG_TrackInit. |
 | 59 | P3←P2 | resource-exhaustion | core tick+emit | `seq_core.c` — SEQ_CORE_Echo :6249 | echo_repeats bit-7 escapes the disable mask -> 128-191 echo events per note flood the MIDI-out pool |
 | 0 | P2←P1 | resource-exhaustion | clock/BPM | `seq_bpm.c` — bpm_req_clk_ctr / SEQ_BPM_Timer_Master / SEQ_BPM_ChkReqClk :105 | u8 pending-clock counter silently wraps and drops ~256 ticks when the emission task is stalled |
 | 7 | P3←P2 | logic | MIDI OUT sched | `seq_midi_out.c` — SEQ_MIDI_OUT_Send :426 | OnOff with len>0xffff truncates len into u16 and re-sends as OnOff (not Off) with velocity intact -> stuck note |
@@ -93,11 +93,11 @@ These are static verdicts — source-read and triple-refuted, but **not reproduc
 | 60 | P3 | logic | core tick+emit | `seq_core.c` — SEQ_CORE_Tick :4600 | Quantized phrase-recall rephase and synch-to-measure both bump t->bar in the same measure tick -> nth-trigger phase skips a bar |
 | 61 | P3 | logic | core tick+emit | `seq_core.c` — SEQ_CORE_Tick :5526 | Roll2 flam trigger spacing/gate ignore clock divider (inner gatelength shadows the outer, never scaled by step_length) |
 | 66 | P3 | logic | CAPTURE | `seq_core.c` — SEQ_CORE_CaptureDstLoopSteps / CaptureSpanTape :568 | Foreign-clkdiv SYNCH_TO_MEASURE track loses the last steps of the captured bar when tps does not divide gspm*96 |
-| 67 | P3 | logic | MIDI in/route | `seq_midi_in.c` — SEQ_MIDI_IN_ArpNoteGet :1264 | HOLD-mode arp num_notes counts to 0 when MIDI note 0 (C-2) is held → modulo-by-zero |
-| 10 | P3←P2 | resource-exhaustion | layer/transforms | `seq_groove.c` — SEQ_GROOVE_DelayGet / SEQ_GROOVE_Event :269 | Modulo-by-zero on groove num_steps loaded from SD as a multiple of 256 |
-| 32 | P3←P1 | memory-safety | persistence | `seq_groove.c` — SEQ_GROOVE_DelayGet / SEQ_GROOVE_Event :269 | Groove template num_steps > 16 from MBSEQ_G.V4 causes OOB read of add_step_* arrays on the emission path _(dup of #10)_ |
-| 18 | P3 | memory-safety | GRAVITY | `seq_scale.c` — SEQ_SCALE_NoteValueGet :297 | TensionBandMask feeds seq_core_global_scale to NoteValueGet, which indexes seq_scale_table with no bounds check _(dup of #11)_ |
-| 11 | P3 | memory-safety | layer/transforms | `seq_scale.c` — SEQ_SCALE_NoteValueGet :297 | Out-of-bounds read of seq_scale_table when a per-track scale par-layer byte exceeds the table size |
+| 67 | ✓ P3 | logic | MIDI in/route | `seq_midi_in.c` — SEQ_MIDI_IN_ArpNoteGet :1264 | **[FIXED 4b4fbd71]** HOLD-mode arp num_notes counts to 0 when MIDI note 0 (C-2) is held → modulo-by-zero. Fixed: empty-stack guard returns 0x80 before the modulo (behavior-identical on this hardware, UB removed). |
+| 10 | ✓ P3←P2 | resource-exhaustion | layer/transforms | `seq_groove.c` — SEQ_GROOVE_DelayGet / SEQ_GROOVE_Event :269 | **[FIXED 4b4fbd71]** Modulo-by-zero on groove num_steps loaded from SD as a multiple of 256. Fixed: clamp 1..16 at load (seq_file_g.c) + 0/>16 guards before both emission-path modulos. |
+| 32 | ✓ P3←P1 | memory-safety | persistence | `seq_groove.c` — SEQ_GROOVE_DelayGet / SEQ_GROOVE_Event :269 | **[FIXED 4b4fbd71]** Groove template num_steps > 16 from MBSEQ_G.V4 causes OOB read of add_step_* arrays on the emission path _(dup of #10)_ |
+| 18 | ✓ P3 | memory-safety | GRAVITY | `seq_scale.c` — SEQ_SCALE_NoteValueGet :297 | **[FIXED 4b4fbd71]** TensionBandMask feeds seq_core_global_scale to NoteValueGet, which indexes seq_scale_table with no bounds check _(dup of #11)_ |
+| 11 | ✓ P3 | memory-safety | layer/transforms | `seq_scale.c` — SEQ_SCALE_NoteValueGet :297 | **[FIXED 4b4fbd71]** Out-of-bounds read of seq_scale_table when a per-track scale par-layer byte exceeds the table size. Fixed: out-of-table scale = pass-through in NoteValueGet/NextNoteInScale (covers Prev/Walk/all FTS callers); root normalized to 0..11. |
 | 47 | P3←P2 | concurrency | timers/sys/iic/bsl | `mios32_iic.c` — MIOS32_IIC_Init :245 | I2C2 (port 0) error IRQ install guarded by wrong macro (MIOS32_IIC1_ENABLED) - copy/paste typo |
 | 49 | P2 | persistence | vendor seams | `diskio.c` — disk_read / disk_write :98 | FatFS shim tests only `< 0`, so a positive SD R1 error code is accepted as success (stale read / silently dropped write) |
 | 3 | P3←P2 | logic | core tick+emit | `seq_core.c` — SEQ_CORE_Tick (gen_off_events) :5335 | u8 gen_off_events truncates the scaled stretched-glide gatelength on slow clock dividers, cutting the note short |
@@ -109,8 +109,8 @@ These are static verdicts — source-read and triple-refuted, but **not reproduc
 | 52 | P3 | concurrency | LENS concurrency | `seq_ui_inssel.c` — SEQ_UI_INSSEL_RecordChord :191 | Target step for atomic chord record is read from engine-owned t->step / timestamp_next_step_ref outside the mutex _(dup of #23)_ |
 | 22 | P3 | concurrency | play/record | `seq_ui_inssel.c` — SEQ_UI_INSSEL_KbdNote :286 | Held-note tracking arrays are not reentrancy-safe across the physical vs MIDI-remote button paths |
 | 24 | P3←P2 | concurrency | MIDI in/route | `seq_midi_in.c` — SEQ_MIDI_IN_ResetSingleTransArpStacks / SEQ_MIDI_IN_ResetChangerStacks :321 | UI-task stack reset is unsynchronized vs the higher-priority MIDI-in mutator → torn notestack / lost or corrupted transposer/arp note |
-| 25 | P3 | memory-safety | MIDI in/route | `seq_midi_in.c` — SEQ_MIDI_IN_TransposerNoteGet / SEQ_MIDI_IN_ArpNoteGet :1199 | Bus getters index bus_notestack[bus] with no bus-range guard (unlike the sibling PC-set/lowest-note getters) |
-| 56 | P3←P2 | memory-safety | LENS memory | `seq_live.c` — SEQ_LIVE_PlayEvent :221 | Note >127 in SEQ_LIVE_PlayEvent overruns seq_live_played_notes[4] and live_keyboard_*[128] _(dup of #21)_ |
+| 25 | ✓ P3 | memory-safety | MIDI in/route | `seq_midi_in.c` — SEQ_MIDI_IN_TransposerNoteGet / SEQ_MIDI_IN_ArpNoteGet :1199 | **[FIXED 4b4fbd71]** Bus getters index bus_notestack[bus] with no bus-range guard (unlike the sibling PC-set/lowest-note getters). Fixed: guard added to both, matching the siblings. |
+| 56 | ✓ P3←P2 | memory-safety | LENS memory | `seq_live.c` — SEQ_LIVE_PlayEvent :221 | **[FIXED 4b4fbd71]** Note >127 in SEQ_LIVE_PlayEvent overruns seq_live_played_notes[4] and live_keyboard_*[128] _(dup of #21)_. Fixed: note ≥128 rejected at the top of the NoteOn branch. |
 | 36 | P3←P2 | resource-exhaustion | UART MIDI | `mios32_uart.c` — USART2_IRQHandler / MIOS32_UART_RxBufferPut :775 | RX FIFO overflow silently drops MIDI bytes, corrupting the in-flight parser event |
 | 37 | P3 | concurrency | UART MIDI | `mios32_uart_midi.c` — MIOS32_UART_MIDI_Periodic_mS / MIOS32_UART_MIDI_PackageSend_NonBlocking :243 | Cross-priority race on rs_expire_ctr/rs_last between the +3 periodic task and +4 emission task; the 'atomic not required' comment is inaccurate |
 | 42 | P3 | concurrency | SPI/DMA/SD | `mios32_spi.c` — spi_callback :147 | spi_callback[] is written in task context and read in the DMA ISR without volatile/barrier |
@@ -123,8 +123,8 @@ These are static verdicts — source-read and triple-refuted, but **not reproduc
 | 64 | P3 | logic | MIDI OUT sched | `seq_midi_out.c` — SEQ_MIDI_OUT_Send :427 | len>0xffff OnOff split schedules the Off using the already-delayed timestamp, so port delay is applied twice to the Off |
 | 26 | P3 | logic | HIL sysex | `seq_testctrl.c` — cmd_page_set :526 | CMD_PAGE_SET stores an unvalidated page id into the global ui_page, leaving the UI on a non-existent page with all NULL callbacks |
 | 29 | P3 | logic | UI pages | `seq_ui_trkrnd.c` — RandomGenerator :518 | RandomGenerator leaves ui_selected_instrument set to a drum index and uses a stale instrument for parameter-layer randomization |
-| 33 | P3←P2 | memory-safety | persistence | `seq_file_t.c` — SEQ_FILE_T_Read :94 | Off-by-one track guard (`>` instead of `>=`) admits track==SEQ_CORE_NUM_TRACKS |
-| 34 | P3 | logic | persistence | `seq_file_b.c` — SEQ_FILE_B_PatternRead :762 | Unchecked SEQ_PAR_TrackInit/SEQ_TRG_TrackInit return leaves stale geometry on oversized file layer config |
+| 33 | ✓ P3←P2 | memory-safety | persistence | `seq_file_t.c` — SEQ_FILE_T_Read :94 | **[FIXED 4b4fbd71]** Off-by-one track guard (`>` instead of `>=`) admits track==SEQ_CORE_NUM_TRACKS. Fixed in both Read and Write_Hlp. |
+| 34 | ✓ P3 | logic | persistence | `seq_file_b.c` — SEQ_FILE_B_PatternRead :762 | **[FIXED 4b4fbd71]** Unchecked SEQ_PAR_TrackInit/SEQ_TRG_TrackInit return leaves stale geometry on oversized file layer config. Fixed: rejected geometry → default partition + section skim (PatternRead + TrackRead); seq_file_t EventMode re-partition also return-checked. |
 | 48 | P3 | logic | timers/sys/iic/bsl | `mios32_iic_midi.c` — MIOS32_IIC_MIDI_ScanInterfaces :211 | Shadowed 'error' in scan retry loop makes retry condition/availability logic ineffective |
 | 69 | P3 | logic | MIDI in/route | `seq_midi_sysex.c` — SEQ_MIDI_SYSEX_Cmd_Remote :453 | Remote refresh detection compares REMOTE_CMD to REMOTE_CMD_COMPLETE and &&'s a nonzero constant, so the 'is REFRESH' gate is wrong |
 | 71 | P3 | logic | HIL sysex | `seq_testctrl.c` — SEQ_TESTCTRL_Parser :2721 | A new F0 arriving mid-payload is stored as a data byte instead of resyncing the parser, swallowing the next command |
@@ -152,6 +152,8 @@ _Findings: #6, #17, #62_
 Loaded pattern/song/groove/track-preset files and SysEx-set CC bytes are trusted without adequate bounds or geometry validation, driving wild writes, OOB reads, and modulo-by-zero on the emission path: track-preset addr offset, song_size underflow, groove num_steps truncation/overrun, drum-instrument-count overrun, scale-table index, combined-mode cross-track reads, off-by-one track guard, signed-overflow geometry, and unmasked note bytes overrunning live-play arrays.
 
 _Findings: #4, #9, #10, #11, #12, #21, #30, #31, #32, #33, #34, #56, #57, #67_
+
+**Status: theme CLOSED (2026-07-01).** #30/#31 fixed in ff2505c5 (P1 wave); the rest landed as the input-hardening pass 4b4fbd71. The durable pattern: `SEQ_PAR_TrackInit`/`SEQ_TRG_TrackInit` are now the geometry gate (u32 math, ≤16 layers/instruments, no zero factors) and loaders honor the reject; scale/groove/note bytes are bounded at their own entry points.
 
 ### MIDI-out scheduler sentinel/len/delay corners -> stuck or cut notes
 
