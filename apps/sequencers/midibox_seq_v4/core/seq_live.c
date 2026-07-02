@@ -224,25 +224,38 @@ s32 SEQ_LIVE_PlayEvent(u8 track, mios32_midi_package_t p)
     u32 note_ix32 = p.note / 32;
     u32 note_mask = (1 << (p.note % 32));
 
+    // #51: the bitmap RMW and the port/chn/note triple are shared between the
+    // +2 play surface and the +3 MIDI-in task — snapshot the active state and
+    // flip the bitmap word atomically; the actual sends stay outside the
+    // critical section.
+    u8 was_active;
+    mios32_midi_port_t prev_port = DEFAULT;
+    u8 prev_chn = 0, prev_note = 0;
+    MIOS32_IRQ_Disable();
+    was_active = (seq_live_played_notes[note_ix32] & note_mask) ? 1 : 0;
+    if( was_active ) {
+      prev_port = live_keyboard_port[p.note];
+      prev_chn  = live_keyboard_chn[p.note];
+      prev_note = live_keyboard_note[p.note];
+    }
+    if( p.velocity == 0 )
+      seq_live_played_notes[note_ix32] &= ~note_mask;
+    else
+      seq_live_played_notes[note_ix32] |= note_mask;
+    MIOS32_IRQ_Enable();
+
     // in any case (key depressed or not), play note off if note is active!
     // this ensures that note off event is sent if for example the OCT_TRANSPOSE has been changed
-    if( seq_live_played_notes[note_ix32] & note_mask ) {
+    if( was_active ) {
       // send velocity off
       MUTEX_MIDIOUT_TAKE;
       SEQ_MIDI_PORT_FilterOscPacketsSet(1); // important to avoid OSC feedback loops!
-      MIOS32_MIDI_SendNoteOn(live_keyboard_port[p.note],
-			     live_keyboard_chn[p.note],
-			     live_keyboard_note[p.note],
-			     0x00);
+      MIOS32_MIDI_SendNoteOn(prev_port, prev_chn, prev_note, 0x00);
       SEQ_MIDI_PORT_FilterOscPacketsSet(0);
       MUTEX_MIDIOUT_GIVE;
     }
 
-    if( p.velocity == 0 ) {
-      seq_live_played_notes[note_ix32] &= ~note_mask;
-    } else {
-      seq_live_played_notes[note_ix32] |= note_mask;
-
+    if( p.velocity != 0 ) {
       int effective_note;
       u8 event_mode = SEQ_CC_Get(track, SEQ_CC_MIDI_EVENT_MODE);
       if( event_mode == SEQ_EVENT_MODE_Drum ) {
@@ -303,9 +316,13 @@ s32 SEQ_LIVE_PlayEvent(u8 track, mios32_midi_package_t p)
 	}
       }
 
+      // triple-store atomically — a preempting same-note play from the other
+      // input task must never read a half-written (port,chn,note) (#51)
+      MIOS32_IRQ_Disable();
       live_keyboard_port[p.note] = port;
       live_keyboard_chn[p.note] = chn;
       live_keyboard_note[p.note] = effective_note;
+      MIOS32_IRQ_Enable();
 
       if( play_note ) {
 	seq_layer_evnt_t e;

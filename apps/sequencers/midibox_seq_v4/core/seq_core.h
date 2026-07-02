@@ -443,6 +443,10 @@ extern void SEQ_CORE_RenderDirtySet(u8 track);
 extern void SEQ_CORE_RenderDirtySetAll(void);
 extern void SEQ_CORE_RenderTrack(u8 track);
 extern void SEQ_CORE_RenderTracks(void);
+// bulk CC-replay paths (journal restore, bank track reads) set this around
+// their replay loop: dirty/touched still latch, but the per-call synchronous
+// stopped-render is skipped — the bulk path forces one full render at the end
+extern void SEQ_CORE_RenderSuppressSync(u8 suppress);
 
 // Phase C bridge: keep slot 0 mirrored from tcc (playmode + strength + bus)
 // whenever the underlying CCs change. Called from SEQ_CC_Set.

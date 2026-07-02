@@ -144,7 +144,9 @@
 // Local variables
 /////////////////////////////////////////////////////////////////////////////
 
-static void (*spi_callback[3])(void);
+// volatile: written in task context (MIOS32_SPI_TransferBlock), read in the DMA
+// TC ISRs — guarantees the ISR-visible load isn't optimized/reordered away
+static void (* volatile spi_callback[3])(void);
 
 static u8 tx_dummy_byte;
 static u8 rx_dummy_byte;

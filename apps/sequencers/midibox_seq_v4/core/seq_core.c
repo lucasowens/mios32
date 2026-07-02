@@ -919,6 +919,17 @@ s32 SEQ_CORE_Init(u32 mode)
 // from any site that mutates the processor stack's inputs (slot params,
 // processor enable/disable, bus assignment). The touch is the signal that
 // switches the renderer into sweep regime for SEQ_RENDER_SWEEP_MS.
+// Bulk CC-replay paths (journal restore, bank track reads) suppress the
+// per-call synchronous stopped-render below — they force one full render at
+// the end anyway. Without this, every replayed CC would full-render the track
+// via SlotSync → RenderTouched (stopped), turning a 48-128 CC replay into
+// dozens of full renders (#62 made the stopped flush full-buffer).
+static u8 seq_render_suppress_sync;
+void SEQ_CORE_RenderSuppressSync(u8 suppress)
+{
+  seq_render_suppress_sync = suppress;
+}
+
 void SEQ_CORE_RenderTouched(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
@@ -930,7 +941,7 @@ void SEQ_CORE_RenderTouched(u8 track)
   u32 now = (u32)MIOS32_TIMESTAMP_Get();
   seq_render_touched_ms[track] = now ? now : 1;
   seq_render_dirty[track] = 1;
-  if( !SEQ_BPM_IsRunning() )
+  if( !SEQ_BPM_IsRunning() && !seq_render_suppress_sync )
     SEQ_CORE_RenderTrack(track);
 }
 
@@ -942,6 +953,12 @@ void SEQ_CORE_RenderTouched(u8 track)
 u8 SEQ_CORE_RenderSweeping(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
+    return 0;
+  // Stopped: every render is the synchronous edit-flush (no tick renderer runs
+  // to catch up later), so the sweep window would leave the rest of the mirror
+  // stale — force the quiet full-buffer path (#62). The sweep regime only makes
+  // sense while the playhead is moving.
+  if( !SEQ_BPM_IsRunning() )
     return 0;
   u32 touched = seq_render_touched_ms[track];
   if( !touched )
@@ -959,7 +976,7 @@ void SEQ_CORE_RenderDirtySet(u8 track)
   // renderer never runs and UI reads (par/trg via SEQ_*_Get → output mirror)
   // stay stale. Flush synchronously so edits, CLEAR, GP toggles, and file
   // loads are immediately visible on the LCD.
-  if( !SEQ_BPM_IsRunning() )
+  if( !SEQ_BPM_IsRunning() && !seq_render_suppress_sync )
     SEQ_CORE_RenderTrack(track);
 }
 
@@ -968,7 +985,7 @@ void SEQ_CORE_RenderDirtySetAll(void)
   u8 track;
   for(track=0; track<SEQ_CORE_NUM_TRACKS; ++track) {
     seq_render_dirty[track] = 1;
-    if( !SEQ_BPM_IsRunning() )
+    if( !SEQ_BPM_IsRunning() && !seq_render_suppress_sync )
       SEQ_CORE_RenderTrack(track);
   }
 }
@@ -3432,6 +3449,13 @@ static s32 journal_snap(seq_core_track_undo_t *u, u8 track)
 
   u->valid = 0; // invalidate while the snapshot is in flight
   u->track = track;
+
+  // Capture under tick exclusion, mirroring journal_restore's write phase: the
+  // +4 emission task writes par (generators), trg (record) and CCs (self-bus
+  // Ctrl layers) — an unfenced snapshot can capture a pattern that never
+  // coherently existed (#19). RAM-only, same magnitude as the restore fence.
+  portENTER_CRITICAL();
+
   u->play_section = seq_core_trk[track].play_section;
   u->par_steps        = (u16)SEQ_PAR_NumStepsGet(track);
   u->par_layers       = (u8)SEQ_PAR_NumLayersGet(track);
@@ -3450,6 +3474,8 @@ static s32 journal_snap(seq_core_track_undo_t *u, u8 track)
   memcpy(u->par, seq_par_layer_value[track], SEQ_PAR_MAX_BYTES);
   memcpy(u->trg, seq_trg_layer_value[track], SEQ_TRG_MAX_BYTES);
   u->gen_count = SEQ_GENERATOR_TrackSnapshot(track, u->gen, SEQ_GENERATOR_PERSIST_SLOTS);
+
+  portEXIT_CRITICAL();
 
   u->valid = 1;
   return 0;
@@ -3470,7 +3496,10 @@ static s32 journal_restore(const seq_core_track_undo_t *u)
 
   // RAM-only write phase under tick exclusion (fast — no SD I/O): a tick
   // between the CC replay and the bulk memcpys would render/emit torn state.
+  // The CC replay's per-call stopped-renders are suppressed — the forced full
+  // render below covers freshness (#62).
   portENTER_CRITICAL();
+  SEQ_CORE_RenderSuppressSync(1);
 
   memcpy(seq_core_trk[track].name, u->name, 81);
 
@@ -3495,6 +3524,7 @@ static s32 journal_restore(const seq_core_track_undo_t *u)
   // restored geometry.
   SEQ_GENERATOR_TrackRestore(track, u->gen, u->gen_count);
 
+  SEQ_CORE_RenderSuppressSync(0);
   portEXIT_CRITICAL();
 
   // Force a full quiet render — same emission-freshness contract as the pull
@@ -3620,13 +3650,21 @@ s32 SEQ_CORE_JournalUndo(void)
   if( !action_journal.before.valid )
     return -1;
 
-  // capture the post-gesture (live) state so REDO can re-apply it
-  journal_snap(&action_journal.after, action_journal.before.track);
+  // capture the post-gesture (live) state so REDO can re-apply it — UNLESS the
+  // track meanwhile grew more engaged generators than the snapshot persists
+  // (same truncation guard as JournalArm): a truncated `after` would make REDO
+  // silently delete the overflow (#20). The undo itself still proceeds; only
+  // the redo arm is withheld.
+  if( SEQ_GENERATOR_TrackEngagedCount(action_journal.before.track) > SEQ_GENERATOR_PERSIST_SLOTS )
+    action_journal.after.valid = 0;
+  else
+    journal_snap(&action_journal.after, action_journal.before.track);
 
   s32 r = journal_restore(&action_journal.before);
   if( r < 0 ) return r;
 
-  action_journal.state = SEQ_CORE_JRNL_REDOABLE;
+  action_journal.state = action_journal.after.valid ? SEQ_CORE_JRNL_REDOABLE
+                                                    : SEQ_CORE_JRNL_EMPTY;
   return r;
 }
 
@@ -3656,12 +3694,17 @@ s32 SEQ_CORE_JournalRedo(void)
   // on the track between the undo and this redo is preserved and a following
   // UNDO steps back to it (the toggle is a true reversible 2-way swap, never a
   // silent clobber). before.track == after.track, so this re-snaps the same track.
-  journal_snap(&action_journal.before, action_journal.after.track);
+  // Same generator-truncation guard as the UNDO arm (#20).
+  if( SEQ_GENERATOR_TrackEngagedCount(action_journal.after.track) > SEQ_GENERATOR_PERSIST_SLOTS )
+    action_journal.before.valid = 0;
+  else
+    journal_snap(&action_journal.before, action_journal.after.track);
 
   s32 r = journal_restore(&action_journal.after);
   if( r < 0 ) return r;
 
-  action_journal.state = SEQ_CORE_JRNL_UNDOABLE;
+  action_journal.state = action_journal.before.valid ? SEQ_CORE_JRNL_UNDOABLE
+                                                     : SEQ_CORE_JRNL_EMPTY;
   return r;
 }
 

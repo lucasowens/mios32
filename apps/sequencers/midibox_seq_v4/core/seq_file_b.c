@@ -753,10 +753,14 @@ DEBUG_MSG("Skipping Track %d\n", track);
 		p_layer_size, 8*t_layer_size);
 #endif
 
-      // reading CCs
+      // reading CCs. Suppress the per-CC synchronous stopped-render (SlotSync →
+      // RenderTouched would full-render armed tracks dozens of times per replay);
+      // the RenderDirtySet after the bulk load below does the one real flush (#62)
       u8 cc;
+      SEQ_CORE_RenderSuppressSync(1);
       for(cc=0; cc<128; ++cc)
 	SEQ_CC_Set(track, cc, cc_buffer[cc]);
+      SEQ_CORE_RenderSuppressSync(0);
 
       // partitionate parameter layer and clear all steps.
       // A rejected geometry (TrackInit <0 leaves the partition stale) must not stream
@@ -1038,8 +1042,12 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
   seq_core_trk[dst_track].name[80] = 0;
 
   u8 cc;
+  // same per-CC stopped-render suppression as PatternRead — the RenderDirtySet
+  // after the bulk load is the one real flush (#62)
+  SEQ_CORE_RenderSuppressSync(1);
   for(cc=0; cc<128; ++cc)
     SEQ_CC_Set(dst_track, cc, cc_buffer[cc]);
+  SEQ_CORE_RenderSuppressSync(0);
 
   // partitionate parameter layer and clear all steps.
   // Rejected geometry -> default partition + skim, as in SEQ_FILE_B_PatternRead (#34)

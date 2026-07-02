@@ -315,6 +315,12 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
 
+  // Processor-slot syncs are FLAGGED here and run after portEXIT_CRITICAL:
+  // while stopped they run a synchronous full track render (RenderTouched),
+  // which must not execute with interrupts masked (#17). Each sync re-derives
+  // from tcc, so deferring past the tcc write is equivalent.
+  u8 sync_chordmask = 0, sync_tension = 0, sync_pitch = 0, sync_limit = 0;
+
   // since CCs can be modified from other tasks at different priority we should do this operation atomic
   portENTER_CRITICAL();
 
@@ -322,27 +328,27 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
     tcc->lay_const[cc] = value;
     if( tcc->event_mode != SEQ_EVENT_MODE_Drum )
       SEQ_CC_LinkUpdate(track);
-    SEQ_CORE_PitchSlotSync(track); // layer types feed the PITCH render (Note/CC/Scale/Root)
-    SEQ_CORE_LimitSlotSync(track); // ...and the LIMIT render (which layers are Note)
+    sync_pitch = 1; // layer types feed the PITCH render (Note/CC/Scale/Root)
+    sync_limit = 1; // ...and the LIMIT render (which layers are Note)
   } else {
     switch( cc ) {
       case SEQ_CC_MODE:
 	tcc->playmode = value;
-	SEQ_CORE_ChordMaskSlotSync(track); // ChordMask ↔ its slot (phase C bridge)
-	SEQ_CORE_TensionSlotSync(track);   // keep the tension slot consistent too
-	SEQ_CORE_PitchSlotSync(track);     // Transpose/Arp playmode arms/fences PITCH
-	SEQ_CORE_LimitSlotSync(track);     // arp fence applies to LIMIT too
+	sync_chordmask = 1; // ChordMask ↔ its slot (phase C bridge)
+	sync_tension = 1;   // keep the tension slot consistent too
+	sync_pitch = 1;     // Transpose/Arp playmode arms/fences PITCH
+	sync_limit = 1;     // arp fence applies to LIMIT too
 	break;
       case SEQ_CC_MODE_FLAGS:
 	tcc->trkmode_flags.ALL = value;
-	SEQ_CORE_PitchSlotSync(track); // FORCE_SCALE (+ HOLD/FIRST_NOTE) live here
+	sync_pitch = 1; // FORCE_SCALE (+ HOLD/FIRST_NOTE) live here
 	break;
-  
+
       case SEQ_CC_MIDI_EVENT_MODE:
 	tcc->event_mode = value;
 	SEQ_CC_LinkUpdate(track);
-	SEQ_CORE_PitchSlotSync(track); // drum fence + CC-mode branch depend on this
-	SEQ_CORE_LimitSlotSync(track); // drum fence applies to LIMIT too
+	sync_pitch = 1; // drum fence + CC-mode branch depend on this
+	sync_limit = 1; // drum fence applies to LIMIT too
 	break;
 
       case SEQ_CC_MIDI_CHANNEL: tcc->midi_chn = value; break;
@@ -361,16 +367,16 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	// Phase G/step-7 polish: BUSASG no longer drives the chord_mask slot's
 	// bus — the processor reads tcc->chordmask_bus instead (independent of
 	// the track's own bus assignment).
-	SEQ_CORE_PitchSlotSync(track); // PITCH reads the transposer bus from here
+	sync_pitch = 1; // PITCH reads the transposer bus from here
 	break;
 
       case SEQ_CC_LIMIT_LOWER:
 	tcc->limit_lower = value;
-	SEQ_CORE_LimitSlotSync(track);
+	sync_limit = 1;
 	break;
       case SEQ_CC_LIMIT_UPPER:
 	tcc->limit_upper = value;
-	SEQ_CORE_LimitSlotSync(track);
+	sync_limit = 1;
 	break;
     
       case SEQ_CC_DIRECTION: tcc->dir_mode = value; break;
@@ -390,11 +396,11 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
     
       case SEQ_CC_TRANSPOSE_SEMI:
 	tcc->transpose_semi = value;
-	SEQ_CORE_PitchSlotSync(track);
+	sync_pitch = 1;
 	break;
       case SEQ_CC_TRANSPOSE_OCT:
 	tcc->transpose_oct = value;
-	SEQ_CORE_PitchSlotSync(track);
+	sync_pitch = 1;
 	break;
       case SEQ_CC_GROOVE_VALUE: tcc->groove_value = value; break;
       case SEQ_CC_GROOVE_STYLE: tcc->groove_style.ALL = value; break;
@@ -412,7 +418,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_ASG_RANDOM_VALUE: tcc->trg_assignments.random_value = value; break;
       case SEQ_CC_ASG_NO_FX:
 	tcc->trg_assignments.no_fx = value;
-	SEQ_CORE_LimitSlotSync(track); // the LIMIT render honors no_fx per step — re-render
+	sync_limit = 1; // the LIMIT render honors no_fx per step — re-render
 	break;
       case SEQ_CC_ASG_ROLL_GATE: tcc->trg_assignments.roll_gate = value; break;
 
@@ -488,26 +494,26 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_ROBOTIZE_LOOP_ROTATE: tcc->robotize_loop_rotate = value & 0x0f; break;
       case SEQ_CC_CHORDMASK_STRENGTH:
 	tcc->chordmask_strength = value & 0x7f;
-	SEQ_CORE_ChordMaskSlotSync(track); // strength follows tcc when ChordMask active
+	sync_chordmask = 1; // strength follows tcc when ChordMask active
 	break;
       case SEQ_CC_CHORDMASK_BUS:
 	tcc->chordmask_bus = value & 0x03; // 4 buses (0..3)
-	SEQ_CORE_ChordMaskSlotSync(track);
-	SEQ_CORE_TensionSlotSync(track); // tension shares the chord-context bus
+	sync_chordmask = 1;
+	sync_tension = 1; // tension shares the chord-context bus
 	break;
       case SEQ_CC_CHORDMASK_DRUM_L:
 	tcc->chordmask_drum_l = value & 0xff;
-	SEQ_CORE_ChordMaskSlotSync(track);
-	SEQ_CORE_TensionSlotSync(track);
+	sync_chordmask = 1;
+	sync_tension = 1;
 	break;
       case SEQ_CC_CHORDMASK_DRUM_H:
 	tcc->chordmask_drum_h = value & 0xff;
-	SEQ_CORE_ChordMaskSlotSync(track);
-	SEQ_CORE_TensionSlotSync(track);
+	sync_chordmask = 1;
+	sync_tension = 1;
 	break;
       case SEQ_CC_TENSION_GRIP:
 	tcc->tension_grip = value & 0x7f;
-	SEQ_CORE_TensionSlotSync(track); // GRIP enables/scales the field slot
+	sync_tension = 1; // GRIP enables/scales the field slot
 	break;
 
       default:
@@ -517,6 +523,12 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
   }
 
   portEXIT_CRITICAL();
+
+  // deferred slot syncs — interrupts ON (see the flag declarations above, #17)
+  if( sync_chordmask ) SEQ_CORE_ChordMaskSlotSync(track);
+  if( sync_tension )   SEQ_CORE_TensionSlotSync(track);
+  if( sync_pitch )     SEQ_CORE_PitchSlotSync(track);
+  if( sync_limit )     SEQ_CORE_LimitSlotSync(track);
 
   // FEARLESS SWITCHING: live diverged from slot. Loads re-clear at the end of
   // SEQ_PATTERN_Load (the bank read replays CCs through this chokepoint).

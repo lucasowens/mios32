@@ -102,7 +102,10 @@ static seq_bpm_mode_t bpm_mode;
 static u8 bpm_req_start;
 static u8 bpm_req_stop;
 static u8 bpm_req_cont;
-static u8 bpm_req_clk_ctr;
+// u32, not u8: the counter is incremented by the timer ISR once per tick — an
+// emission-task stall longer than 256 ticks would silently wrap a u8 and drop
+// the whole missed span instead of replaying it (adversarial review #0)
+static u32 bpm_req_clk_ctr;
 static u8 bpm_req_song_pos;
 
 static u8 slave_clk;
@@ -284,7 +287,13 @@ u32 SEQ_BPM_TickGet(void)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_BPM_TickSet(u32 tick)
 {
+  // repositioning invalidates any not-yet-consumed clock requests: they were
+  // raised for the OLD position, and ChkReqClk would otherwise clamp the fresh
+  // tick up to the stale request count (#1)
+  MIOS32_IRQ_Disable();
+  bpm_req_clk_ctr = 0;
   bpm_tick = tick;
+  MIOS32_IRQ_Enable();
 
   return 0; // no error
 }

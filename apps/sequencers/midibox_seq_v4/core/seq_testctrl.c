@@ -490,7 +490,12 @@ static void cmd_reset_state(mios32_midi_port_t port, const u8 *payload, u8 plen)
   // poison the next suite run. Cleared unconditionally so reset() fully
   // normalizes UI state.
   SEQ_UI_GestureStateReset();
+  // seq_core_state is a shared bitfield word also RMW'd by the +4 task
+  // (transport/trigger flags) — clear FREEZE atomically, matching
+  // cmd_freeze_set (#70)
+  MIOS32_IRQ_Disable();
   seq_core_state.FREEZE = 0;
+  MIOS32_IRQ_Enable();
 
   // Drop the unified action journal: a reset is a baseline, and a stale UNDO
   // armed before it would otherwise restore pre-reset content.

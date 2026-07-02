@@ -323,6 +323,11 @@ s32 SEQ_MIDI_IN_ResetSingleTransArpStacks(u8 bus)
   if( bus >= SEQ_MIDI_IN_NUM_BUSSES )
     return -1;
 
+  // atomic vs the +3 MIDI-in Push/Pop and the +4 emission getters — a reset
+  // caught mid-Init would hand out a torn notestack (#24); matches the atomic
+  // block in ResetChangerStacks
+  MIOS32_IRQ_Disable();
+
   NOTESTACK_Init(&bus_notestack[bus][BUS_NOTESTACK_TRANSPOSER],
 		 NOTESTACK_MODE_PUSH_TOP,
 		 &bus_notestack_items[bus][BUS_NOTESTACK_TRANSPOSER][0],
@@ -349,7 +354,9 @@ s32 SEQ_MIDI_IN_ResetSingleTransArpStacks(u8 bus)
   arp_sorted_hold[bus][1].note = arp_unsorted_hold[bus][1].note = 0x40; // E-3
   arp_sorted_hold[bus][2].note = arp_unsorted_hold[bus][2].note = 0x43; // G-3
   arp_sorted_hold[bus][3].note = arp_unsorted_hold[bus][3].note = 0x48; // C-4
-    
+
+  MIOS32_IRQ_Enable();
+
   return 0; // no error
 }
 
@@ -375,6 +382,8 @@ s32 SEQ_MIDI_IN_ResetChangerStacks(void)
 {
   int i;
 
+  // atomic vs the +3 MIDI-in mutators, same reasoning as the trans/arp reset (#24)
+  MIOS32_IRQ_Disable();
   for(i=0; i<SECTION_CHANGER_NOTESTACK_NUM; ++i)
     NOTESTACK_Init(&section_changer_notestack[i],
 		   NOTESTACK_MODE_PUSH_TOP,
@@ -386,6 +395,7 @@ s32 SEQ_MIDI_IN_ResetChangerStacks(void)
 		   NOTESTACK_MODE_PUSH_TOP,
 		   &patch_changer_notestack_items[i][0],
 		   SEQ_MIDI_IN_PATCH_CHANGER_NOTESTACK_SIZE);
+  MIOS32_IRQ_Enable();
 
   // following operation should be atomic!
   u8 track;
@@ -770,10 +780,14 @@ static s32 SEQ_MIDI_IN_Receive_Note(u8 bus, u8 note, u8 velocity)
 
   n = &bus_notestack[bus][BUS_NOTESTACK_TRANSPOSER];
   if( velocity ) { // Note On
+    // stack mutation + hold-note update atomic vs the +4 emission getters
+    // (TransposerNoteGet) which can preempt this task mid-Push (#68-class)
+    MIOS32_IRQ_Disable();
     NOTESTACK_Push(n, note, velocity);
     if( bus_notestack[bus][BUS_NOTESTACK_TRANSPOSER].len == 1 )
       transposer_hold_first_note[bus] = n->note_items[0].note;
     transposer_hold_last_note[bus] = n->note_items[0].note;
+    MIOS32_IRQ_Enable();
 
     // will only be used for Bus1 and if enabled in OPT menu
     if( bus == 0
@@ -793,9 +807,11 @@ static s32 SEQ_MIDI_IN_Receive_Note(u8 bus, u8 note, u8 velocity)
       }
     }
   } else { // Note Off
+    MIOS32_IRQ_Disable();
     if( NOTESTACK_Pop(n, note) > 0 && n->len ) {
       transposer_hold_last_note[bus] = n->note_items[0].note;
     }
+    MIOS32_IRQ_Enable();
   }
 #if DEBUG_VERBOSE_LEVEL >= 1
   DEBUG_MSG("NOTESTACK_TRANSPOSER[%d]:\n", bus);
@@ -820,25 +836,34 @@ static s32 SEQ_MIDI_IN_Receive_Note(u8 bus, u8 note, u8 velocity)
 
       // and invalidate hold stacks
       int i;
+      MIOS32_IRQ_Disable();
       for(i=0; i<4; ++i)
 	arp_sorted_hold[bus][i].ALL = arp_unsorted_hold[bus][i].ALL = 0;
+      MIOS32_IRQ_Enable();
     }
 
-    // add to stacks
+    // add to stacks + refresh hold copies atomically: the +4 emission task's
+    // ArpNoteGet latches len then indexes items — it must never preempt a
+    // half-done Push/copy (#68)
+    int i;
+    MIOS32_IRQ_Disable();
     NOTESTACK_Push(&bus_notestack[bus][BUS_NOTESTACK_ARP_SORTED], note, velocity);
     NOTESTACK_Push(&bus_notestack[bus][BUS_NOTESTACK_ARP_UNSORTED], note, velocity);
 
     // copy to hold stack
-    int i;
     for(i=0; i<4; ++i) {
       arp_unsorted_hold[bus][i].ALL = (i < bus_notestack[bus][BUS_NOTESTACK_ARP_UNSORTED].len) ? bus_notestack[bus][BUS_NOTESTACK_ARP_UNSORTED].note_items[i].ALL : 0;
       arp_sorted_hold[bus][i].ALL = (i < bus_notestack[bus][BUS_NOTESTACK_ARP_SORTED].len) ? bus_notestack[bus][BUS_NOTESTACK_ARP_SORTED].note_items[i].ALL : 0;
     }
+    MIOS32_IRQ_Enable();
 
   } else { // Note Off
-    // remove note from sorted/unsorted stack (not hold stacks)
+    // remove note from sorted/unsorted stack (not hold stacks) — atomic vs the
+    // +4 ArpNoteGet reader, same reasoning as the Push side (#68)
+    MIOS32_IRQ_Disable();
     NOTESTACK_Pop(&bus_notestack[bus][BUS_NOTESTACK_ARP_SORTED], note);
     NOTESTACK_Pop(&bus_notestack[bus][BUS_NOTESTACK_ARP_UNSORTED], note);
+    MIOS32_IRQ_Enable();
   }
 
 #if DEBUG_VERBOSE_LEVEL >= 1

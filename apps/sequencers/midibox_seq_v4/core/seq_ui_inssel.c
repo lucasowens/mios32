@@ -185,7 +185,11 @@ static void SEQ_UI_INSSEL_RecordChord(u8 track, u8 *notes, u8 num_notes, u8 velo
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
   seq_core_trk_t *t = &seq_core_trk[track];
 
-  // determine the target step
+  // determine the target step — under the MIDI-out mutex, so the +4 emission
+  // task (which advances t->step / timestamp_next_step_ref while holding it)
+  // can't move the step between the sample and the layer writes below (#23/#52)
+  MUTEX_MIDIOUT_TAKE;
+
   u16 step;
   if( SEQ_BPM_IsRunning() && !seq_record_options.STEP_RECORD ) {
     step = t->step;
@@ -214,7 +218,6 @@ static void SEQ_UI_INSSEL_RecordChord(u8 track, u8 *notes, u8 num_notes, u8 velo
   u8 ni = 0;
   int pl;
 
-  MUTEX_MIDIOUT_TAKE;
   // fill the note-type layers with the chord notes; clear any extra note layers
   for(pl=0; pl<num_p_layers; ++pl) {
     u8 lt = tcc->lay_const[0*16 + pl];
@@ -240,15 +243,25 @@ static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
     // release exactly the notes we started (octave/scale/layout may have moved meanwhile).
     // A chord that was recorded atomically was only monitored live -> just stop the live
     // note; everything else goes back through the same path that started it.
-    u8 as_chord = inssel_kbd_recorded_chord[key];
+    // Drain the per-key state atomically first — the physical-button and
+    // MIDI-remote paths run in different tasks and can interleave on the same
+    // key (#22); the note-off sends then work from the local snapshot.
+    u8 as_chord;
+    u8 held[INSSEL_KBD_MAX_NOTES];
+    MIOS32_IRQ_Disable();
+    as_chord = inssel_kbd_recorded_chord[key];
     inssel_kbd_recorded_chord[key] = 0;
     for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i) {
-      if( inssel_kbd_held[key][i] != 0xff ) {
+      held[i] = inssel_kbd_held[key][i];
+      inssel_kbd_held[key][i] = 0xff;
+    }
+    MIOS32_IRQ_Enable();
+    for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i) {
+      if( held[i] != 0xff ) {
 	if( as_chord )
-	  SEQ_UI_INSSEL_PlayLive(track, inssel_kbd_held[key][i], 0x00);
+	  SEQ_UI_INSSEL_PlayLive(track, held[i], 0x00);
 	else
-	  SEQ_UI_INSSEL_EmitNote(track, inssel_kbd_held[key][i], 0x00);
-	inssel_kbd_held[key][i] = 0xff;
+	  SEQ_UI_INSSEL_EmitNote(track, held[i], 0x00);
       }
     }
     return 0;
@@ -282,11 +295,14 @@ static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
     notes[num_notes++] = (u8)n;
   }
 
-  // store the exact notes (for note-off)
+  // store the exact notes (for note-off) — atomically, same cross-task
+  // reentrancy as the release drain (#22)
+  MIOS32_IRQ_Disable();
   for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i)
     inssel_kbd_held[key][i] = 0xff;
   for(i=0; i<num_notes; ++i)
     inssel_kbd_held[key][i] = notes[i];
+  MIOS32_IRQ_Enable();
 
   if( seq_record_state.ENABLED && num_notes > 1 ) {
     // recording a chord: write the whole chord to one step atomically (the stock

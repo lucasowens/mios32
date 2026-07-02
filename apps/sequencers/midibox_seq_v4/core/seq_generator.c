@@ -25,6 +25,8 @@
 #include <mios32.h>
 #include <string.h>
 
+#include "tasks.h"
+
 #include "seq_generator.h"
 #include "seq_core.h"
 #include "seq_cc.h"
@@ -379,9 +381,14 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
     // (possibly UNDO-restored or paused-out-of-sync) source matches. NOT armed:
     // matches the pre-consolidation "first-ENGAGE only" undo so a resync
     // double-tap doesn't consume the user's last undoable gesture.
+    // fence the retarget+rewrite against the +4 emission Tick's mutate-and-write
+    // on the same slot (#16) — engaged may already be 1, so the Tick can land
+    // mid-gesture otherwise
+    portENTER_CRITICAL();
     pool[ix].par_layer = par_layer;
     pool[ix].engaged = 1;
     write_loop_to_source(&pool[ix]);
+    portEXIT_CRITICAL();
     return 0;
   }
 
@@ -404,8 +411,9 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   g->mutation_rate  = SEQ_GENERATOR_DEFAULT_RATE;
   g->mutation_depth = SEQ_GENERATOR_DEFAULT_DEPTH;
   g->contour_shape  = SEQ_GENERATOR_DEFAULT_CONTOUR;
-  g->engaged        = 1;
-  g->in_use         = 1;
+  // NOTE: engaged/in_use are published LAST (below, after seed/loop/anchor/mult
+  // are complete) — the +4 emission Tick walks the pool keyed on in_use, so an
+  // early publish would let it process a half-built slot (#15).
   // Per-track-RNG keystone (2026-06-19): mint this slot's xorshift seed fresh
   // from the global RNG so each ENGAGE still produces a fresh Turing line (no
   // feel regression vs the old global-RNG seed_loop), then let the slot's own
@@ -428,6 +436,14 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   pool_index[track][instrument] = (u8)(g - pool);
 
   write_loop_to_source(g);
+
+  // publish: slot becomes visible to the pool walkers only now, fully built
+  // (the critical section doubles as a compiler barrier so the field stores
+  // above can't be reordered past the publish) (#15)
+  portENTER_CRITICAL();
+  g->engaged = 1;
+  g->in_use  = 1;
+  portEXIT_CRITICAL();
   return 0;
 }
 
@@ -589,8 +605,12 @@ u8 SEQ_GENERATOR_Roll(u8 track)
     seq_generator_t *g = &pool[i];
     if( !g->in_use || !g->engaged || g->track != track )
       continue;
+    // per-slot fence vs the +4 emission Tick's measure-wrap mutate+write on the
+    // same slot — the seed draw and loop bytes are one ordered stream (#16)
+    portENTER_CRITICAL();
     roll_loop(g);
     write_loop_to_source(g);
+    portEXIT_CRITICAL();
     ++n;
   }
   return n;
@@ -612,8 +632,12 @@ s32 SEQ_GENERATOR_Anchor(u8 track, u8 instrument)
 {
   seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
   if( g == NULL ) return -1;
+  // fence vs the Tick's mutate on the same slot, or the anchor can capture a
+  // half-mutated loop (#16)
+  portENTER_CRITICAL();
   memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
   g->anchor_valid = 1;
+  portEXIT_CRITICAL();
   return 0;
 }
 
@@ -623,12 +647,15 @@ s32 SEQ_GENERATOR_Snap(u8 track, u8 instrument)
   seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
   if( g == NULL ) return -1;
   if( !g->anchor_valid ) return -2;
+  // fence vs the Tick's mutate+write on the same slot (#16)
+  portENTER_CRITICAL();
   memcpy(g->loop, g->anchor, SEQ_GENERATOR_LOOP_LEN);
   // Rewrite source so the snap is audible immediately, not on the next wrap.
   // SNAP works whether or not the slot is currently engaged — both halves
   // make sense (engaged + snap = pull back to identity during play;
   // disengaged + snap = restore the loop for inspection / re-engage).
   write_loop_to_source(g);
+  portEXIT_CRITICAL();
   return 0;
 }
 
@@ -651,8 +678,11 @@ s32 SEQ_GENERATOR_ForceMutate(u8 track, u8 instrument)
 {
   seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
   if( g == NULL ) return -1;
+  // fence vs the Tick's mutate+write on the same slot (#16)
+  portENTER_CRITICAL();
   mutate_loop(g);
   write_loop_to_source(g);
+  portEXIT_CRITICAL();
   return 0;
 }
 
