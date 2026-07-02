@@ -179,7 +179,13 @@ s32 SEQ_PAR_Init(u32 mode)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_PAR_TrackInit(u8 track, u16 steps, u8 par_layers, u8 instruments)
 {
-  if( (instruments * par_layers * steps) > SEQ_PAR_MAX_BYTES )
+  // geometry arrives from SD bank/preset files as well as internal callers: reject
+  // zero factors (div/modulo traps downstream), anything the 16-wide layer/instrument
+  // arrays can't represent, and do the size math in u32 so a crafted header can't
+  // overflow the signed check (adversarial review #57/#9)
+  if( !steps || !par_layers || !instruments ||
+      par_layers > 16 || instruments > 16 ||
+      ((u32)instruments * par_layers * steps) > SEQ_PAR_MAX_BYTES )
     return -1; // invalid configuration
 
   par_layer_num_layers[track] = par_layers;

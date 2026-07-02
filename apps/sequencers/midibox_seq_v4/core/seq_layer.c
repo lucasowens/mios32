@@ -384,6 +384,8 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 
   if( tcc->event_mode == SEQ_EVENT_MODE_Drum ) {
     u8 num_instruments = SEQ_TRG_NumInstrumentsGet(track); // we assume, that PAR layer has same number of instruments!
+    if( num_instruments > 16 )
+      num_instruments = 16; // defensive: lay_const rows, vu meter and layer_muted are 16 wide (#9)
 
     u8 drum;
     for(drum=0; drum<num_instruments; ++drum) {
@@ -438,11 +440,18 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 #ifdef MBSEQV4P
     // CC, PitchBend, etc only supported by V4+
     u8 num_p_layers = SEQ_PAR_NumLayersGet(track);
+    if( num_p_layers > 4 )
+      num_p_layers = 4; // par_assignment_drum/seq_layer_drum_cc/cc_last_value are 4 layers wide in drum mode (#9)
     u8 pb_sent = 0;
     u8 at_sent = 0;
     u8 pc_sent = 0;
 
     for(drum=0; drum<num_instruments; ++drum) {
+      // the inner guard below only breaks this drum's layer walk — re-check here so
+      // a full event array can't take one more write on the next drum (#9)
+      if( num_events >= 83 )
+	break;
+
       u8 *layer_type_ptr = (u8 *)&tcc->par_assignment_drum[0];
       int par_layer;
       for(par_layer=0; par_layer<num_p_layers; ++par_layer, ++layer_type_ptr) {
@@ -701,7 +710,10 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	  if( tcc->event_mode == SEQ_EVENT_MODE_Combined ) {
 	    if( (track&7) == 1 || (track&7) == 2)
 	      return 0; // assigned to velocity and length
-	  
+
+	    if( (track&7) > 5 )
+	      return 0; // velocity/length companions (track+1/+2) would leave the group / the track arrays (#12)
+
 	    if( !insert_empty_notes && !gate )
 	      velocity = 0;
 	    else
@@ -744,7 +756,10 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	  if( tcc->event_mode == SEQ_EVENT_MODE_Combined ) {
 	    if( (track&7) == 1 || (track&7) == 2)
 	      return 0; // assigned to velocity and length
-	  
+
+	    if( (track&7) > 5 )
+	      return 0; // velocity/length companions (track+1/+2) would leave the group / the track arrays (#12)
+
 	    if( !insert_empty_notes && !gate )
 	      velocity = 0;
 	    else

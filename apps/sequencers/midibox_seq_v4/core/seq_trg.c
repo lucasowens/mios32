@@ -110,7 +110,11 @@ s32 SEQ_TRG_Init(u32 mode)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_TRG_TrackInit(u8 track, u16 steps, u8 trg_layers, u8 instruments)
 {
-  if( (instruments * trg_layers * (steps/8)) > SEQ_TRG_MAX_BYTES )
+  // same input-hardening contract as SEQ_PAR_TrackInit: geometry from SD files is
+  // not trusted — reject zero factors, >16 layers/instruments, u32 size math (#57/#9)
+  if( !steps || !trg_layers || !instruments ||
+      trg_layers > 16 || instruments > 16 ||
+      ((u32)instruments * trg_layers * (steps/8)) > SEQ_TRG_MAX_BYTES )
     return -1; // invalid configuration
 
   trg_layer_num_layers[track] = trg_layers;

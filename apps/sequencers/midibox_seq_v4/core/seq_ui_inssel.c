@@ -106,7 +106,7 @@ static s32 SEQ_UI_INSSEL_DrumTrigger(u8 track, u8 drum, s32 depressed)
   p.type = NoteOn;
   p.event = NoteOn;
   p.chn = tcc->midi_chn;
-  p.note = tcc->lay_const[0*16 + drum]; // drum instrument note (SEQ_CC_LAY_CONST_A1 + drum)
+  p.note = tcc->lay_const[0*16 + drum] & 0x7f; // drum instrument note (SEQ_CC_LAY_CONST_A1 + drum); masked — lay_const comes from SD and SEQ_LIVE_PlayEvent indexes 128-wide arrays by note (#21)
   p.velocity = depressed ? 0x00 : INSSEL_DRUM_TRIGGER_VELOCITY;
 
   if( seq_record_state.ENABLED )

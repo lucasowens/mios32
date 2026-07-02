@@ -266,7 +266,13 @@ s32 SEQ_GROOVE_DelayGet(u8 track, u8 step)
   else
     g = (seq_groove_entry_t *)&seq_groove_presets[groove];
 
-  step %= g->num_steps;
+  // templates are SD-loaded: 0 would fault the modulo, >16 would read past add_step_*[16] (#10/#32)
+  u8 num_steps = g->num_steps;
+  if( !num_steps )
+    return 0; // corrupt template -> no groove
+  if( num_steps > 16 )
+    num_steps = 16;
+  step %= num_steps;
 
   // get delay value
   s8 delay = g->add_step_delay[step];
@@ -299,7 +305,13 @@ s32 SEQ_GROOVE_Event(u8 track, u8 step, seq_layer_evnt_t *e)
   else
     g = (seq_groove_entry_t *)&seq_groove_presets[groove];
 
-  step %= g->num_steps;
+  // same hardening as SEQ_GROOVE_DelayGet (#10/#32)
+  u8 num_steps = g->num_steps;
+  if( !num_steps )
+    return 0; // corrupt template -> no groove
+  if( num_steps > 16 )
+    num_steps = 16;
+  step %= num_steps;
 
   // get velocity modifier
   s8 add_velocity = g->add_step_velocity[step];

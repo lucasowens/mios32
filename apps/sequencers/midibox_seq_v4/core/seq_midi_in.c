@@ -1198,6 +1198,9 @@ s32 SEQ_MIDI_IN_BusLowestNoteGet(u8 bus)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_MIDI_IN_TransposerNoteGet(u8 bus, u8 hold, u8 first_note)
 {
+  if( bus >= SEQ_MIDI_IN_NUM_BUSSES )
+    return -1; // matches BusPCSetGet/BusLowestNoteGet (#25)
+
   u8 len = bus_notestack[bus][BUS_NOTESTACK_TRANSPOSER].len;
   if( first_note ) {
     if( hold )
@@ -1219,6 +1222,9 @@ s32 SEQ_MIDI_IN_TransposerNoteGet(u8 bus, u8 hold, u8 first_note)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_MIDI_IN_ArpNoteGet(u8 bus, u8 hold, u8 sorted, u8 key_num)
 {
+  if( bus >= SEQ_MIDI_IN_NUM_BUSSES )
+    return -1; // matches BusPCSetGet/BusLowestNoteGet (#25)
+
   notestack_item_t *note_ptr;
 
   if( sorted )
@@ -1260,6 +1266,11 @@ s32 SEQ_MIDI_IN_ArpNoteGet(u8 bus, u8 hold, u8 sorted, u8 key_num)
   } else
     num_notes = bus_notestack[bus][BUS_NOTESTACK_ARP_SORTED].len;
 
+  // empty stack: report "last key played" only — also guards the modulo below
+  // (HOLD mode counts 0 notes when MIDI note 0 occupies the first hold slot) (#67)
+  if( !num_notes )
+    return 0x80;
+
   // btw.: compare with lines of code in PIC based solution! :)
-  return note_ptr[key_num % num_notes].note | ((!num_notes || key_num >= (num_notes-1)) ? 0x80 : 0);
+  return note_ptr[key_num % num_notes].note | ((key_num >= (num_notes-1)) ? 0x80 : 0);
 }

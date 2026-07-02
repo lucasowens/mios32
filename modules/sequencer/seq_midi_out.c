@@ -484,7 +484,8 @@ s32 SEQ_MIDI_OUT_ReSchedule(u8 tag, seq_midi_out_event_type_t event_type, u32 ti
     u8 evnt1 = item->package.evnt1;
     if( (item->event_type == event_type) && (item->package.cable == tag) &&
 	(reschedule_filter == NULL ||
-	 !(reschedule_filter[evnt1>>5] & (1 << (evnt1 & 0x1f)))) ) {
+	 // filter bitmask is 4 words (128 notes) but evnt1 is a raw byte — mask the word index
+	 !(reschedule_filter[(evnt1 & 0x7f)>>5] & (1 << (evnt1 & 0x1f)))) ) {
       // ensure that we get a free memory slot by releasing the current item before queuing the off item
 #if 0
       seq_midi_out_queue_item_t copy = *item;

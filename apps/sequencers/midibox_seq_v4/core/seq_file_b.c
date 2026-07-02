@@ -697,8 +697,8 @@ DEBUG_MSG("Skipping Track %d\n", track);
       status |= FILE_ReadHWord(&t_layer_size);
 
       // skip CC and Par/Trg layer
-      u32 par_size = num_p_instruments * num_p_layers * p_layer_size;
-      u32 trg_size = num_t_instruments * num_t_layers * t_layer_size;
+      u32 par_size = (u32)num_p_instruments * num_p_layers * p_layer_size;
+      u32 trg_size = (u32)num_t_instruments * num_t_layers * t_layer_size;
       u32 new_pos = FILE_ReadGetCurrentPosition() + 128 + par_size + trg_size;
  DEBUG_MSG("Pos change: %d -> %d\n", FILE_ReadGetCurrentPosition(), new_pos);
       if( (status=FILE_ReadSeek(new_pos)) < 0 ) {
@@ -758,12 +758,17 @@ DEBUG_MSG("Skipping Track %d\n", track);
       for(cc=0; cc<128; ++cc)
 	SEQ_CC_Set(track, cc, cc_buffer[cc]);
 
-      // partitionate parameter layer and clear all steps
-      SEQ_PAR_TrackInit(track, p_layer_size, num_p_layers, num_p_instruments);
+      // partitionate parameter layer and clear all steps.
+      // A rejected geometry (TrackInit <0 leaves the partition stale) must not stream
+      // content bytes into the row: fall back to the default partition and skim the
+      // section to keep the file position aligned (#34)
+      u8 par_geom_ok = SEQ_PAR_TrackInit(track, p_layer_size, num_p_layers, num_p_instruments) >= 0;
+      if( !par_geom_ok )
+	SEQ_PAR_TrackInit(track, 128, 8, 1); // default partition (matches SEQ_PAR_Init)
 
       // reading Parameter layers
-      u32 par_size = num_p_instruments * num_p_layers * p_layer_size;
-      u32 par_size_taken = (par_size > SEQ_PAR_MAX_BYTES) ? SEQ_PAR_MAX_BYTES : par_size;
+      u32 par_size = (u32)num_p_instruments * num_p_layers * p_layer_size;
+      u32 par_size_taken = (par_geom_ok && par_size <= SEQ_PAR_MAX_BYTES) ? par_size : 0;
       if( par_size_taken )
 	FILE_ReadBuffer((u8 *)&seq_par_layer_value[track], par_size_taken);
 
@@ -774,12 +779,14 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	++par_size_taken;
       }
 
-      // partitionate trigger layer and clear all steps
-      SEQ_TRG_TrackInit(track, t_layer_size*8, num_t_layers, num_t_instruments);
+      // partitionate trigger layer and clear all steps (same hardening as Par above, #34)
+      u8 trg_geom_ok = SEQ_TRG_TrackInit(track, t_layer_size*8, num_t_layers, num_t_instruments) >= 0;
+      if( !trg_geom_ok )
+	SEQ_TRG_TrackInit(track, 128, 8, 1); // default partition (matches SEQ_TRG_Init)
 
       // reading Trigger layers
-      u32 trg_size = num_t_instruments * num_t_layers * t_layer_size;
-      u32 trg_size_taken = (trg_size > SEQ_TRG_MAX_BYTES) ? SEQ_TRG_MAX_BYTES : trg_size;
+      u32 trg_size = (u32)num_t_instruments * num_t_layers * t_layer_size;
+      u32 trg_size_taken = (trg_geom_ok && trg_size <= SEQ_TRG_MAX_BYTES) ? trg_size : 0;
       if( trg_size_taken )
 	FILE_ReadBuffer((u8 *)&seq_trg_layer_value[track], trg_size_taken);
 
@@ -994,8 +1001,8 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
     status |= FILE_ReadHWord(&skip_p_size);
     status |= FILE_ReadHWord(&skip_t_size);
 
-    u32 skip_par = skip_p_instruments * skip_p_layers * skip_p_size;
-    u32 skip_trg = skip_t_instruments * skip_t_layers * skip_t_size;
+    u32 skip_par = (u32)skip_p_instruments * skip_p_layers * skip_p_size;
+    u32 skip_trg = (u32)skip_t_instruments * skip_t_layers * skip_t_size;
     u32 new_pos = FILE_ReadGetCurrentPosition() + 128 + skip_par + skip_trg;
     if( status < 0 || (status=FILE_ReadSeek(new_pos)) < 0 ) {
       FILE_ReadClose((file_t*)&info->file);
@@ -1034,15 +1041,18 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
   for(cc=0; cc<128; ++cc)
     SEQ_CC_Set(dst_track, cc, cc_buffer[cc]);
 
-  // partitionate parameter layer and clear all steps
-  SEQ_PAR_TrackInit(dst_track, p_layer_size, num_p_layers, num_p_instruments);
+  // partitionate parameter layer and clear all steps.
+  // Rejected geometry -> default partition + skim, as in SEQ_FILE_B_PatternRead (#34)
+  u8 par_geom_ok = SEQ_PAR_TrackInit(dst_track, p_layer_size, num_p_layers, num_p_instruments) >= 0;
+  if( !par_geom_ok )
+    SEQ_PAR_TrackInit(dst_track, 128, 8, 1); // default partition (matches SEQ_PAR_Init)
 
   // reading Parameter layers. Unlike PatternRead, the bulk reads stay
   // status-bearing: the caller branches on the return code (a swallowed
   // failure here would report success for a half-written track — and when
   // slot_track is the last stored section, no later read would catch it).
-  u32 par_size = num_p_instruments * num_p_layers * p_layer_size;
-  u32 par_size_taken = (par_size > SEQ_PAR_MAX_BYTES) ? SEQ_PAR_MAX_BYTES : par_size;
+  u32 par_size = (u32)num_p_instruments * num_p_layers * p_layer_size;
+  u32 par_size_taken = (par_geom_ok && par_size <= SEQ_PAR_MAX_BYTES) ? par_size : 0;
   if( par_size_taken )
     status |= FILE_ReadBuffer((u8 *)&seq_par_layer_value[dst_track], par_size_taken);
 
@@ -1053,12 +1063,14 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
     ++par_size_taken;
   }
 
-  // partitionate trigger layer and clear all steps
-  SEQ_TRG_TrackInit(dst_track, t_layer_size*8, num_t_layers, num_t_instruments);
+  // partitionate trigger layer and clear all steps (same hardening as Par above, #34)
+  u8 trg_geom_ok = SEQ_TRG_TrackInit(dst_track, t_layer_size*8, num_t_layers, num_t_instruments) >= 0;
+  if( !trg_geom_ok )
+    SEQ_TRG_TrackInit(dst_track, 128, 8, 1); // default partition (matches SEQ_TRG_Init)
 
   // reading Trigger layers
-  u32 trg_size = num_t_instruments * num_t_layers * t_layer_size;
-  u32 trg_size_taken = (trg_size > SEQ_TRG_MAX_BYTES) ? SEQ_TRG_MAX_BYTES : trg_size;
+  u32 trg_size = (u32)num_t_instruments * num_t_layers * t_layer_size;
+  u32 trg_size_taken = (trg_geom_ok && trg_size <= SEQ_TRG_MAX_BYTES) ? trg_size : 0;
   if( trg_size_taken )
     status |= FILE_ReadBuffer((u8 *)&seq_trg_layer_value[dst_track], trg_size_taken);
 
@@ -1114,8 +1126,8 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
     ext_status |= FILE_ReadHWord(&skip_p_size);
     ext_status |= FILE_ReadHWord(&skip_t_size);
 
-    u32 skip_par = skip_p_instruments * skip_p_layers * skip_p_size;
-    u32 skip_trg = skip_t_instruments * skip_t_layers * skip_t_size;
+    u32 skip_par = (u32)skip_p_instruments * skip_p_layers * skip_p_size;
+    u32 skip_trg = (u32)skip_t_instruments * skip_t_layers * skip_t_size;
     if( ext_status >= 0 )
       ext_status |= FILE_ReadSeek(FILE_ReadGetCurrentPosition() + 128 + skip_par + skip_trg);
   }
@@ -1445,8 +1457,8 @@ s32 SEQ_FILE_B_PhraseReadCCs(u8 bank, u8 pattern, u8 slot_track, u8 *cc_out)
     status |= FILE_ReadHWord(&skip_p_size);
     status |= FILE_ReadHWord(&skip_t_size);
 
-    u32 skip_par = skip_p_instruments * skip_p_layers * skip_p_size;
-    u32 skip_trg = skip_t_instruments * skip_t_layers * skip_t_size;
+    u32 skip_par = (u32)skip_p_instruments * skip_p_layers * skip_p_size;
+    u32 skip_trg = (u32)skip_t_instruments * skip_t_layers * skip_t_size;
     u32 new_pos = FILE_ReadGetCurrentPosition() + 128 + skip_par + skip_trg;
     if( status < 0 || (status=FILE_ReadSeek(new_pos)) < 0 ) {
       FILE_ReadClose((file_t*)&info->file);

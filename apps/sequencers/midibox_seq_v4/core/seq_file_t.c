@@ -91,7 +91,7 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
   s32 status = 0;
   file_t file;
 
-  if( track > SEQ_CORE_NUM_TRACKS )
+  if( track >= SEQ_CORE_NUM_TRACKS )
     return SEQ_FILE_T_ERR_TRACK;
 
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
@@ -239,12 +239,16 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
 #if DEBUG_VERBOSE_LEVEL >= 1
 		  DEBUG_MSG("[SEQ_FILE_T] ERROR: missing TrgSteps!\n");
 #endif
+		} else if( SEQ_PAR_TrackInit(track, par_steps, par_layers, par_instruments) < 0 ||
+			   SEQ_TRG_TrackInit(track, trg_steps, trg_layers, trg_instruments) < 0 ) {
+		  // re-partition rejected (oversized/zero geometry from the file):
+		  // keep the previous partition and event mode (#34/#57)
+#if DEBUG_VERBOSE_LEVEL >= 1
+		  DEBUG_MSG("[SEQ_FILE_T] ERROR: invalid layer geometry, keeping current partition!\n");
+#endif
 		} else {
 		  // set event mode
 		  tcc->event_mode = value;
-		  // re-partitioning track (this will clear all steps!)
-		  SEQ_PAR_TrackInit(track, par_steps, par_layers, par_instruments);
-		  SEQ_TRG_TrackInit(track, trg_steps, trg_layers, trg_instruments);
 
 		  // update CC links
 		  SEQ_CC_LinkUpdate(track);
@@ -505,7 +509,7 @@ static s32 SEQ_FILE_T_Write_Hlp(u8 write_to_file, u8 track)
   char str_buffer[100];
   int i, j;
 
-  if( track > SEQ_CORE_NUM_TRACKS )
+  if( track >= SEQ_CORE_NUM_TRACKS )
     return SEQ_FILE_T_ERR_TRACK;
 
   seq_cc_trk_t *tcc = &seq_cc_trk[track];

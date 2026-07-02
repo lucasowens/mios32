@@ -218,6 +218,9 @@ s32 SEQ_LIVE_PlayEvent(u8 track, mios32_midi_package_t p)
   }
 
   if( p.type == NoteOn ) {
+    if( p.note >= 128 )
+      return -1; // note is a raw 8-bit field; played-notes bitmap and live_keyboard_*[] are 128 wide (#56)
+
     u32 note_ix32 = p.note / 32;
     u32 note_mask = (1 << (p.note % 32));
 

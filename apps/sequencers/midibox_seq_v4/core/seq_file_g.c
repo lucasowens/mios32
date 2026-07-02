@@ -192,8 +192,8 @@ s32 SEQ_FILE_G_Read(char *session)
 	    if( groove < SEQ_GROOVE_NUM_TEMPLATES ) {
 	      word = strtok_r(NULL, separators, &brkt);
 	      int num_steps = get_dec(word);
-	      if( num_steps > 0 )
-		seq_groove_templates[groove].num_steps = num_steps;
+	      if( num_steps > 0 ) // clamp: add_step_*[] arrays are 16 wide, and the u8 field must never truncate to 0 (#10/#32)
+		seq_groove_templates[groove].num_steps = (num_steps > 16) ? 16 : num_steps;
 	    }
 	  } else if( strcmp(parameter, "Delay") == 0 ) {
 	    u8 groove = value;

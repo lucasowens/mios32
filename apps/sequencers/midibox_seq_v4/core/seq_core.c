@@ -5443,13 +5443,15 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 	      t->vu_meter = 0x7f; // for visualisation in mute menu
 	    } else {
 	      // skip in record mode if the same note is already played
+	      // (note index masked to 0x7f throughout: the bitmasks are 4 words = 128 notes,
+	      // but p->note is a raw 8-bit field that can carry a corrupt par byte, #4)
 	      if( track_record_enabled && t->state.STRETCHED_GL &&
-		  (seq_record_played_notes[p->note>>5] & (1 << (p->note&0x1f))) )
+		  (seq_record_played_notes[(p->note & 0x7f)>>5] & (1 << (p->note&0x1f))) )
 		continue;
 
 	      // skip in glide mode if note stretched
 	      if( t->state.STRETCHED_GL &&
-		  (next_glide_notes[p->note>>5] & (1 << (p->note&0x1f))) )
+		  (next_glide_notes[(p->note & 0x7f)>>5] & (1 << (p->note&0x1f))) )
 		continue;
 
 	      // sustained/glided note: play note at timestamp, and queue off event at 0xffffffff (so that it can be re-scheduled)		
@@ -5470,7 +5472,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 
 		  // glide: if same note already played, play the new one a tick later for 
 		  // proper handling of "fingered portamento" function on some synths
-		  if( prev_glide_notes[p->note / 32] & (1 << (p->note % 32)) )
+		  if( prev_glide_notes[(p->note & 0x7f) / 32] & (1 << (p->note % 32)) )
 		    scheduled_tick += 1;
 
 		  // Note On (the Note Off will be prepared as well in SEQ_CORE_ScheduleEvent)
@@ -5489,7 +5491,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 		if( !tcc->trkmode_flags.SUSTAIN && !t->state.ROBOSUSTAINED ) {
 		  t->state.STRETCHED_GL = 1;
 		  // store glide note number in 128 bit array for later checks
-		  t->glide_notes[p->note / 32] |= (1 << (p->note % 32));
+		  t->glide_notes[(p->note & 0x7f) / 32] |= (1 << (p->note % 32));
 		}
 
 	      } else if( gen_on_events ) {

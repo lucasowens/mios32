@@ -287,6 +287,15 @@ char *SEQ_SCALE_NameGet(u8 scale)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_SCALE_NoteValueGet(u8 note, u8 scale, u8 root)
 {
+  // scale/root can arrive as raw bytes (par layer, SysEx-set CC, SD file) — an
+  // out-of-table scale passes the note through unmodified instead of reading past
+  // seq_scale_table (#11/#18); root is normalized so note-root can't underflow
+  // past the single +12 correction below
+  if( scale >= SEQ_SCALE_NumGet() )
+    return note;
+  if( root > 11 )
+    root %= 12;
+
   // normalize note and determine octave
   int note_number = note - root;
   if( note_number < 0 ) note_number += 12;
@@ -317,6 +326,13 @@ s32 SEQ_SCALE_NoteValueGet(u8 note, u8 scale, u8 root)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_SCALE_NextNoteInScale(u8 current_note, u8 scale, u8 root)
 {
+  // same input-hardening as SEQ_SCALE_NoteValueGet: chromatic pass-through on an
+  // out-of-table scale, normalized root (#11/#18)
+  if( scale >= SEQ_SCALE_NumGet() )
+    return (current_note < 127) ? (current_note + 1) : 127;
+  if( root > 11 )
+    root %= 12;
+
   u8 next_note = current_note + 1;
 
   do {
