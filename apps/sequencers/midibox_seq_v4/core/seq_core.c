@@ -286,8 +286,9 @@ static u32 seq_core_cap_tape_bar_start[SEQ_CORE_CAP_RING_BARS]; // downbeat abs 
 
 // Convert a measured gate length (bpm-ticks) into a stored length-layer par value.
 // Playback re-derives the gate as tps*(v+1)/96 (the step scheduler at line ~4162 /
-// SEQ_PAR_LengthGet), so invert: v = round(gate*96/tps) - 1, clamped to a single step's
-// range [0..95] (95 -> len 96 = glide/tie, the longest a single step expresses). A 0 gate
+// SEQ_PAR_LengthGet), so invert: v = round(gate*96/tps) - 1, clamped to a TERMINATING
+// single-step range [0..94] — v=95 (len 96) is Gld, which ties ONWARD and never ends,
+// so a near-full gate that rounds up to 96 must land on 95/96 instead (#13). A 0 gate
 // (no note-off recorded: still ringing at grab, or it scrolled out) falls back to the
 // ~3/4 default both capture paths used before precise gate.
 #define SEQ_CORE_CAP_DEFAULT_LEN 71   // ~3/4 gate (v=71 -> len 72 -> 72/96)
@@ -296,7 +297,7 @@ static u8 SEQ_CORE_CaptureGateToParLen(u32 gate_ticks, u16 tps)
   if( gate_ticks == 0 || tps == 0 ) return SEQ_CORE_CAP_DEFAULT_LEN;
   u32 len = (gate_ticks * 96 + (tps / 2)) / tps;  // nearest len (= v+1)
   if( len < 1 ) len = 1;
-  if( len > 96 ) len = 96;
+  if( len > 95 ) len = 95;
   return (u8)(len - 1);
 }
 
@@ -319,34 +320,59 @@ static void SEQ_CORE_CaptureMaterializeNote(u8 dst, u16 step0, u16 dst_steps, u3
   u16 full = (u16)(gate / tps);   // fully-covered steps (0 if the note fits within one step)
   u16 rem  = (u16)(gate % tps);   // partial tail ticks into the next step
 
+  // A gate ending EXACTLY on a step boundary (rem==0) is ambiguous: the engine's tie
+  // mechanism produces exact gates when a glide/sustain ends AT the next onset — there the
+  // Gld encoding is the articulation (legato into that onset, or across the loop seam when
+  // the boundary is past the window). But an exact gate ending into in-window SILENCE must
+  // TERMINATE (94 -> 95/96 of the last covered step): a Gld with no next onset never ends
+  // and over-holds through the rests (#13). Callers guarantee the dst gate bits for all
+  // relevant onsets are written before this decision (tape: pre-gating pass; re-sim sink:
+  // exact-case materialize deferred past the boundary).
+  u8 tie_out = 0;
+  if( rem == 0 && full >= 1 ) {
+    u16 boundary = (u16)(step0 + full);
+    tie_out = (boundary >= dst_steps) || (SEQ_TRG_GateSourceGet(dst, boundary, 0) > 0);
+  }
+
   // start step (always gated)
   if( note_layer >= 0 ) SEQ_PAR_Set(dst, step0, (u8)note_layer, 0, note);
   if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, step0, (u8)vel_layer,  0, vel);
-  if( len_layer  >= 0 )
-    SEQ_PAR_Set(dst, step0, (u8)len_layer, 0,
-                (full >= 1) ? 95 : SEQ_CORE_CaptureGateToParLen(gate, tps));
+  if( len_layer  >= 0 ) {
+    u8 start_len;
+    if( full < 1 )
+      start_len = SEQ_CORE_CaptureGateToParLen(gate, tps); // sub-step note: fractional, terminating
+    else if( full == 1 && rem == 0 && !tie_out )
+      start_len = 94;             // exactly one step into silence: terminate at the boundary (#13)
+    else
+      start_len = 95;             // Gld: tie, or carried onward by the chain below
+    SEQ_PAR_Set(dst, step0, (u8)len_layer, 0, start_len);
+  }
   SEQ_TRG_GateSet(dst, step0, 0, 1);
-  if( full < 1 || len_layer < 0 )
-    return;                       // single-step note, or no length layer to carry the tie
+  if( full < 1 || (full == 1 && rem == 0) || len_layer < 0 )
+    return;                       // fits in the start step, or no length layer to carry the tie
 
   // carried full steps: Gld + note/vel repeated, gate stays OFF (PrepDst cleared the trg
   // buffer). Carry the velocity too so the captured track matches the source's data — the
   // carried steps are gate-off ties so it doesn't sound, but an edit that gates one later
-  // must find the note's velocity there, not 0.
+  // must find the note's velocity there, not 0. An exact-multiple gate into silence
+  // terminates on its LAST covered step (94) instead of tying onward (#13). The chain
+  // never crosses an already-gated step: a later onset inside the span takes over there
+  // (legato hand-off instead of a stomp — #14's sink materializes at note-OFF time).
   u16 i;
   for(i=1; i<full; ++i) {
     u16 st = (u16)(step0 + i);
     if( st >= dst_steps ) return;
+    if( SEQ_TRG_GateSourceGet(dst, st, 0) > 0 ) return; // tie flows into the next onset
     if( note_layer >= 0 ) SEQ_PAR_Set(dst, st, (u8)note_layer, 0, note);
     if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, st, (u8)vel_layer,  0, vel);
-    SEQ_PAR_Set(dst, st, (u8)len_layer, 0, 95);
+    SEQ_PAR_Set(dst, st, (u8)len_layer, 0, (rem == 0 && !tie_out && i == (u16)(full-1)) ? 94 : 95);
   }
   // partial tail: a gate-off note event whose <Gld length ends the sustain mid-step
   if( rem > 0 ) {
     u16 st = (u16)(step0 + full);
     if( st >= dst_steps ) return;
-    u8 tail = SEQ_CORE_CaptureGateToParLen(rem, tps);
-    if( tail > 94 ) tail = 94;    // keep < 96 (Gld) so it terminates rather than tying onward
+    if( SEQ_TRG_GateSourceGet(dst, st, 0) > 0 ) return; // tie flows into the next onset
+    u8 tail = SEQ_CORE_CaptureGateToParLen(rem, tps);   // <= 94 (helper clamps below Gld)
     if( note_layer >= 0 ) SEQ_PAR_Set(dst, st, (u8)note_layer, 0, note);
     if( vel_layer  >= 0 ) SEQ_PAR_Set(dst, st, (u8)vel_layer,  0, vel);
     SEQ_PAR_Set(dst, st, (u8)len_layer, 0, tail);
@@ -2245,9 +2271,37 @@ static u8  capspan_default_len;
 // invariant is "at most one open entry per dst step": a new on at a step evicts the prior
 // occupant there, matching the sink's last-write-wins quantize.
 #define CAPSPAN_OPEN_MAX 24
-static struct { u8 note; u16 step; u32 on_tick; } capspan_open[CAPSPAN_OPEN_MAX];
+// gate: 0 = still open (no off yet); >0 = closed with an EXACT step-boundary gate whose
+// materialize is DEFERRED — a tie's boundary onset drains AFTER its off in the same tick,
+// so the off can't probe the boundary occupancy yet (#13/#14). vel: the chain re-writes
+// it on carried steps.
+static struct { u8 note; u8 vel; u16 step; u32 on_tick; u32 gate; } capspan_open[CAPSPAN_OPEN_MAX];
 static u8 capspan_open_count;
 static u8 capspan_in_flush;      // 1 during the post-drive flush: those offs are past-window, skip gate
+
+// Materialize + drop every deferred exact-boundary entry whose boundary step is settled.
+// Note-ons drain in time order, so once an on lands at/after an entry's boundary (or the
+// drive has flushed: settled_through_step=0xffff), the boundary's gate bit is final and
+// the tie-vs-terminate decision in SEQ_CORE_CaptureMaterializeNote is safe (#13/#14).
+static void SEQ_CORE_CapSpanFinalizeDeferred(u16 settled_through_step)
+{
+  u8 w = 0, r;
+  for(r=0; r<capspan_open_count; ++r) {
+    u8 fin = 0;
+    if( capspan_open[r].gate > 0 && capspan_tps ) {
+      u16 boundary = (u16)(capspan_open[r].step + capspan_open[r].gate / capspan_tps);
+      fin = (boundary <= settled_through_step);
+    }
+    if( fin )
+      SEQ_CORE_CaptureMaterializeNote(capspan_dst, capspan_open[r].step, capspan_dst_steps,
+                                      capspan_open[r].gate, capspan_tps,
+                                      capspan_open[r].note, capspan_open[r].vel,
+                                      capspan_note_layer, capspan_vel_layer, capspan_len_layer);
+    else
+      capspan_open[w++] = capspan_open[r];
+  }
+  capspan_open_count = w;
+}
 
 // MIDI-out hooks (run the scheduler against synthetic time + a quantizing sink).
 static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t package)
@@ -2260,14 +2314,27 @@ static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t p
     if( capspan_in_flush || capspan_len_layer < 0 ) return 0; // flush offs are past-window
     u8 ki;                                        // newest-first match -> back-fill its step's length
     for(ki=capspan_open_count; ki>0; --ki) {
-      if( capspan_open[ki-1].note == package.evnt1 ) {
+      if( capspan_open[ki-1].note == package.evnt1 && capspan_open[ki-1].gate == 0 ) {
         u32 gate = capspan_cur_tick - capspan_open[ki-1].on_tick;
-        SEQ_PAR_Set(capspan_dst, capspan_open[ki-1].step, (u8)capspan_len_layer, 0,
-                    SEQ_CORE_CaptureGateToParLen(gate, capspan_tps));
-        u8 m;                                     // remove entry, preserve LIFO order of the rest
-        for(m=ki-1; m+1<capspan_open_count; ++m)
-          capspan_open[m] = capspan_open[m+1];
-        --capspan_open_count;
+        if( capspan_tps && gate >= capspan_tps && (gate % capspan_tps) == 0 ) {
+          // exact step-boundary gate: tie vs terminate depends on the boundary onset,
+          // which (for a same-tick tie) drains AFTER this off — record and defer to
+          // SEQ_CORE_CapSpanFinalizeDeferred (#13/#14)
+          capspan_open[ki-1].gate = gate;
+        } else {
+          // ends mid-step: terminates unambiguously — write the full multi-step chain
+          // (carried Gld ties + terminating tail) now, same encoding as the tape grab.
+          // The old single SEQ_PAR_Set clamped to one step and collapsed a multi-step
+          // note to a lone unterminated Glide, losing the duration (#14).
+          SEQ_CORE_CaptureMaterializeNote(capspan_dst, capspan_open[ki-1].step, capspan_dst_steps,
+                                          gate, capspan_tps,
+                                          capspan_open[ki-1].note, capspan_open[ki-1].vel,
+                                          capspan_note_layer, capspan_vel_layer, capspan_len_layer);
+          u8 m;                                   // remove entry, preserve LIFO order of the rest
+          for(m=ki-1; m+1<capspan_open_count; ++m)
+            capspan_open[m] = capspan_open[m+1];
+          --capspan_open_count;
+        }
         break;
       }
     }
@@ -2291,12 +2358,17 @@ static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t p
     capspan_open_count = w;
     if( capspan_open_count < CAPSPAN_OPEN_MAX ) {
       capspan_open[capspan_open_count].note    = package.evnt1;
+      capspan_open[capspan_open_count].vel     = package.evnt2;
       capspan_open[capspan_open_count].step    = step;
       capspan_open[capspan_open_count].on_tick = capspan_cur_tick;
+      capspan_open[capspan_open_count].gate    = 0;
       ++capspan_open_count;
     }
   }
   SEQ_TRG_GateSet(capspan_dst, step, 0, 1);
+  // this onset settles every deferred boundary at/before its step (time-ordered ons);
+  // runs AFTER the gate write so a boundary landing exactly here reads as a tie (#13/#14)
+  SEQ_CORE_CapSpanFinalizeDeferred(step);
   return 0;
 }
 static s32 SEQ_CORE_CapSpanBpmRunning(void) { return 1; }
@@ -2550,6 +2622,11 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   seq_core_cap_resim_active = 0;
   SEQ_GENERATOR_ReSimOnlyTrackSet(0xff);
 
+  // Finalize deferred exact-boundary notes first: every in-window onset has drained, so
+  // their tie-vs-terminate decision is final (#13/#14). What remains open (gate==0)
+  // genuinely sustained past the window and is marked as a tie below.
+  SEQ_CORE_CapSpanFinalizeDeferred(0xffff);
+
   // Notes still OPEN after the drive never saw an in-window note-off: they sustained PAST
   // the captured window — a glide/tie into the next (uncaptured) note, or a sustain-mode
   // tail. A note only stays open if its off was deferred past window end (its gatelength
@@ -2720,6 +2797,23 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
   u16 n = seq_core_cap_tape_count;
   u16 idx = (u16)((seq_core_cap_tape_head + SEQ_CORE_CAP_TAPE_EVENTS - n) % SEQ_CORE_CAP_TAPE_EVENTS);
   u16 i;
+  // pass 1: gate every in-window onset BEFORE materializing lengths. The chain writer
+  // probes dst gate bits to decide tie-vs-terminate at an exact step boundary and to
+  // hand a long note off legato at a later onset it crosses (#13/#14) — without this,
+  // events materialize oldest->newest and a note's boundary onset wouldn't exist yet.
+  {
+    u16 gidx = idx;
+    for(i=0; i<n; ++i) {
+      seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[gidx];
+      gidx = (u16)((gidx + 1) % SEQ_CORE_CAP_TAPE_EVENTS);
+      if( (s32)(e->tick - win_start) < 0 ) continue;   // before the window
+      if( (s32)(e->tick - win_end) >= 0 ) continue;    // in the live bar (not completed)
+      u16 step = (u16)((e->tick - win_start) / tps);
+      if( step >= dst_steps ) continue;
+      SEQ_TRG_GateSet(dst, step, 0, 1);
+    }
+  }
+  // pass 2: materialize
   for(i=0; i<n; ++i) {
     seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[idx];
     idx = (u16)((idx + 1) % SEQ_CORE_CAP_TAPE_EVENTS);

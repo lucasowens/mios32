@@ -226,6 +226,35 @@ s32 SEQ_TRG_Get16(u8 track, u8 step16, u8 trg_layer, u8 trg_instrument)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// returns value of a given trigger from the SOURCE buffer (seq_trg_layer_value),
+// NOT the rendered output mirror — for writers that must inspect just-written
+// content mid-edit (e.g. the capture materialize chain), where the mirror is
+// stale until the next render. Same indexing/bounds as SEQ_TRG_Set.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_TRG_SourceGet(u8 track, u16 step, u8 trg_layer, u8 trg_instrument)
+{
+  u8 num_t_layers = trg_layer_num_layers[track];
+  u8 num_t_steps8 = trg_layer_num_steps8[track];
+  if( trg_layer >= num_t_layers || trg_instrument >= trg_layer_num_instruments[track] )
+    return 0;
+  if( (step/8) >= num_t_steps8 )
+    return 0;
+  u16 step_ix = (trg_instrument * num_t_layers * num_t_steps8) + (trg_layer * num_t_steps8) + (step/8);
+  if( step_ix >= SEQ_TRG_MAX_BYTES )
+    return 0;
+  u8 step_mask = 1 << (step % 8);
+  return (seq_trg_layer_value[track][step_ix] & step_mask) ? 1 : 0;
+}
+
+// source-side twin of SEQ_TRG_GateGet (0 when no gate layer is assigned — a
+// writer probing for an onset must not see the "always gated" playback default)
+s32 SEQ_TRG_GateSourceGet(u8 track, u16 step, u8 trg_instrument)
+{
+  u8 trg_assignment = seq_cc_trk[track].trg_assignments.gate;
+  return trg_assignment ? SEQ_TRG_SourceGet(track, step, trg_assignment-1, trg_instrument) : 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // returns value of assigned layers
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_TRG_GateGet(u8 track, u16 step, u8 trg_instrument)
