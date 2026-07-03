@@ -1355,10 +1355,7 @@ static void limit_render_range(u8 track, const seq_processor_slot_t *p,
 // pushes/pulls, LIMIT folds the result back into range last — so a gravity
 // push is no longer re-corrected by the FTS snap (the Track-1 "FTS off on
 // gripped tracks" POC rule dissolves) but still respects the range window.
-#define SEQ_CORE_PITCH_SLOT     0
-#define SEQ_CORE_CHORDMASK_SLOT 1
-#define SEQ_CORE_TENSION_SLOT   2
-#define SEQ_CORE_LIMIT_SLOT     3
+// (Slot-index defines now live in seq_core.h — shared with the UI rack view.)
 
 // 12-bit pitch-class barrel rotate (mod 12, masked to 0x0FFF — a raw u16 shift
 // would leak bits across PC 11→12). Up = toward higher PC.

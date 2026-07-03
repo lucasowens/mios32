@@ -384,9 +384,10 @@ s32 SEQ_FILE_C_Read(char *session)
 	    if( value >= 0 )
 	      seq_record_options.AUTO_START = value;
 	  } else if( strcmp(parameter, "RecFwdMidi") == 0 ) {
-	    s32 value = get_dec_range(word, parameter, 0, 1);
-	    if( value >= 0 )
-	      seq_record_options.FWD_MIDI = value;
+	    // G0: FWD_MIDI is pinned permanently ON — the LIVE button that used to
+	    // toggle it is now the PROC-mode home (2026-07-03). Ignore a persisted 0
+	    // from an old config so it can never load OFF with no way back on.
+	    seq_record_options.FWD_MIDI = 1;
 	  } else if( strcmp(parameter, "LiveOctTranspose") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 255);
 	    if( value >= 0 )

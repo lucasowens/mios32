@@ -269,6 +269,15 @@ typedef struct {
                  // (matches legacy whole-track behavior). Unused outside drum mode.
 } seq_processor_slot_t;
 
+// Fixed slot map into seq_processor_stack[track][SEQ_CORE_NUM_PROCESSOR_SLOTS].
+// The render order IS this order (SEQ_CORE_RenderTrack walks 0..N). Exposed in
+// the header so the UI (PROC sel-view / rack readout) shares the geometry with
+// the renderer instead of hard-coding indices.
+#define SEQ_CORE_PITCH_SLOT     0
+#define SEQ_CORE_CHORDMASK_SLOT 1
+#define SEQ_CORE_TENSION_SLOT   2
+#define SEQ_CORE_LIMIT_SLOT     3
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Prototypes

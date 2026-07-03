@@ -70,6 +70,7 @@ u8 ui_selected_step;
 u8 ui_selected_item;
 u8 ui_selected_bookmark;
 u8 ui_selected_phrase;
+u8 ui_focused_proc_slot = SEQ_CORE_CHORDMASK_SLOT; // G0: focused rack slot in PROC view
 u16 ui_selected_gp_buttons;
 
 u8 ui_selected_item;
@@ -1323,17 +1324,61 @@ static s32 SEQ_UI_Button_JamStep(s32 depressed)
   return 0; // no error
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// G0 — the PROC sel-view (processor rack) shared helpers.
+//
+// The rack is the internal render stack (seq_processor_stack[track][4], fixed
+// slot map in seq_core.h). In PROC view the B-row selects/focuses a slot, the
+// GP encoders operate the focused processor, the GP row paints its 16-object
+// shape, and a persistent LCD overlay reads it back — one grammar, many
+// processors.
+//
+// GOLDEN RULE: the UI never pokes seq_processor_stack. It writes through
+// SEQ_CC_Set(track, cc, val) so tcc, the slot mirror, and the render cache all
+// stay coherent (the ChordMask/Tension/... slot-syncs already run off it); the
+// UI only READS the slot for the rack/LED/LCD readout.
+/////////////////////////////////////////////////////////////////////////////
+
+// Human name of a rack slot's current occupant (for the LCD readout).
+static const char *SEQ_UI_PROC_SlotName(u8 id)
+{
+  switch( id ) {
+  case SEQ_PROCESSOR_ID_CHORD_MASK: return "ChordMask";
+  case SEQ_PROCESSOR_ID_TENSION:    return "Tension";
+  case SEQ_PROCESSOR_ID_PITCH:      return "Pitch";
+  case SEQ_PROCESSOR_ID_LIMIT:      return "Limit";
+  default:                          return "(empty)";
+  }
+}
+
+// G0 operates exactly one processor end-to-end: ChordMask (the GO/NO-GO tenant).
+// The other three slots show in the rack but are display-only for now.
+static u8 SEQ_UI_PROC_SlotOperable(u8 slot)
+{
+  return slot == SEQ_CORE_CHORDMASK_SLOT;
+}
+
+
 static s32 SEQ_UI_Button_Live(s32 depressed)
 {
   if( depressed ) return -1; // ignore when button depressed
 
-  // switch live mode
-  seq_record_options.FWD_MIDI = seq_record_options.FWD_MIDI ? 0 : 1;
-
-  SEQ_UI_Msg(SEQ_UI_MSG_USER_R,
-	     1000,
-	     "Live Forwarding",
-	     seq_record_options.FWD_MIDI ? "      on" : "     off");
+  // G0: the LIVE button is repurposed as the PROC-mode home (decided 2026-07-03).
+  // It LATCHES the processor-rack sel-view on the B-row — tap in, dwell to sculpt
+  // on the encoders, tap out (LIVE again, or press another sel-view). Unlike the
+  // other sel-views (which are held), PROC is sticky; its dedicated LED becomes
+  // the "in PROC mode" lamp. The displaced Live-Forwarding toggle is gone —
+  // FWD_MIDI is now pinned on as a permanent default (seq_record.c), so nothing
+  // here touches it.
+  if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC ) {
+    seq_ui_sel_view = SEQ_UI_SEL_VIEW_NONE; // tap out -> live default stance
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Processor Rack", "     off");
+  } else {
+    seq_ui_sel_view = SEQ_UI_SEL_VIEW_PROC;
+    ui_focused_proc_slot = SEQ_CORE_CHORDMASK_SLOT; // land on the G0 tenant
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Processor Rack", "      on");
+  }
+  seq_ui_display_update_req = 1;
 
   return 0; // no error
 }
@@ -1881,8 +1926,23 @@ static s32 SEQ_UI_Button_Enc(s32 depressed, u32 enc_button)
 {
   // 0=Datawheel, 1..16=GPx, 17=BPM
 
+  // G0 PROC view: pushing a GP encoder snaps its parameter to the default
+  // (pass-through) — the uniform "encoder push = snap-to-default" gesture (§4.8).
+  // ChordMask: GP1 push -> strength 0 (true pass-through), GP2 push -> bus A.
+  // Fires on the press edge, through SEQ_CC_Set so the slot re-syncs; the LCD
+  // overlay is the confirmation (no transient message needed).
+  if( !depressed && seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC &&
+      SEQ_UI_PROC_SlotOperable(ui_focused_proc_slot) ) {
+    u8 track = SEQ_UI_VisibleTrackGet();
+    if( enc_button == 1 )
+      SEQ_CC_Set(track, SEQ_CC_CHORDMASK_STRENGTH, 0);
+    else if( enc_button == 2 )
+      SEQ_CC_Set(track, SEQ_CC_CHORDMASK_BUS, 0);
+    seq_ui_display_update_req = 1;
+  }
+
   // current hardcoded to FAST mode
-  seq_ui_button_state.FAST_ENCODERS = depressed ? 0 : 1; 
+  seq_ui_button_state.FAST_ENCODERS = depressed ? 0 : 1;
 
   SEQ_UI_InitEncSpeed(0); // no auto config
 
@@ -2651,7 +2711,38 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	    SEQ_UI_SDCardErrMsg(2000, r);
 	}
       } break;
-      }    
+      case SEQ_UI_SEL_VIEW_PROC: {
+	// PROC — the visible track's processor rack on the B-row. Keys 1..4 =
+	// slots 0..3 (PITCH / CHORDMASK / TENSION / LIMIT); keys 5..16 dark. Tap =
+	// focus (the GP encoders then operate that slot); double-tap the ChordMask
+	// slot = add/remove it (its slot presence IS the track's ChordMask playmode,
+	// so toggle SEQ_CC_MODE — the golden path — and the slot re-syncs). Acts on
+	// RELEASE, like the other views.
+	static u32 proc_tap_t0 = 0;
+	static u8  proc_tap_slot = 0xff;
+	if( depressed )
+	  return 0; // act on release
+	if( sel_button >= SEQ_CORE_NUM_PROCESSOR_SLOTS )
+	  return 0; // keys 5..16 unused in G0
+
+	u8 slot = (u8)sel_button;
+	u8 dbl = (slot == proc_tap_slot) &&
+	         ((u32)MIOS32_TIMESTAMP_GetDelay(proc_tap_t0) < 350);
+	proc_tap_slot = slot;
+	proc_tap_t0 = (u32)MIOS32_TIMESTAMP_Get();
+
+	ui_focused_proc_slot = slot; // a single tap always focuses
+
+	if( dbl && slot == SEQ_CORE_CHORDMASK_SLOT ) {
+	  u8 mode = SEQ_CC_Get(visible_track, SEQ_CC_MODE);
+	  u8 newmode = (mode == SEQ_CORE_TRKMODE_ChordMask)
+	                 ? SEQ_CORE_TRKMODE_Normal : SEQ_CORE_TRKMODE_ChordMask;
+	  SEQ_CC_Set(visible_track, SEQ_CC_MODE, newmode);
+	  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "ChordMask",
+	             (newmode == SEQ_CORE_TRKMODE_ChordMask) ? "    added" : "  removed");
+	}
+      } break;
+      }
   } else {
     // common behaviour
     if( button_state == (~(1 << sel_button) & 0xffff) ) {
@@ -3565,6 +3656,25 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
     if( (encoder == 0) ? SEQ_UI_INSSEL_KeyboardScroll(incrementer)
 		       : SEQ_UI_INSSEL_KeyboardJump(incrementer) )
       seq_ui_display_update_req = 1;
+  } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC ) {
+    // PROC view: the GP encoders operate the focused processor (invariant 3),
+    // from ANY page while the rack is latched on the B-row. ChordMask: GP1 =
+    // strength (0..127, 0 = pass-through), GP2 = source bus (A..D); the datawheel
+    // is the fine ride on the headline value (strength). Write through SEQ_CC_Set
+    // (the golden path) so the slot re-syncs and the track re-renders. Non-operable
+    // focused slots are display-only in G0 -> encoders swallowed (no page fall-through).
+    u8 track = SEQ_UI_VisibleTrackGet();
+    if( SEQ_UI_PROC_SlotOperable(ui_focused_proc_slot) ) {
+      if( encoder == 0 || encoder == 1 ) {
+	u8 v = SEQ_CC_Get(track, SEQ_CC_CHORDMASK_STRENGTH);
+	if( SEQ_UI_Var8_Inc(&v, 0, 127, incrementer) )
+	  SEQ_CC_Set(track, SEQ_CC_CHORDMASK_STRENGTH, v);
+      } else if( encoder == 2 ) {
+	u8 v = SEQ_CC_Get(track, SEQ_CC_CHORDMASK_BUS);
+	if( SEQ_UI_Var8_Inc(&v, 0, 3, incrementer) )
+	  SEQ_CC_Set(track, SEQ_CC_CHORDMASK_BUS, v);
+      }
+    }
   } else if( ui_encoder_callback != NULL ) {
     if( seq_ui_button_state.ENC_BTN_FWD_PRESSED ) {
       // encoder emulates a GP button
@@ -4030,6 +4140,54 @@ s32 SEQ_UI_LCD_Handler(void)
 
     SEQ_UI_KeyPad_LCD_Msg();       // line 1: 69 chars (charsets + Char <> Del Ins)
     SEQ_LCD_PrintString("       SAVE"); // remaining 11 chars (GP15 unused, GP16=SAVE)
+  } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC ) {
+    // G0 persistent PROC readout. While the rack is latched (LIVE) this overlay
+    // OWNS both LCD lines — the page's own draw is suppressed so nothing fights
+    // it. Reads the focused slot of the visible track: name, strength (value +
+    // 16-cell ASCII bar), source bus, and ChordMask's live 12-PC target set as
+    // note names. Read-only mirror of the slot; every edit flows via SEQ_CC_Set.
+    seq_ui_display_update_req = 0;
+    u8 track = SEQ_UI_VisibleTrackGet();
+    const seq_processor_slot_t *p = &seq_processor_stack[track][ui_focused_proc_slot];
+
+    // clear both lines so nothing leaks through from the page we latched over
+    SEQ_LCD_CursorSet(0, 0); SEQ_LCD_PrintSpaces(80);
+    SEQ_LCD_CursorSet(0, 1); SEQ_LCD_PrintSpaces(80);
+
+    // line 0 (LCD1): focus | name | track ;  (LCD2): strength value + bar
+    SEQ_LCD_CursorSet(0, 0);
+    SEQ_LCD_PrintFormattedString("PROC  slot %d/%d  %-9s  Trk%2d",
+                                 ui_focused_proc_slot + 1, SEQ_CORE_NUM_PROCESSOR_SLOTS,
+                                 SEQ_UI_PROC_SlotName(p->id), track + 1);
+    if( p->id != SEQ_PROCESSOR_ID_NONE ) {
+      SEQ_LCD_CursorSet(40, 0);
+      SEQ_LCD_PrintFormattedString("Str %3d [", p->strength);
+      int i, k = (p->strength * 16 + 63) / 127; // 0..16 filled cells
+      for(i=0; i<16; ++i)
+        SEQ_LCD_PrintChar(i < k ? '#' : '.');
+      SEQ_LCD_PrintChar(']');
+    }
+
+    // line 1: bus + ChordMask's live 12-PC target set as note names (or a hint)
+    SEQ_LCD_CursorSet(0, 1);
+    if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
+      SEQ_LCD_PrintFormattedString("Bus %c   Mask:", 'A' + (p->bus & 0x03));
+      u16 mask = SEQ_MIDI_IN_BusPCSetGet(p->bus) & 0x0fff;
+      if( !mask ) {
+        SEQ_LCD_PrintString(" (bus silent)");
+      } else {
+        static const char *const pc_name[12] = {
+          "C ","C#","D ","D#","E ","F ","F#","G ","G#","A ","A#","B " };
+        int pc;
+        for(pc=0; pc<12; ++pc)
+          if( mask & (1 << pc) )
+            SEQ_LCD_PrintFormattedString(" %s", pc_name[pc]);
+      }
+    } else if( p->id == SEQ_PROCESSOR_ID_NONE ) {
+      SEQ_LCD_PrintString("empty slot - double-tap this B-row key to add ChordMask");
+    } else {
+      SEQ_LCD_PrintString("(view only in G0 - operate ChordMask on slot 2)");
+    }
   } else {
     // re-init special chars
     if( screen_saver_was_active ) {
@@ -4355,7 +4513,8 @@ s32 SEQ_UI_LED_Handler(void)
   }
 
   SEQ_LED_PinSet(seq_hwcfg_led.record, seq_record_state.ENABLED);
-  SEQ_LED_PinSet(seq_hwcfg_led.live, seq_record_options.FWD_MIDI);
+  // G0: the LIVE lamp is now the "in PROC mode" indicator (the sel-view it latches).
+  SEQ_LED_PinSet(seq_hwcfg_led.live, seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC);
   SEQ_LED_PinSet(seq_hwcfg_led.jam_live, ui_page == SEQ_UI_PAGE_TRKJAM && !seq_record_options.STEP_RECORD);
   SEQ_LED_PinSet(seq_hwcfg_led.jam_step, ui_page == SEQ_UI_PAGE_TRKJAM && seq_record_options.STEP_RECORD);
 
@@ -4451,6 +4610,20 @@ s32 SEQ_UI_LED_Handler(void)
       u8 letter   = (pull_letter != 0xff) ? (pull_letter & 0x07)
 					  : (u8)(seq_pattern[src_bank].group & 0x07);
       ui_gp_leds = (u16)(1 << letter);
+    }
+    else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC ) {
+      // PROC view: the GP row paints the focused processor's 16-object shape.
+      // ChordMask's shape is its 12-PC target set, read live from the source bus
+      // (the exact set the snap pulls toward) — keys 1..12 = pitch classes C..B,
+      // keys 13..16 dark. Display-only in G0; shown whenever ChordMask is in the
+      // rack, even at strength 0, so you see the filter before dialling into it.
+      // Any other focused slot has no 16-object surface yet -> dark.
+      u16 gp = 0x0000;
+      const seq_processor_slot_t *p =
+        &seq_processor_stack[SEQ_UI_VisibleTrackGet()][ui_focused_proc_slot];
+      if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled )
+        gp = SEQ_MIDI_IN_BusPCSetGet(p->bus) & 0x0fff;
+      ui_gp_leds = gp;
     }
   }
 
@@ -4879,6 +5052,24 @@ s32 SEQ_UI_LED_Handler_Periodic()
 	  }
 	}
 	break;
+      case SEQ_UI_SEL_VIEW_PROC: {
+	// The visible track's rack: green = slot occupied (id != NONE), red on the
+	// focused slot (reads as amber = "you are here"). A slot that is occupied
+	// but at true pass-through (bypassed or strength 0) winks its green on
+	// ui_cursor_flash, so a processor that's doing something reads solid and a
+	// bypassed one blinks — invariant 4's "dark = pass-through" inside the
+	// 2-colour select plane. Slots 4..15 stay dark.
+	int s;
+	for(s=0; s<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++s) {
+	  const seq_processor_slot_t *p = &seq_processor_stack[visible_track][s];
+	  if( p->id == SEQ_PROCESSOR_ID_NONE )
+	    continue;
+	  u8 passthru = !p->enabled || !p->strength;
+	  if( !(passthru && ui_cursor_flash) )
+	    select_leds_green |= (1 << s);
+	}
+	select_leds_red = 1 << ui_focused_proc_slot;
+	} break;
       }
 
       leds_colour1 = !seq_ui_options.SWAP_SELECT_LED_COLOURS ? select_leds_green : select_leds_red;

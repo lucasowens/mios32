@@ -187,7 +187,8 @@ typedef enum {
   SEQ_UI_SEL_VIEW_TRG,
   SEQ_UI_SEL_VIEW_INS,
   SEQ_UI_SEL_VIEW_MUTE,
-  SEQ_UI_SEL_VIEW_PHRASE
+  SEQ_UI_SEL_VIEW_PHRASE,
+  SEQ_UI_SEL_VIEW_PROC   // G0: the B-row is the visible track's processor rack
 } seq_ui_sel_view_t;
 
 
@@ -515,6 +516,7 @@ extern u8 ui_selected_step;
 extern u8 ui_selected_item;
 extern u8 ui_selected_bookmark;
 extern u8 ui_selected_phrase;
+extern u8 ui_focused_proc_slot; // G0: focused rack slot in the PROC sel-view (0..3)
 extern u16 ui_selected_gp_buttons;
 
 extern u16 ui_hold_msg_ctr;
