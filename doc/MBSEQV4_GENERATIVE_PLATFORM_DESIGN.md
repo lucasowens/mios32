@@ -3100,6 +3100,32 @@ refused). HIL: +7 pins (`test_capture_synch_measure.py` foreign-clkdiv ×4, `tes
 ×3), full suite **241/241**. **Lesson reaffirmed (review-before-commit):** the original synch bundle's
 tests all ran at the 16th grid, masking the tps≠96 case; the adversarial harden pass surfaced it.
 
+**2026-07-03 — G0: the operating grammar, proven on ChordMask (SHIPPED, by-ear GO; committed main 35cfd4b7).**
+The turn from the UX study (`doc/plans/2026-07-02-ux-study-fluid-flow.md` §3.5): the panel's
+warts are one cause — *no operating grammar*. The resolution is **make the grammar the constant and
+processors the data** — five invariants (one rack / one selector / one operating surface / one
+readout / one descriptor growth path). G0 built the **thinnest vertical slice** to test the whole
+model by hand: operate **one** real processor (ChordMask) end-to-end through the uniform surface.
+- **Decisions locked (all by-ear-confirmed):** rack = a new **`PROC` sel-view** (the B-row becomes
+  the visible track's 4-slot render stack); operate = the **GP encoder bank** (GP1 strength / GP2
+  bus / datawheel fine-ride, **push = snap-to-default**, pass-through at 0); readout = **B-row rack
+  LEDs** (green occupied / amber focused / pass-through winks) + **GP-row 12-PC mask paint** + a
+  **persistent LCD overlay** that *owns* both lines while latched (the page draw is suppressed, so
+  nothing fights it). All edits route through **`SEQ_CC_Set`** (the golden path) — the UI never
+  pokes `seq_processor_stack`; it only reads it for the readout.
+- **PROC home = the stolen LIVE button** (latched, not held; its LED is now the "in PROC mode"
+  lamp). The displaced `FWD_MIDI` is **pinned permanently ON** — the config reader now ignores a
+  persisted 0 so it can never strand OFF with the toggle gone (caught in review, not by ear).
+- **Known coupling (not a bug, a Phase-C bridge):** ChordMask's slot presence *is* the track's
+  exclusive playmode, so double-tap-add sets ChordMask playmode and double-tap-remove returns to
+  **Normal** (not the prior mode). Acceptable for the G0 tenant; dissolves when a processor becomes
+  a truly independent slot.
+- **Verdict → license:** GO. The B-row-select → encoder-sculpt → GP-row-readback loop feels more
+  like playing than menu-editing. **G1 is licensed** — migrate the other slots (Tension / Pitch /
+  Limit) and the FX/generator pages onto the same descriptor grammar, collapsing the page-scatter.
+  What G0 proved unlocks the rest: every other processor becomes "fill in the descriptor + point
+  the encoders at its params."
+
 ---
 
 ## 10. Open questions (unresolved forks)

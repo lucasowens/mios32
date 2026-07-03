@@ -1,7 +1,13 @@
 # G0 — The processor grammar, proven on ChordMask
 
-**Status:** build plan, not started. Design home: UX study `2026-07-02-ux-study-fluid-flow.md`
-§3.5 (the operating model) + §4.11 (ChordMask). This plan executes the **G0** roadmap bundle.
+**Status:** ✅ EXECUTED — SHIPPED with a by-ear **GO**, committed main `35cfd4b7` (2026-07-03).
+All 6 build steps landed as written (the only deviations, both improvements: the "double-tap =
+enable/bypass" step resolved to *toggle the ChordMask playmode* — its slot presence IS the playmode
+— and `FWD_MIDI` is pinned ON in the **config reader**, not just at init, so an old SD config can't
+strand it OFF). The decision + rationale now live in the design doc **§9 (2026-07-03)**; **G1 is
+licensed**. This plan is scaffolding — kept for provenance; the durable home is the design doc.
+Design home: UX study `2026-07-02-ux-study-fluid-flow.md` §3.5 (the operating model) + §4.11
+(ChordMask). This plan executed the **G0** roadmap bundle.
 
 **North-star (settled by-ear 2026-07-03):** the **Elektron model** — a *generic* parameter-page
 interface (the same encoders remap across pages) with tasteful per-context flourishes that never
