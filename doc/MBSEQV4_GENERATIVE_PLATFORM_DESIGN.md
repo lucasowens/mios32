@@ -3129,6 +3129,34 @@ bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot 
   around the recorded track's OWN loop wrap (handles sub-measure/polymeter too). The capture ring is
   already self-contained (own seed, doesn't touch the FREEZE/robotize ring), which lowers (A)'s risk.
   Full kickoff + grounded recon in `doc/plans/2026-06-26-multimeasure-capture.md`.
+- **Self-bus legibility — decode the Ctrl step value to the *target param's own units*
+  (floated 2026-07-03).** Today a `Ctrl` (self-bus) par-layer step shows a raw **0–127** value
+  (`seq_lcd.c:789` compact view + `:950` detail view, both `%3d`). The idea: show the value the
+  step *actually sets its target to* — a Ctrl-on-ClockDiv step reads `/16`, on Trn.Semi `+3`, on
+  Length a gatelength, on Probability `75%`. The *target name* is already resolved
+  (`SEQ_CC_LABELS_Get(port, cc, /*enforce_ctrl*/1)` → "ClockDiv"/"Trn.Semi"/…, shown on the
+  TRKEVNT config page); this extends that to the per-step **value**.
+  - **Mechanism (grounded):** a Ctrl layer holds a CC number from `ctrl_labels[]` (0x10–0x5f);
+    at emission each step calls `SEQ_CC_MIDI_Set(track, cc, value)`, which self-routes to
+    `SEQ_CC_Set(track, cc+0x20, value)` (→ config idx 0x30–0x7f). Display is decoupled from that
+    path.
+  - **Cost reframe — NOT runtime-heavy (the user's "heavy" instinct is aimed at the wrong axis).**
+    Decode runs display-only, on the EDIT page, for the 16 visible steps, on redraw — off the
+    emission path entirely. The real weight is **code surface** (a per-target decode+format
+    dispatch across ~50 self-routable CCs) and **screen real estate** (fitting a decoded value in
+    a 3–4-char step cell).
+  - **Two gotchas.** (1) *The 7-bit step value ≠ the stored value for several targets* —
+    `SEQ_CC_MIDI_Set` applies per-CC transforms (`LFO_AMPLITUDE` ×2, `MIDI_PORT`/`FX_MIDI_PORT`
+    remap high ranges → Bus/AOUT) and some targets pack flags (`TrkFlags`, `ClkDivFl`, `LFOFlags`)
+    that 7 bits can't fully express; the decoder must **mirror those same transforms** or the
+    readout lies. (2) abbreviation into the narrow cell.
+  - **POC-scoped path (recommended):** format only the handful of targets you'd actually *sweep
+    live* — ClockDiv, Trn.Semi/Oct, Length(gate), Probability, Direction, Groove, LFO Amp,
+    Echo Rep/Del — reusing the existing `SEQ_LCD_Print*` helpers where they already exist
+    (`PrintGatelength`, `PrintProbability`, `PrintStepDelay`, `PrintRootValue`); raw `%3d`
+    fallback for everything else. Two display sites, one localized `switch(cc)` branch, low blast
+    radius. Turns the self-bus from blind 0–127 automation into legible parameter automation — the
+    MOTION heart made performable.
 
 **Tension Workbench — SHIPPED + by-ear GO 2026-06-10 (§9; build narrative → REFERENCE).** The
 GRAVITY field (monotone pull / varied push), per-track GRIP, RESOLVE, SHADE; ext-CC fix shipped
