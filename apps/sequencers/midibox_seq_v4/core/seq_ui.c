@@ -961,6 +961,14 @@ static s32 SEQ_UI_Button_Down(s32 depressed)
 {
   seq_ui_button_state.DOWN = depressed ? 0 : 1;
 
+  // INS view, melodic keyboard on the B-row: > scrolls the row -1 semitone (any
+  // page), so scroll works while the keyboard is played from a latched sel-view.
+  if( !depressed && !seq_ui_button_state.MENU_PRESSED &&
+      seq_ui_sel_view == SEQ_UI_SEL_VIEW_INS && SEQ_UI_INSSEL_KeyboardActive() ) {
+    SEQ_UI_INSSEL_KeyboardScroll(-1);
+    return 0;
+  }
+
   // forward to menu page
   if( !seq_ui_button_state.MENU_PRESSED && ui_button_callback != NULL ) {
     ui_button_callback(SEQ_UI_BUTTON_Down, depressed);
@@ -973,6 +981,13 @@ static s32 SEQ_UI_Button_Down(s32 depressed)
 static s32 SEQ_UI_Button_Up(s32 depressed)
 {
   seq_ui_button_state.UP = depressed ? 0 : 1;
+
+  // INS view, melodic keyboard on the B-row: < scrolls the row +1 semitone (any page)
+  if( !depressed && !seq_ui_button_state.MENU_PRESSED &&
+      seq_ui_sel_view == SEQ_UI_SEL_VIEW_INS && SEQ_UI_INSSEL_KeyboardActive() ) {
+    SEQ_UI_INSSEL_KeyboardScroll(1);
+    return 0;
+  }
 
   // forward to menu page
   if( !seq_ui_button_state.MENU_PRESSED && ui_button_callback != NULL ) {
@@ -2524,7 +2539,9 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	SEQ_UI_TRGSEL_Button_Handler((seq_ui_button_t)sel_button, depressed);
 	break;
       case SEQ_UI_SEL_VIEW_INS:
-	SEQ_UI_INSSEL_Button_Handler((seq_ui_button_t)sel_button, depressed);
+	// the B-row is the live play-surface (drum pads / keyboard) — or the
+	// instrument selector when the play option is off (handled inside).
+	SEQ_UI_INSSEL_SelectRow_Button((seq_ui_button_t)sel_button, depressed);
 	break;
       case SEQ_UI_SEL_VIEW_MUTE: {
 	if( depressed )
@@ -2915,6 +2932,16 @@ static s32 SEQ_UI_Button_InsSel(s32 depressed)
     if( ui_page == SEQ_UI_PAGE_MUTE || ui_page == SEQ_UI_PAGE_PATTERN || ui_page == SEQ_UI_PAGE_SONG )
       SEQ_UI_PageSet(SEQ_UI_PAGE_EDIT); // this selection only makes sense in EDIT page
   } else {
+    // Release. A clean re-tap while ALREADY in INS sel-view (no B-row pressed during
+    // the hold -> TAKE_OVER still set) toggles the B-row between instrument-select
+    // and the live play-surface (keyboard / drum pads). Holding INSTR + tapping a
+    // B-row key (the drum silent-retarget gesture) clears TAKE_OVER, so it never
+    // toggles; the first tap that ENTERS the view (prev != INS) just enters.
+    if( seq_ui_button_state.TAKE_OVER_SEL_VIEW && prev_sel_view == SEQ_UI_SEL_VIEW_INS ) {
+      seq_ui_options.INSSEL_DRUM_TRIGGER ^= 1;
+      SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "INSTR row:",
+		 seq_ui_options.INSSEL_DRUM_TRIGGER ? "Play surface (keys/pads)" : "Select instrument");
+    }
     if( !seq_ui_button_state.TAKE_OVER_SEL_VIEW )
       seq_ui_sel_view = prev_sel_view;
   }
@@ -3529,6 +3556,15 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
       SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Switch Quant", (char *)q_name[g]);
       seq_ui_display_update_req = 1;
     }
+  } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_INS && SEQ_UI_INSSEL_KeyboardActive() &&
+	     (encoder == 0 || encoder == 1) ) {
+    // INS view, melodic keyboard on the B-row: the datawheel scrolls the row ±1
+    // semitone and the GP1 encoder sets the isomorphic Jump. Handled here (not in
+    // the INSSEL page's encoder callback) so they work from ANY page while the
+    // keyboard is played on the latched INS sel-view. encoder 0 = datawheel, 1 = GP1.
+    if( (encoder == 0) ? SEQ_UI_INSSEL_KeyboardScroll(incrementer)
+		       : SEQ_UI_INSSEL_KeyboardJump(incrementer) )
+      seq_ui_display_update_req = 1;
   } else if( ui_encoder_callback != NULL ) {
     if( seq_ui_button_state.ENC_BTN_FWD_PRESSED ) {
       // encoder emulates a GP button
@@ -4164,6 +4200,21 @@ s32 SEQ_UI_LED_Handler(void)
   // for special LED handling of Antilog Frontpanel
   u8 selbuttons_available = seq_hwcfg_blm8x8.dout_gp_mapping == 3;
 
+  // ---------------------------------------------------------------------------
+  // Fork LED conventions (keep new modes consistent with these):
+  //   STEADY  = "you are here / holding this now" — the page you're on, or the key
+  //             you're physically holding for a gesture.
+  //   FLASH   = "an armed/live MODE is engaged" — e.g. a POSTURE-MORPH is armed
+  //             (PHRASE), or the INSSEL play-surface is hot (INSTR). Uses the shared
+  //             ui_cursor_flash timebase; ON during the visible phase (!ui_cursor_flash)
+  //             so all indicators blink in phase with the GP cursor. A STEADY term
+  //             overrides the flash where both apply.
+  //   GP ROW  = for the hold-then-paint gesture family (UTILITY / PATTERN / B-row
+  //             PULL), the GP row reflects the gesture's LIVE AIM (a depth
+  //             thermometer or a letter cursor) — painted in the GP block below.
+  // Keep per-pass cost trivial: read RAM/state only, never SD or heavy queries here.
+  // ---------------------------------------------------------------------------
+
   // track LEDs
   // in pattern page: track buttons are used as group buttons
   if( ui_page == SEQ_UI_PAGE_PATTERN ) {
@@ -4221,17 +4272,37 @@ s32 SEQ_UI_LED_Handler(void)
   SEQ_LED_PinSet(seq_hwcfg_led.trg_layer_sel, ui_page == SEQ_UI_PAGE_TRGSEL || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_TRG));
 
   // instrument layer LEDs
-  SEQ_LED_PinSet(seq_hwcfg_led.ins_sel, ui_page == SEQ_UI_PAGE_INSSEL || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_INS));
+  // Lit while the INS dimension is active (INSSEL page or INSTR sel-view). The B-row
+  // is then either the instrument selector or the live play-surface (keyboard/pads) —
+  // FLASH when the play-surface is on so the mode reads at a glance vs. steady =
+  // select. Toggle the two with a re-tap of INSTR (SEQ_UI_Button_InsSel).
+  {
+    u8 ins_view = (ui_page == SEQ_UI_PAGE_INSSEL) || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_INS);
+    SEQ_LED_PinSet(seq_hwcfg_led.ins_sel,
+		   ins_view && (!seq_ui_options.INSSEL_DRUM_TRIGGER || !ui_cursor_flash));
+  }
   
   // remaining LEDs
   SEQ_LED_PinSet(seq_hwcfg_led.edit, ui_page == SEQ_UI_PAGE_EDIT);
   SEQ_LED_PinSet(seq_hwcfg_led.mute, ui_page == SEQ_UI_PAGE_MUTE || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_MUTE));
-  SEQ_LED_PinSet(seq_hwcfg_led.pattern, ui_page == SEQ_UI_PAGE_PATTERN);
+  // PATTERN: steady on the Pattern page, and also while HELD for the capture-to-slot
+  // gesture — so the hold-then-paint family (PATTERN / UTILITY / B-row PULL) all light
+  // their held key. The GP helper for this hold is painted in the GP block below.
+  SEQ_LED_PinSet(seq_hwcfg_led.pattern, ui_page == SEQ_UI_PAGE_PATTERN || seq_ui_button_state.PATTERN_PRESSED);
   // Repurposed SONG button: its LED now tracks the unified Capture page (fork
-  // 2026-06-27). The song page is reached via PHRASE; its LED reflects the
-  // PHRASE sel-view below.
+  // 2026-06-27). The song page is reached via PHRASE.
   SEQ_LED_PinSet(seq_hwcfg_led.song, ui_page == SEQ_UI_PAGE_CAPTURE);
-  SEQ_LED_PinSet(seq_hwcfg_led.phrase, seq_ui_button_state.PHRASE_PRESSED || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE));
+  // PHRASE: steady while pressed / in PHRASE sel-view / on the song-arrangement page
+  // it opens (page consistency with the other page-openers). Additionally FLASH it on
+  // ANY page while a POSTURE-MORPH is armed, so a morph riding on the datawheel stays
+  // visible even away from the PHRASE view. Steady overrides the flash.
+  {
+    u8 phrase_steady = seq_ui_button_state.PHRASE_PRESSED
+		     || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE)
+		     || ui_page == SEQ_UI_PAGE_SONG;
+    u8 morph_armed = SEQ_PATTERN_PhraseMorphTarget() >= 0;
+    SEQ_LED_PinSet(seq_hwcfg_led.phrase, phrase_steady || (morph_armed && !ui_cursor_flash));
+  }
   SEQ_LED_PinSet(seq_hwcfg_led.mixer, ui_page == SEQ_UI_PAGE_MIXER);
 
   SEQ_LED_PinSet(seq_hwcfg_led.track_mode, ui_page == SEQ_UI_PAGE_TRKMODE);
@@ -4263,7 +4334,14 @@ s32 SEQ_UI_LED_Handler(void)
 
   SEQ_LED_PinSet(seq_hwcfg_led.select, seq_ui_button_state.SELECT_PRESSED);
   SEQ_LED_PinSet(seq_hwcfg_led.menu, seq_ui_button_state.MENU_PRESSED);
-  SEQ_LED_PinSet(seq_hwcfg_led.bookmark, ui_page == SEQ_UI_PAGE_BOOKMARKS || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_BOOKMARKS));
+  // BOOKMARK: steady on the Bookmarks page / sel-view. Also, while SELECT is held (the
+  // CHECKPOINT/REVERT modifier), light it if a checkpoint exists this session — so the
+  // REVERT safety net is visible exactly when the SELECT+BOOKMARK gesture is armed, and
+  // dark when there's nothing to revert to.
+  SEQ_LED_PinSet(seq_hwcfg_led.bookmark,
+		 ui_page == SEQ_UI_PAGE_BOOKMARKS
+		 || (selbuttons_available && seq_ui_sel_view == SEQ_UI_SEL_VIEW_BOOKMARKS)
+		 || (seq_ui_button_state.SELECT_PRESSED && SEQ_PATTERN_CheckpointValid()));
 
   // handle double functions
   if( seq_ui_button_state.MENU_PRESSED ) {
@@ -4336,22 +4414,43 @@ s32 SEQ_UI_LED_Handler(void)
 
     ui_gp_leds = new_ui_gp_leds;
 
-    // POSTURE-MORPH bar: while armed in PHRASE view on the armed page, override the
-    // GP row with a 16-segment thermometer of the morph position. Armed-page-scoped
-    // to match the GP/datawheel intercepts (don't paint over EDIT's GP LEDs while
-    // PHRASE view is latched on top of another page).
+    // Hold-then-paint gesture overlays: while a morph/capture/pull gesture is engaged,
+    // the GP row reflects the gesture's LIVE AIM instead of the page's own LEDs. Only
+    // one gesture is active at a time; the if/else-if ladder makes that explicit and
+    // fixes precedence (morph > UTILITY-grab > PATTERN-capture > B-row PULL).
     if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PHRASE && ui_page == morph_armed_page &&
 	SEQ_PATTERN_PhraseMorphTarget() >= 0 ) {
+      // POSTURE-MORPH bar: 16-segment thermometer of the morph position. Armed-page-
+      // scoped to match the GP/datawheel intercepts (don't paint over EDIT's GP LEDs
+      // while PHRASE view is latched on top of another page).
       u8 k = (SEQ_PATTERN_PhraseMorphValue() * 16) / PHRASE_MORPH_MAX;
       ui_gp_leds = k ? (u16)((1 << k) - 1) : 0x0000;
     }
-
-    // Retroactive CAPTURE (UTILITY held): the GP row is a thermometer of the grabbable
-    // depth in LOOPS — the max grabbable K lit from GP1. Tap GP-n to grab n loops.
-    if( capture_util_held ) {
+    else if( capture_util_held ) {
+      // Retroactive CAPTURE (UTILITY held): thermometer of grabbable depth in LOOPS —
+      // the max grabbable K lit from GP1. Tap GP-n to grab n loops.
       u8 cap_k = SEQ_CORE_CaptureMaxK(SEQ_CORE_CaptureRingTrack()); // par/trg-aware grabbable max
       if( cap_k > 16 ) cap_k = 16;
       ui_gp_leds = cap_k ? (u16)((1 << cap_k) - 1) : 0x0000;
+    }
+    else if( seq_ui_button_state.PATTERN_PRESSED ) {
+      // CAPTURE-to-slot (PATTERN held): GP1-8 = letter cursor on the aimed destination
+      // group letter (default = the source pattern's current letter). GP9-16 are the
+      // commit targets — press a number to freeze the visible track into that slot.
+      u8 src_group = SEQ_UI_VisibleTrackGet() / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+      u8 grp = (pattern_capture_group != 0xff) ? (pattern_capture_group & 0x07)
+					       : (u8)(seq_pattern[src_group].group & 0x07);
+      ui_gp_leds = (u16)(1 << grp);
+    }
+    else if( pull_held_track != 0xff && seq_ui_sel_view == SEQ_UI_SEL_VIEW_TRACKS ) {
+      // PULL / RECOMBINE (B-row track held): mirror of the capture push — GP1-8 = letter
+      // cursor on the aimed SOURCE pattern (default = the source column's current
+      // letter). GP9-16 commit the pull onto the held track.
+      u8 src_col  = (pull_src_column != 0xff) ? pull_src_column : pull_held_track;
+      u8 src_bank = src_col / SEQ_CORE_NUM_TRACKS_PER_GROUP;
+      u8 letter   = (pull_letter != 0xff) ? (pull_letter & 0x07)
+					  : (u8)(seq_pattern[src_bank].group & 0x07);
+      ui_gp_leds = (u16)(1 << letter);
     }
   }
 
@@ -4739,9 +4838,17 @@ s32 SEQ_UI_LED_Handler_Periodic()
       case SEQ_UI_SEL_VIEW_TRG:
 	select_leds_green = 1 << ui_selected_trg_layer;
 	break;
-      case SEQ_UI_SEL_VIEW_INS:
-	select_leds_green = 1 << ui_selected_instrument;
-	break;
+      case SEQ_UI_SEL_VIEW_INS: {
+	// Melodic keyboard play-surface: green = in-scale keys, amber = root/tonic.
+	// Otherwise (drum pads / play off): the plain instrument cursor.
+	u16 kbd_green, kbd_red;
+	if( SEQ_UI_INSSEL_KeyboardLeds(&kbd_green, &kbd_red) ) {
+	  select_leds_green = kbd_green;
+	  select_leds_red   = kbd_red;
+	} else {
+	  select_leds_green = 1 << ui_selected_instrument;
+	}
+      } break;
       case SEQ_UI_SEL_VIEW_MUTE:
 	if( seq_ui_button_state.MUTE_PRESSED ) {
 	  select_leds_green = seq_core_trk[visible_track].layer_muted | seq_core_trk[visible_track].layer_muted_from_midi;

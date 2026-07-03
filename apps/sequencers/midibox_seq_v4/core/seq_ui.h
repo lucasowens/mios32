@@ -488,6 +488,11 @@ extern s32 SEQ_UI_STEPSEL_Button_Handler(seq_ui_button_t button, s32 depressed);
 extern s32 SEQ_UI_PARSEL_Button_Handler(seq_ui_button_t button, s32 depressed);
 extern s32 SEQ_UI_TRGSEL_Button_Handler(seq_ui_button_t button, s32 depressed);
 extern s32 SEQ_UI_INSSEL_Button_Handler(seq_ui_button_t button, s32 depressed);
+extern s32 SEQ_UI_INSSEL_SelectRow_Button(seq_ui_button_t button, s32 depressed);
+extern s32 SEQ_UI_INSSEL_KeyboardLeds(u16 *green, u16 *red);
+extern s32 SEQ_UI_INSSEL_KeyboardActive(void);
+extern s32 SEQ_UI_INSSEL_KeyboardScroll(s32 delta);
+extern s32 SEQ_UI_INSSEL_KeyboardJump(s32 incrementer);
 extern s32 SEQ_UI_SONG_Button_Handler(seq_ui_button_t button, s32 depressed);
 
 

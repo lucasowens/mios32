@@ -11,7 +11,7 @@ This is the **UX-design companion** to `MBSEQV4_HARDWARE_GLOSSARY.md`:
 
 Use the **bold glossary terms** here. Lines marked **[fork]** are repurposed away from
 stock MBSEQ. Everything below was verified against source (symbol names, not line numbers —
-line numbers drift in this fork). Last verified: 2026-06-30.
+line numbers drift in this fork). Last verified: 2026-07-02.
 
 ---
 
@@ -96,6 +96,25 @@ These pick a *dimension* for the B-row; they do **not** navigate pages.
 > **No dedicated panel key** on this LSO build for stock GROUP, SCRUB, FOLLOW, MIXER, SAVE,
 > SAVE-ALL, tap-tempo, or the per-track config pages (TRKMODE/DIR/LEN/…). They're firmware
 > functions reached via **MENU + GP** shortcuts or other combos.
+
+### 1.8 LED feedback conventions **[fork]**
+
+Every mode indicator obeys three rules (enforced in `SEQ_UI_LED_Handler`, `seq_ui.c`).
+New modes should follow them so the panel stays legible:
+
+| Signal | Means | Examples |
+|---|---|---|
+| **Steady** | *You are here / holding this now* — the page you're on, or the key you physically hold for a gesture. | EDIT/MUTE/CAPTURE page LEDs; **PATTERN** & **UTILITY** lit while held for their capture gesture. |
+| **Flash** (`ui_cursor_flash` timebase, in phase with the GP cursor) | *An armed/live MODE is engaged* — a background state you should know about, whether or not you're looking at it. | **PHRASE** flashes on any page while a **POSTURE-MORPH is armed** (rideable on the datawheel); **INSTR** flashes when the **INSSEL play-surface** is hot (drum-pad/keyboard) vs. steady = plain instrument-select. |
+| **GP-row aim** | The **hold-then-paint family**'s live target. | **UTILITY** held → depth thermometer (grabbable loops); **PATTERN** held → letter cursor on the aimed dest group; **B-row PULL** held → letter cursor on the aimed source pattern. |
+
+Contextual safety-net signal: while **SELECT** is held, **BOOKMARK** lights if a checkpoint
+exists this session (REVERT has a target) — visible exactly when the SELECT+BOOKMARK gesture
+is armed. Persistent modes keep their own steady light: **FREEZE** on METRONOME (lit = frozen).
+
+> LED reads in the handler must stay trivial (RAM/state only — **never SD or heavy queries**
+> per pass). The CHECKPOINT-available signal uses a cheap RAM flag
+> (`SEQ_PATTERN_CheckpointValid`), seeded once at session load, not a per-pass disk probe.
 
 ---
 
@@ -182,20 +201,39 @@ Every non-trivial combo. "✓" = shipped/committed.
 
 ---
 
-## 4. The live-play surface (INSSEL page) **[fork]**
+## 4. The live-play surface (B-row, INSTR sel-view) **[fork]**
 
-With **OPT → "Drum pads + 1-row keyboard"** on (`INSSEL_DRUM_TRIGGER`), the **GP row** on
-the **INSTR** page becomes a playable surface — the first "get" of the fusion instrument.
-RECORD-armed = records into the track; else previews. (`seq_ui_inssel.c`)
+With **OPT → "Drum pads + 1-row keyboard"** on (`INSSEL_DRUM_TRIGGER`), the **B-row**
+(selection buttons) becomes a playable surface whenever the **INSTR** sel-view is active —
+the first "get" of the fusion instrument. Because it's on the B-row (sel-view), you play it
+from **any page** while the GP row keeps its page meaning ("two things at once"). RECORD-armed
+= records into the track; else previews. (`seq_ui_inssel.c`, `SEQ_UI_INSSEL_SelectRow_Button`.)
 
-| Track type | row plays | held-modifier + key |
+**INSTR toggles the mode.** A clean **re-tap of INSTR** (while already in INS sel-view) flips
+the B-row between **instrument-select** and the **play-surface** (`INSSEL_DRUM_TRIGGER`).
+INSTR-held + a B-row tap (drum silent-retarget) does **not** toggle. The **INSTR LED** reads
+the mode: flash = play-surface hot, steady = instrument-select.
+
+| Track type | B-row plays | held-modifier + key |
 |---|---|---|
 | **Drum** | TR-909-style pads (one drum per key), vel 100 on press | **INSTR-held + tap = silent retarget** of the selected instrument (`INS_SEL`; bare tap plays). Frees SELECT. |
-| **Melodic** | a one-row keyboard; layout set by **OPT → "Melodic keyboard layout"** | **SELECT + GP1 / GP16 = octave down / up** (±5; transient "Octave ±n" readout) |
+| **Melodic** | a one-row keyboard; layout set by **OPT → "Melodic keyboard layout"** | **SELECT + key1 / key16 = octave down / up** (coarse scroll ±12) |
 
 Melodic layouts (`INSSEL_KBD_LAYOUT`, base = middle C `0x3c`):
-**Chromatic (isomorphic)** GP1=tonic +1 semitone/key · **Scale degrees (in key)** ·
+**Chromatic (isomorphic)** key k = base + k·**Jump** · **Scale degrees (in key)** ·
 **Diatonic chords (in key)** in-key triads. Scale & root read live.
+
+**Isomorphic keyboard controls** (melodic play-surface) — all live in INS sel-view from any page:
+- **GP1 encoder** = **Jump** — semitones between adjacent keys, 1..12 (1=chromatic,
+  2=whole-tone, 5=fourths, 7=fifths, 12=octaves). Chromatic layout only.
+- **‹ / ›** and **datawheel** = **scroll** the whole row ±1 semitone (fine); **SELECT +
+  key1/key16** = ±1 octave (coarse). One row reaches the full range by scrolling.
+  (Jump/scroll are intercepted globally in `SEQ_UI_Encoder_Handler` / `SEQ_UI_Button_Up/Down`
+  so they work off the INSSEL page; a transient LCD readout confirms base note / Jump.)
+- **B-row LEDs** (native 2-colour `select_leds`): **green** = in-scale key, **amber** =
+  root/tonic, **dark** = out-of-scale (`SEQ_UI_INSSEL_KeyboardLeds`). The GP row keeps its
+  page function. The INSSEL page's LCD shows layout / Jump / base note / scale on line 0 and
+  the 16 keys' note names on line 1.
 
 ---
 
@@ -211,7 +249,7 @@ unless the page or sel-view overrides.)
 | **PATTERN** | bank A–H / num 1–8 (8\|8) | track-select | — |
 | **CAPTURE** (Song) | dst pattern (letter\|num) | dst track | datawheel=GRAB; GP1-enc=FILL⇄LOOP |
 | **PHRASE** | morph coarse bar (when armed) | 16 snapshot waypoints | datawheel=morph ride |
-| **INSSEL** (drum/kbd on) | drum pads / keyboard | instrument-select | RECORD arms record-vs-preview |
+| **INS sel-view** (drum/kbd on) | *(page's own)* | drum pads / keyboard (green=in-scale, amber=root) | INSTR re-tap toggles play⇄select; RECORD arms rec-vs-preview; GP1-enc=Jump; ‹/›+datawheel=scroll; SELECT+key1/16=octave |
 | **GRAVITY** | item hints; GP8=RESOLVE, GP16=→FX_SCALE | track-select | GP1-enc=GRAVITY, GP2=SHADE, GP3=GRIP, GP4=track |
 | **ROBOLOOP** | GP6=reseed, GP7=freeze, GP8=freeze-q; **SELECT+GP1–16 reroll measure anchor** | track-select | GP1-enc=track, GP2=palette len, GP3=loop start, GP4=cycles, GP5=rotate |
 | **TRKEUCLID** (stock) | Euclidean trigger preview | track-select | per trigger-layer params |

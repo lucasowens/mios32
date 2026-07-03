@@ -71,6 +71,15 @@ u32 seq_pattern_writeback_count;
 // that boot debris over slots that never sounded.
 static u8 pattern_loaded;
 
+// CHECKPOINT availability (LED indicator support): 1 once a CHECKPOINT has been
+// written THIS session, i.e. REVERT has a target to fall back to. Session-scoped
+// RAM flag (reset on session load / harness reset); a reloaded session with a
+// prior on-disk anchor reads dark until re-checkpointed, which is safe — a REVERT
+// with no this-session anchor refuses cleanly. Surfaced on the BOOKMARK LED while
+// SELECT is held (the checkpoint/revert modifier), so the safety net is visible
+// exactly when the gesture is armed.
+static u8 checkpoint_valid;
+
 // PHRASES — occupancy of the MBSEQ_PH.V4 snapshot library: bit n set when phrase
 // n has committed records. Set on capture this session, and RE-SEEDED from disk
 // on session load by SEQ_PATTERN_ProbePhrasesOnLoad (cross-session probe), so a
@@ -166,6 +175,7 @@ s32 SEQ_PATTERN_Init(u32 mode)
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
   phrase_drift = 0;
+  checkpoint_valid = 0;
 #if SEQ_PHRASE_MORPH
   phrase_morph_target = 0xff; // disarmed
   phrase_morph_pos = 0;
@@ -473,13 +483,22 @@ s32 SEQ_PATTERN_Checkpoint(void)
   // anchor slots — and CHECKPOINT just rewrote slot 0 (the REDO target), so a
   // later REDO would restore the NEW checkpoint, not the reverted state. Only
   // on a committed write (a failed checkpoint changed nothing).
-  if( status >= 0 )
+  if( status >= 0 ) {
     SEQ_CORE_JournalInvalidate();
+    checkpoint_valid = 1; // REVERT now has a target (drives the BOOKMARK LED under SELECT)
+  }
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN:%d] CHECKPOINT status %d", SEQ_BPM_TickGet(), status);
 
   return status;
+}
+
+// 1 if a CHECKPOINT has been written this session (REVERT has a target). See the
+// checkpoint_valid declaration for the session-scope caveat.
+s32 SEQ_PATTERN_CheckpointValid(void)
+{
+  return checkpoint_valid;
 }
 
 // REVERT: restore all four groups' live state (incl. generator state) from the
@@ -801,6 +820,7 @@ void SEQ_PATTERN_PhraseResetState(void)
   phrase_present_mask = 0;
   last_recalled_phrase = -1;
   phrase_drift = 0;
+  checkpoint_valid = 0;
 #if SEQ_PHRASE_MORPH
   phrase_morph_target = 0xff; // disarmed
   phrase_morph_pos = 0;
@@ -832,6 +852,7 @@ void SEQ_PATTERN_ProbePhrasesOnLoad(void)
   // AFTER SEQ_FILE_B_LoadAllBanks in SEQ_FILE_LoadAllFiles, so it also wipes any
   // drift the per-group load's CC-replay raised.)
   phrase_drift = 0;
+  checkpoint_valid = 0; // new session: no this-session anchor yet (see the flag's decl)
 
   // pre-blank all names; the probe fills only the occupied slots' names, so a
   // never-captured (or unreached) slot stays blank => UI shows the number.
@@ -846,6 +867,13 @@ void SEQ_PATTERN_ProbePhrasesOnLoad(void)
   MUTEX_SDCARD_GIVE;
 
   phrase_present_mask = (mask >= 0) ? (u16)mask : 0;
+
+  // Seed the CHECKPOINT-available LED flag from disk so a reloaded session that
+  // already holds an on-disk anchor lights its safety-net indicator without
+  // needing a fresh checkpoint. One extra SD open per load (cheap, once); the
+  // per-pass LED path stays on the RAM flag. Called AFTER the mutex give above —
+  // AnchorPresent takes the SD mutex itself, so it must not nest here.
+  checkpoint_valid = (SEQ_PATTERN_AnchorPresent() > 0) ? 1 : 0;
 
   if( seq_pattern_log_load_time )
     DEBUG_MSG("[SEQ_PATTERN] PHRASE PROBE mask 0x%04x", phrase_present_mask);

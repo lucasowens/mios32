@@ -68,6 +68,7 @@ extern s32 SEQ_PATTERN_WritebackAllDirty(void);
 extern s32 SEQ_PATTERN_AnchorPresent(void);
 extern s32 SEQ_PATTERN_Checkpoint(void);
 extern s32 SEQ_PATTERN_Revert(void);
+extern s32 SEQ_PATTERN_CheckpointValid(void); // RAM flag: this-session anchor exists (LED-cheap)
 
 // REVERT-undoable (Stage 2b): the unified journal's ORGANISM scope drives these.
 // SEQ_PATTERN_Revert stashes the live jam into a pre-revert anchor-bank slot
