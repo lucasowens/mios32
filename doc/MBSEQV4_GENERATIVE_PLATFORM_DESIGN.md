@@ -3158,6 +3158,52 @@ the param-driven slots reset to pass-through).
   onto the grammar is a separate lift (make them rack processors first) — call it **G1.5**. **G2** =
   lock the descriptor as the extension point (formatter registry, defaults, optional CUSTOM surface).
 
+**2026-07-05 — G1.5: emission FX onto the grammar via EXPOSE-IN-PLACE; Echo the reference tenant +
+Pitch completed (SHIPPED, by-ear GO; committed main ce9a9f70).**
+The G1 "make the FX render-stack processors first" plan was **overturned by recon** and the user's
+steer. A 7-agent read of Echo/LFO/Robotize/Humanize/Groove found the render-lift is *architecturally
+wrong* for all five — the render stack is a fixed-geometry per-step buffer rewrite, but Echo is a
+**scheduler** (posts to future ticks), LFO a **free-running CC stream**, Robotize/Humanize **per-event
+stochastic**, Groove **timing** (negative delays can't bake). And the reason to lift is **already
+spent**: `SEQ_CC_ResetGenerativeForBounce` + config-copy make them capture-faithful today (which is
+*why* robotize was never migrated; §5 holds born-as-processors loosely). So G1.5 unifies the
+**operation** (B-row select · GP encoders · LED/LCD readout — the ChordMask grammar) while the **DSP
+stays at emission** — zero audio-path risk. The rule is bent, not broken.
+- **The rack is now an ordered list of ROWS, not a walk of the 4 stack slots.** Each row is
+  `PROC_ROW_STACK` (occupancy from `seq_processor_stack`) or `PROC_ROW_EMISSION` (occupancy derived
+  from the effect's `tcc` CCs). `ui_focused_proc_slot` is a **row index** (stack rows first, so G1
+  reads identically); `SEQ_UI_PROC_RowState()` is the single occupancy choke point. **Migrating an
+  effect onto the grammar = adding a row** (a `proc_param_t[]` table + one occupancy predicate).
+- **Echo = the reference tenant (row 5), fully realized.** All 7 dials on the encoders
+  (Rpt/Dly/Vel/FbV/Note/Tick/Gate), each read out in its **own unit** via a new `fmt` field on the
+  param descriptor (the seed of G2's formatter registry): Delay as a note-name in musical order
+  (`Map*ToInternal`), Vel/FbV/Tick/Gate as **%**, Note as **±semitones**. Repeats is a masked RMW
+  preserving the `0x40` disable bit; **double-tap the row toggles that bit** (bypass, count kept);
+  **engage-seed** — turning Rpt up from a fresh (silent, velocity-0) echo seeds the neutral detents so
+  it's audible at once.
+- **Shared UI wins (all processors).** (1) **Encoder-aligned OPERATE grid** — each param in a 5-char
+  cell at col i*5 so its label (line 0) / value (line 1) sit *under the matching GP encoder*; identity
+  + custom readout (ChordMask mask, Pitch scale name/degree-note) on the right screen. This replaced
+  the left-packed, misaligned readout that made the grammar hard to judge. (2) **Signed values print
+  via a hand-rolled sign** — `SEQ_LCD_PrintFormattedString`'s vsprintf has **no `+` flag** (the
+  literal-"3d" bug); a long-standing G1 display defect for Pitch Semi/Oct, cured here.
+- **ChordMask engages from the rack.** Turning the **Str** dial up now enters the ChordMask playmode
+  (`PROC_KIND_CM_STR`) — the mode gates the slot, so this is the "dial it alive" move the other three
+  stack processors already had. All four now come alive identically: focus, turn a dial.
+- **Pitch is now the complete pitch/harmony surface.** Chromatic transpose (Semi/Oct) + FTS + the
+  **global** Scale/Root (the same globals the Scale page edits; name shown on the right screen) + a new
+  **diatonic transpose "Deg"** dial: global, **FTS-gated** (a scale op, and FTS already arms the slot
+  — no per-track plumbing), ±scale degrees via `SEQ_SCALE_WalkScale` (the keyboard's helper), persisted
+  as `GlobalScaleTranspose`. A live `>note` readout beside it shows the tone the degree lands on
+  (tonic walked Deg degrees). This is the first *new* transform of the run — proven by ear GO.
+- **Verdict → G2.** GO ("really starting to come into shape"). Left as follow-ups: **per-track**
+  upgrades where global was the POC (diatonic transpose; a per-track emission-row bypass shadow), the
+  next emission tenants (**Groove** — the config-copy archetype — then LFO/Robotize), and **G2** =
+  locking the descriptor (formatter registry, defaults, optional CUSTOM surface). Two latent notes:
+  the emission double-tap + `RowState` hardcode `ECHO_REPEATS` (a 2nd emission row must touch them),
+  and the ChordMask GP-mask/LCD compare a row index to the stack-slot constant (holds only while
+  `proc_rows[]` keeps stack rows in slot order). Plan: `doc/plans/2026-07-05-g15-emission-fx-on-the-grammar.md`.
+
 ---
 
 ## 10. Open questions (unresolved forks)
