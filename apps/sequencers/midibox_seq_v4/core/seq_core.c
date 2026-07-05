@@ -105,6 +105,7 @@ u8 seq_core_global_scale;
 u8 seq_core_global_scale_root;
 u8 seq_core_global_scale_root_selection;
 u8 seq_core_keyb_scale_root;
+s8 seq_core_global_scale_transpose; // diatonic transpose: ±scale degrees (FTS path)
 
 // GRAVITY field (Tension Workbench, §2). −64..+63, center 0 = pass-through.
 s8 seq_core_tension_gravity;
@@ -801,6 +802,7 @@ s32 SEQ_CORE_Init(u32 mode)
   seq_core_recall_rephase_req = 0;
   seq_core_global_scale = 0;
   seq_core_global_scale_root_selection = 0; // from keyboard
+  seq_core_global_scale_transpose = 0; // no diatonic transpose
   seq_core_keyb_scale_root = 0; // taken if enabled in OPT menu
   seq_core_global_transpose_enabled = 0;
   seq_core_din_sync_pulse_ctr = 0; // used to generate a 1 mS pulse
@@ -1206,6 +1208,7 @@ static void pitch_render_range(u8 track, const seq_processor_slot_t *p,
   int inc_oct  = tcc->transpose_oct;   if( inc_oct  >= 8 ) inc_oct  -= 16;
   int inc_semi = tcc->transpose_semi;  if( inc_semi >= 8 ) inc_semi -= 16;
   int inc_static = 12*inc_oct + inc_semi;
+  s8 scale_deg = seq_core_global_scale_transpose; // diatonic transpose (only meaningful under force-to-scale)
 
   // Live transposer offset. Transpose playmode moves notes AND CC values; the
   // global transpose moves notes only. No key held → notes fall silent (rests
@@ -1262,6 +1265,8 @@ static void pitch_render_range(u8 track, const seq_processor_slot_t *p,
           u8 scale, root;
           pitch_step_scale_root(tcc, par_buf, num_p_steps, step, &scale, &root);
           n = SEQ_SCALE_NoteValueGet((u8)n, scale, root);
+          if( scale_deg ) // diatonic transpose: walk ±N degrees within the scale
+            n = SEQ_SCALE_WalkScale((u8)n, scale, root, scale_deg);
         }
         base[step] = (u8)n;
       } else {

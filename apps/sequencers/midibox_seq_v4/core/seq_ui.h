@@ -517,7 +517,7 @@ extern u8 ui_selected_step;
 extern u8 ui_selected_item;
 extern u8 ui_selected_bookmark;
 extern u8 ui_selected_phrase;
-extern u8 ui_focused_proc_slot; // G0: focused rack slot in the PROC sel-view (0..3)
+extern u8 ui_focused_proc_slot; // focused rack ROW index in the PROC sel-view (0..N-1; stack rows first, emission rows after)
 extern u16 ui_selected_gp_buttons;
 
 extern u16 ui_hold_msg_ctr;

@@ -356,6 +356,7 @@ extern u8 seq_core_step_update_req;
 extern u8 seq_core_global_scale;
 extern u8 seq_core_global_scale_root_selection;
 extern u8 seq_core_keyb_scale_root;
+extern s8 seq_core_global_scale_transpose; // diatonic transpose: ±scale degrees, applied by the PITCH slot's force-to-scale path
 
 // GRAVITY field (Tension Workbench, §2). Global bipolar dial −64..+63, center
 // 0 = true pass-through. Performance state (like the SHADE scale choice it sits

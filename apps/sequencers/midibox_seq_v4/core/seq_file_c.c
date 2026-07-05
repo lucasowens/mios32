@@ -351,6 +351,12 @@ s32 SEQ_FILE_C_Read(char *session)
 	      seq_core_global_scale_root_selection = value;
 	      SEQ_CORE_RenderDirtySetAll(); // Track 2: stack-resident FTS follows the global
 	    }
+	  } else if( strcmp(parameter, "GlobalScaleTranspose") == 0 ) {
+	    s32 value = get_dec_range(word, parameter, -64, 63);
+	    if( value >= -64 ) {
+	      seq_core_global_scale_transpose = value;
+	      SEQ_CORE_RenderDirtySetAll(); // diatonic transpose follows the global
+	    }
 	  } else if( strcmp(parameter, "LocalGrooveSelection") == 0 ) {
 	    s32 value = get_dec_range(word, parameter, 0, 255);
 	    if( value >= 0 )
@@ -1021,6 +1027,9 @@ static s32 SEQ_FILE_C_Write_Hlp(u8 write_to_file)
   FLUSH_BUFFER;
 
   sprintf(line_buffer, "GlobalScaleRoot %d\n", seq_core_global_scale_root_selection);
+  FLUSH_BUFFER;
+
+  sprintf(line_buffer, "GlobalScaleTranspose %d\n", seq_core_global_scale_transpose);
   FLUSH_BUFFER;
 
   sprintf(line_buffer, "LocalGrooveSelection 0x%04x\n", seq_groove_ui_local_selection);

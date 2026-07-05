@@ -35,6 +35,7 @@
 #include "seq_live.h"
 #include "seq_core.h"
 #include "seq_song.h"
+#include "seq_scale.h"
 #include "seq_par.h"
 #include "seq_layer.h"
 #include "seq_cc.h"
@@ -70,7 +71,7 @@ u8 ui_selected_step;
 u8 ui_selected_item;
 u8 ui_selected_bookmark;
 u8 ui_selected_phrase;
-u8 ui_focused_proc_slot = SEQ_CORE_CHORDMASK_SLOT; // G0: focused rack slot in PROC view
+u8 ui_focused_proc_slot = SEQ_CORE_CHORDMASK_SLOT; // focused rack ROW index in PROC view (0..PROC_NUM_ROWS-1; row i==slot i for the 4 stack rows)
 u16 ui_selected_gp_buttons;
 
 u8 ui_selected_item;
@@ -1357,56 +1358,157 @@ typedef enum {
   PROC_KIND_SNIBBLE,  // CC holds a signed 4-bit nibble, logical -8..+7 (Pitch Semi/Oct)
   PROC_KIND_FLAG,     // the FORCE_SCALE bit of MODE_FLAGS, 0/1 (Pitch FTS)
   PROC_KIND_GRAVITY,  // global s8 -64..+63 via SEQ_CORE_TensionGravitySet (Tension Grav)
+  PROC_KIND_ECHO_REP, // Echo repeats: count in bits 0..5, 0x40 = disable flag. Masked RMW
+                      //   so a count edit preserves the bypass bit (Echo, G1.5).
+  PROC_KIND_ECHO_DLY, // Echo delay: the CC stores a non-contiguous INTERNAL value; the dial
+                      //   operates in musical USER-index order (Map*ToInternal) (Echo).
+  PROC_KIND_CM_STR,   // ChordMask strength: a plain CC value, but turning it up ENGAGES the
+                      //   track's ChordMask playmode (the mode gates the slot) (ChordMask).
+  PROC_KIND_SCALE,    // GLOBAL force-to-scale scale (seq_core_global_scale); name on the right
+                      //   screen, dial clamps to the runtime scale count (Pitch).
+  PROC_KIND_ROOT,     // GLOBAL scale root selection (0=Keyb, 1..12=C..B) (Pitch).
+  PROC_KIND_SDEG,     // GLOBAL diatonic transpose (s8 ±degrees via WalkScale, FTS path) (Pitch).
 } proc_pkind_t;
 
+// How a param's VALUE is rendered (orthogonal to the backing kind). DEFAULT derives
+// from the kind (int / bus / on-off / signed); the rest are per-param display maps so
+// a plain CC can read out in its musical unit — the seed of the G2 formatter registry.
+typedef enum {
+  PROC_FMT_DEFAULT = 0, // int, or signed for SNIBBLE/GRAVITY
+  PROC_FMT_PCT5,        // CC 0..40 shown as 0..200 percent (raw*5)   (Echo Vel/FbV/FbT/FbG)
+  PROC_FMT_SEMI24,      // CC 0..48 shown as (raw-24) signed semitones (Echo FbN)
+} proc_fmt_t;
+
 typedef struct {
-  const char  *label;  // short dial label (3-4 chars)
+  const char  *label;  // short dial label (<= 4 chars — it heads a 5-col encoder cell)
   proc_pkind_t kind;
-  u8           cc;      // SEQ_CC_* for CC/BUS/SNIBBLE; ignored for FLAG/GRAVITY
+  u8           cc;      // SEQ_CC_* for CC/BUS/SNIBBLE/ECHO_*; ignored for FLAG/GRAVITY
   s8           lo, hi;  // logical range (signed for SNIBBLE/GRAVITY)
-  s8           deflt;   // encoder-push / bypass target (the pass-through value)
+  s8           deflt;   // encoder-push / bypass target (the pass-through / detent value)
+  proc_fmt_t   fmt;     // value display map (DEFAULT = derive from kind)
 } proc_param_t;
 
-// Fixed human name of a rack slot (by slot INDEX, valid even when the slot is
-// neutral/empty — the identity is the slot position, not the runtime id).
-static const char *SEQ_UI_PROC_SlotName(u8 slot)
+// The rack is an ordered list of ROWS, not a raw walk of the 4 render-stack slots.
+// A row is backed EITHER by a render-stack slot (Pitch/ChordMask/Tension/Limit —
+// PROC_ROW_STACK) OR by an emission-time effect's CCs (Echo — PROC_ROW_EMISSION:
+// the DSP stays at emission per design §5; only the OPERATION joins the grammar,
+// G1.5). ui_focused_proc_slot is now a ROW index. The first four rows are kept in
+// stack-slot order so row i == SEQ_CORE_*_SLOT i and the G1 rack reads identically;
+// emission rows append after. Migrating an effect onto the grammar = adding a row
+// (a proc_param_t[] table + one occupancy predicate in SEQ_UI_PROC_RowState).
+typedef enum {
+  PROC_ROW_STACK = 0,  // occupancy/enable/strength from seq_processor_stack[track][stack_slot]
+  PROC_ROW_EMISSION,   // occupancy derived from the effect's tcc CCs (no stack slot)
+} proc_rowkind_t;
+
+typedef struct {
+  const char         *name;
+  proc_rowkind_t      rowkind;
+  u8                  stack_slot;   // PROC_ROW_STACK only
+  const proc_param_t *params;
+  u8                  n_params;
+} proc_row_t;
+
+// Pitch — transpose (Semi/Oct) + force-to-scale (FTS on/off, and the GLOBAL Scale +
+// Root that FTS snaps to). Scale/Root are global (shared by all tracks + the keyboard,
+// like Tension's Grav) — the same globals the Scale page edits; changing them re-renders
+// every force-scale track. The scale NAME doesn't fit a cell, so it's shown on the right
+// screen; the dial cell shows the scale index. Root reads out in its cell (Keyb/C..B).
+static const proc_param_t proc_params_pitch[] = {
+  { "Semi", PROC_KIND_SNIBBLE, SEQ_CC_TRANSPOSE_SEMI, -8,   7, 0, PROC_FMT_DEFAULT },
+  { "Oct",  PROC_KIND_SNIBBLE, SEQ_CC_TRANSPOSE_OCT,  -8,   7, 0, PROC_FMT_DEFAULT },
+  { "FTS",  PROC_KIND_FLAG,    0,                      0,   1, 0, PROC_FMT_DEFAULT },
+  { "Scle", PROC_KIND_SCALE,   0,                      0, 127, 0, PROC_FMT_DEFAULT },
+  { "Root", PROC_KIND_ROOT,    0,                      0,  12, 0, PROC_FMT_DEFAULT },
+  { "Deg",  PROC_KIND_SDEG,    0,                    -14,  14, 0, PROC_FMT_DEFAULT },
+};
+static const proc_param_t proc_params_chordmask[] = {
+  { "Str", PROC_KIND_CM_STR, SEQ_CC_CHORDMASK_STRENGTH, 0, 127, 0, PROC_FMT_DEFAULT },
+  { "Bus", PROC_KIND_BUS,    SEQ_CC_CHORDMASK_BUS,      0,   3, 0, PROC_FMT_DEFAULT },
+};
+static const proc_param_t proc_params_tension[] = {
+  { "Grip", PROC_KIND_CC,      SEQ_CC_TENSION_GRIP, 0, 127, 0, PROC_FMT_DEFAULT },
+  { "Grav", PROC_KIND_GRAVITY, 0,                 -64,  63, 0, PROC_FMT_DEFAULT },
+};
+static const proc_param_t proc_params_limit[] = {
+  { "Lo", PROC_KIND_CC, SEQ_CC_LIMIT_LOWER, 0, 127, 0, PROC_FMT_DEFAULT },
+  { "Hi", PROC_KIND_CC, SEQ_CC_LIMIT_UPPER, 0, 127, 0, PROC_FMT_DEFAULT },
+};
+// Echo — the full G1.5 reference tenant: every dial exposed, each read out in its
+// own musical unit. Rpt is the headline/strength dial (0 = true pass-through, dark
+// row) and its 0->on turn seeds the neutral detents so a fresh track is audible at
+// once (SEQ_UI_PROC_ParamWrite). The feedback dials are NOT zero-centred: 100%/
+// no-change sits at 20 (velocity/ticks/gate, shown as %) and 0 semitones at 24
+// (FbN, shown signed). Delay operates in musical order and reads out as a note name.
+// FbN is capped at 48 (=+24 st): the raw CC's 49 is a "random pitch" MODE, an
+// unlabelled top-detent discontinuity, held out of the clean sweep for now.
+// Labels use the stock FX-echo vocabulary (Repeats/Delay/Vel.Level/FB Velocity/Note/
+// Ticks/Gatelen.) truncated to fit the 4-char encoder cell — so a dial reads as what it
+// is. Vel = initial level; FbV = per-repeat feedback velocity; Note/Tick/Gate = the
+// per-repeat feedback offsets.
+static const proc_param_t proc_params_echo[] = {
+  { "Rpt",  PROC_KIND_ECHO_REP, SEQ_CC_ECHO_REPEATS,      0, 15,  0, PROC_FMT_DEFAULT },
+  { "Dly",  PROC_KIND_ECHO_DLY, SEQ_CC_ECHO_DELAY,        0, 22,  8, PROC_FMT_DEFAULT },
+  { "Vel",  PROC_KIND_CC,       SEQ_CC_ECHO_VELOCITY,     0, 40, 20, PROC_FMT_PCT5   },
+  { "FbV",  PROC_KIND_CC,       SEQ_CC_ECHO_FB_VELOCITY,  0, 40, 20, PROC_FMT_PCT5   },
+  { "Note", PROC_KIND_CC,       SEQ_CC_ECHO_FB_NOTE,      0, 48, 24, PROC_FMT_SEMI24 },
+  { "Tick", PROC_KIND_CC,       SEQ_CC_ECHO_FB_TICKS,     0, 40, 20, PROC_FMT_PCT5   },
+  { "Gate", PROC_KIND_CC,       SEQ_CC_ECHO_FB_GATELENGTH,0, 40, 20, PROC_FMT_PCT5   },
+};
+
+static const proc_row_t proc_rows[] = {
+  { "Pitch",     PROC_ROW_STACK,    SEQ_CORE_PITCH_SLOT,     proc_params_pitch,     6 },
+  { "ChordMask", PROC_ROW_STACK,    SEQ_CORE_CHORDMASK_SLOT, proc_params_chordmask, 2 },
+  { "Tension",   PROC_ROW_STACK,    SEQ_CORE_TENSION_SLOT,   proc_params_tension,   2 },
+  { "Limit",     PROC_ROW_STACK,    SEQ_CORE_LIMIT_SLOT,     proc_params_limit,     2 },
+  { "Echo",      PROC_ROW_EMISSION, 0,                       proc_params_echo,      7 },
+};
+#define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
+
+// Fixed human name of a rack row (valid even when the row is neutral/empty).
+static const char *SEQ_UI_PROC_SlotName(u8 row)
 {
-  switch( slot ) {
-  case SEQ_CORE_PITCH_SLOT:     return "Pitch";
-  case SEQ_CORE_CHORDMASK_SLOT: return "ChordMask";
-  case SEQ_CORE_TENSION_SLOT:   return "Tension";
-  case SEQ_CORE_LIMIT_SLOT:     return "Limit";
-  default:                      return "--";
+  return (row < PROC_NUM_ROWS) ? proc_rows[row].name : "--";
+}
+
+// The param list for a rack row. *n = 0 for none.
+static void SEQ_UI_PROC_SlotParams(u8 row, const proc_param_t **out, u8 *n)
+{
+  if( row < PROC_NUM_ROWS ) {
+    *out = proc_rows[row].params;
+    *n   = proc_rows[row].n_params;
+  } else {
+    *out = NULL;
+    *n   = 0;
   }
 }
 
-// The param list for a rack slot (by fixed slot index). *n = 0 for none.
-static void SEQ_UI_PROC_SlotParams(u8 slot, const proc_param_t **out, u8 *n)
+// Live rack-row state for the readout (LED / LCD): occupied = doing anything at all;
+// enabled = occupied AND not bypassed; strength = headline depth for the pass-through
+// wink. A STACK row reads the render slot; an EMISSION row derives it from the
+// effect's CCs — the one place a virtual (slot-less) row supplies its own occupancy.
+typedef struct { u8 occupied; u8 enabled; u8 strength; } proc_rowstate_t;
+static proc_rowstate_t SEQ_UI_PROC_RowState(u8 track, u8 row)
 {
-  static const proc_param_t chordmask[] = {
-    { "Str", PROC_KIND_CC,  SEQ_CC_CHORDMASK_STRENGTH, 0, 127, 0 },
-    { "Bus", PROC_KIND_BUS, SEQ_CC_CHORDMASK_BUS,      0,   3, 0 },
-  };
-  static const proc_param_t tension[] = {
-    { "Grip", PROC_KIND_CC,      SEQ_CC_TENSION_GRIP, 0, 127, 0 },
-    { "Grav", PROC_KIND_GRAVITY, 0,                 -64,  63, 0 },
-  };
-  static const proc_param_t pitch[] = {
-    { "Semi", PROC_KIND_SNIBBLE, SEQ_CC_TRANSPOSE_SEMI, -8, 7, 0 },
-    { "Oct",  PROC_KIND_SNIBBLE, SEQ_CC_TRANSPOSE_OCT,  -8, 7, 0 },
-    { "FTS",  PROC_KIND_FLAG,    0,                      0, 1, 0 },
-  };
-  static const proc_param_t limit[] = {
-    { "Lo", PROC_KIND_CC, SEQ_CC_LIMIT_LOWER, 0, 127, 0 },
-    { "Hi", PROC_KIND_CC, SEQ_CC_LIMIT_UPPER, 0, 127, 0 },
-  };
-  switch( slot ) {
-  case SEQ_CORE_CHORDMASK_SLOT: *out = chordmask; *n = 2; break;
-  case SEQ_CORE_TENSION_SLOT:   *out = tension;   *n = 2; break;
-  case SEQ_CORE_PITCH_SLOT:     *out = pitch;     *n = 3; break;
-  case SEQ_CORE_LIMIT_SLOT:     *out = limit;     *n = 2; break;
-  default:                      *out = NULL;      *n = 0; break;
+  proc_rowstate_t s = { 0, 0, 0 };
+  if( row >= PROC_NUM_ROWS )
+    return s;
+  const proc_row_t *r = &proc_rows[row];
+  if( r->rowkind == PROC_ROW_STACK ) {
+    const seq_processor_slot_t *p = &seq_processor_stack[track][r->stack_slot];
+    s.occupied = (p->id != SEQ_PROCESSOR_ID_NONE);
+    s.enabled  = s.occupied && p->enabled;
+    s.strength = p->strength;
+  } else {
+    // Echo: repeat count in bits 0..5, 0x40 = disable (inverted). Occupied when it
+    // has repeats; enabled when not bypassed; strength = the count.
+    u8 raw = SEQ_CC_Get(track, SEQ_CC_ECHO_REPEATS);
+    u8 count = raw & 0x3f;
+    s.occupied = (count != 0);
+    s.enabled  = s.occupied && !(raw & 0x40);
+    s.strength = count;
   }
+  return s;
 }
 
 // Read a param's current LOGICAL value (signed where the kind is signed).
@@ -1424,7 +1526,17 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
   }
   case PROC_KIND_GRAVITY:
     return seq_core_tension_gravity;
-  default: // CC, BUS
+  case PROC_KIND_ECHO_REP:
+    return SEQ_CC_Get(track, p->cc) & 0x3f; // count only; strip the 0x40 disable bit
+  case PROC_KIND_ECHO_DLY:
+    return SEQ_CORE_Echo_MapInternalToUser(SEQ_CC_Get(track, p->cc)); // musical order
+  case PROC_KIND_SCALE:
+    return seq_core_global_scale;
+  case PROC_KIND_ROOT:
+    return seq_core_global_scale_root_selection;
+  case PROC_KIND_SDEG:
+    return seq_core_global_scale_transpose;
+  default: // CC, BUS, CM_STR
     return SEQ_CC_Get(track, p->cc);
   }
 }
@@ -1447,39 +1559,119 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
   case PROC_KIND_GRAVITY:
     SEQ_CORE_TensionGravitySet((s8)v);
     break;
-  default: // CC, BUS
+  case PROC_KIND_ECHO_REP: {
+    u8 raw = SEQ_CC_Get(track, p->cc);
+    u8 oldcount = raw & 0x3f;
+    raw = (raw & ~0x3f) | ((u8)v & 0x3f); // preserve the 0x40 disable flag (and never set bit7 — #59)
+    SEQ_CC_Set(track, p->cc, raw);
+    // Engage-seed: a fresh track's echo feedback params are all 0, which makes the
+    // echo train SILENT (velocity 0%). On the 0->on turn, if the effect is still
+    // unconfigured (echo_velocity == 0), seed the neutral "clean repeat" detents so
+    // dialling Rpt up is immediately audible. Fires once; never overrides shaped values.
+    if( oldcount == 0 && ((u8)v & 0x3f) &&
+        SEQ_CC_Get(track, SEQ_CC_ECHO_VELOCITY) == 0 ) {
+      SEQ_CC_Set(track, SEQ_CC_ECHO_VELOCITY,     20); // 100%
+      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_VELOCITY,  20); // 100% (no decay)
+      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_NOTE,      24); // 0 semitones
+      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_GATELENGTH,20); // 100%
+      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_TICKS,     20); // 100% (constant spacing)
+      SEQ_CC_Set(track, SEQ_CC_ECHO_DELAY,
+                 SEQ_CORE_Echo_MapUserToInternal(8)); // ~16th-note spacing
+    }
+    break;
+  }
+  case PROC_KIND_ECHO_DLY:
+    SEQ_CC_Set(track, p->cc, SEQ_CORE_Echo_MapUserToInternal((u8)v));
+    break;
+  case PROC_KIND_CM_STR:
+    SEQ_CC_Set(track, p->cc, (u8)v);
+    // Engage ChordMask by turning Strength up — the same "dial it alive" move as the
+    // other processors. ChordMask is gated on the track PLAYMODE (not just its params),
+    // so entering the mode is what arms the slot (ChordMaskSlotSync fires on MODE).
+    // Turning Str back to 0 leaves the mode engaged at pass-through; double-tap the row
+    // to fully remove it (-> Normal). Strength was written first so the sync sees it.
+    if( v > 0 && SEQ_CC_Get(track, SEQ_CC_MODE) != SEQ_CORE_TRKMODE_ChordMask )
+      SEQ_CC_Set(track, SEQ_CC_MODE, SEQ_CORE_TRKMODE_ChordMask);
+    break;
+  case PROC_KIND_SCALE:
+  case PROC_KIND_ROOT:
+    // GLOBAL scale/root (shared with the Scale page). Re-render every force-scale
+    // track so the change is heard, and flag the config for save — exactly as the
+    // Scale page does. Caller already clamped to the valid range.
+    if( p->kind == PROC_KIND_SCALE )
+      seq_core_global_scale = (u8)v;
+    else
+      seq_core_global_scale_root_selection = (u8)v;
+    SEQ_CORE_RenderDirtySetAll();
+    ui_store_file_required = 1;
+    break;
+  case PROC_KIND_SDEG:
+    // GLOBAL diatonic transpose — the FTS render walks notes ±v scale degrees.
+    seq_core_global_scale_transpose = (s8)v;
+    SEQ_CORE_RenderDirtySetAll();
+    ui_store_file_required = 1;
+    break;
+  default: // CC, BUS, CM_STR
     SEQ_CC_Set(track, p->cc, (u8)v);
     break;
   }
 }
 
-// Nudge a param by `incr` detents, clamped to its logical range.
+// Nudge a param by `incr` detents, clamped to its logical range. Scale's ceiling is
+// the runtime scale count (the table's hi is just a placeholder), so it stops at the
+// last real scale rather than a fixed guess.
 static void SEQ_UI_PROC_ParamInc(u8 track, const proc_param_t *p, s32 incr)
 {
   s32 v = SEQ_UI_PROC_ParamRead(track, p) + incr;
+  s32 hi = (p->kind == PROC_KIND_SCALE) ? (SEQ_SCALE_NumGet() - 1) : p->hi;
   if( v < p->lo ) v = p->lo;
-  if( v > p->hi ) v = p->hi;
+  if( v > hi ) v = hi;
   SEQ_UI_PROC_ParamWrite(track, p, v);
 }
 
-// Print one param as "Lbl VAL " on the LCD, formatted by kind.
-static void SEQ_UI_PROC_ParamPrint(u8 track, const proc_param_t *p)
+// Print a signed value into a 4-char cell as "<sign><mag>". NOTE: SEQ_LCD's vsprintf
+// has NO '+' flag (MBSEQV4_REFERENCE.md) — "%+3d" renders the literal "3d" and never
+// consumes the argument, so the sign must be emitted by hand (the stock "+%d"/"-%d"
+// idiom). This was the "Semi/Oct show 3d and don't change" bug.
+static void SEQ_UI_PROC_PrintSigned(s32 val)
+{
+  // Plain %c + %d only (no width/flags) — the value is short (|v| <= 64) and the cell
+  // was blanked before drawing, so the trailing gap to the next cell is preserved.
+  SEQ_LCD_PrintFormattedString("%c%d", (val < 0) ? '-' : '+',
+                               (int)((val < 0) ? -val : val));
+}
+
+// Print one param's VALUE in a 4-char field (the label is drawn separately, above it,
+// in the encoder grid). Formatted by kind, then by the fmt display map for CC dials.
+static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
 {
   s32 v = SEQ_UI_PROC_ParamRead(track, p);
   switch( p->kind ) {
   case PROC_KIND_BUS:
-    SEQ_LCD_PrintFormattedString("%s %c   ", p->label, 'A' + (v & 0x03));
-    break;
+    SEQ_LCD_PrintFormattedString("%c   ", 'A' + (v & 0x03));
+    return;
   case PROC_KIND_FLAG:
-    SEQ_LCD_PrintFormattedString("%s %s  ", p->label, v ? "on " : "off");
-    break;
+    SEQ_LCD_PrintFormattedString("%-4s", v ? "on" : "off");
+    return;
   case PROC_KIND_SNIBBLE:
   case PROC_KIND_GRAVITY:
-    SEQ_LCD_PrintFormattedString("%s %+d  ", p->label, (int)v);
-    break;
-  default: // CC
-    SEQ_LCD_PrintFormattedString("%s %3d  ", p->label, (int)v);
-    break;
+  case PROC_KIND_SDEG:
+    SEQ_UI_PROC_PrintSigned(v);
+    return;
+  case PROC_KIND_ECHO_DLY:
+    SEQ_LCD_PrintFormattedString("%-4s",
+                                 SEQ_CORE_Echo_GetDelayModeName(SEQ_CC_Get(track, p->cc)));
+    return;
+  case PROC_KIND_ROOT:
+    if( !v ) SEQ_LCD_PrintString("Keyb");   // 0 = follow the played key
+    else     SEQ_LCD_PrintRootValue((u8)v); // 1..12 -> " C  ".." B  " (4 chars)
+    return;
+  default: break; // CC / ECHO_REP / CM_STR / SCALE -> fmt map below (SCALE = numeric index)
+  }
+  switch( p->fmt ) {
+  case PROC_FMT_PCT5:   SEQ_LCD_PrintFormattedString("%3d%%", (int)v * 5); break;
+  case PROC_FMT_SEMI24: SEQ_UI_PROC_PrintSigned((int)v - 24);             break;
+  default:              SEQ_LCD_PrintFormattedString("%3d ", (int)v);     break;
   }
 }
 
@@ -1507,46 +1699,70 @@ static void SEQ_UI_PROC_SlotReset(u8 track, u8 slot)
 
 static seq_ui_page_t proc_prev_page = SEQ_UI_PAGE_EDIT; // where LIVE/EXIT returns to
 
-// Page LCD: iterate the focused slot's param list (uniform across every
-// processor). Line 0 = slot name + track + a 16-cell bar of the headline 0..127
-// param; line 1 = every param as "Lbl VAL", plus ChordMask's live 12-PC target
-// set as note names. Read-only mirror; edits flow via SEQ_CC_Set / the setter.
+// Page LCD — the encoder-aligned OPERATE grid (invariants 3 + 4). LEFT screen
+// (cols 0..39) is the dial bank: param i sits in a 5-char cell at column i*5, so its
+// label (line 0) and value (line 1) fall directly under GP encoder (i+1) — turn the
+// knob, watch the number under it. RIGHT screen (cols 40..79) is identity + the
+// processor's custom readout (ChordMask's live 12-PC mask). Read-only mirror; edits
+// flow via the global sel_view==PROC encoder intercept -> SEQ_CC_Set / the setter.
 static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
 {
   u8 track = SEQ_UI_VisibleTrackGet();
   u8 slot = ui_focused_proc_slot;
   const proc_param_t *params; u8 nparams;
   SEQ_UI_PROC_SlotParams(slot, &params, &nparams);
+  proc_rowstate_t rs = SEQ_UI_PROC_RowState(track, slot);
 
-  // clear both lines (focus/slot changes vary the field lengths)
   SEQ_LCD_CursorSet(0, 0); SEQ_LCD_PrintSpaces(80);
   SEQ_LCD_CursorSet(0, 1); SEQ_LCD_PrintSpaces(80);
 
-  SEQ_LCD_CursorSet(0, 0);
-  SEQ_LCD_PrintFormattedString("PROC  slot %d/%d  %-9s  Trk%2d",
-                               slot + 1, SEQ_CORE_NUM_PROCESSOR_SLOTS,
-                               SEQ_UI_PROC_SlotName(slot), track + 1);
-  if( nparams && params[0].kind == PROC_KIND_CC ) {
-    s32 hv = SEQ_UI_PROC_ParamRead(track, &params[0]);
-    SEQ_LCD_CursorSet(40, 0);
-    SEQ_LCD_PrintFormattedString("%s %3d [", params[0].label, (int)hv);
-    int i, k = ((int)hv * 16 + 63) / 127; // 0..16 filled cells
-    for(i=0; i<16; ++i)
-      SEQ_LCD_PrintChar(i < k ? '#' : '.');
-    SEQ_LCD_PrintChar(']');
+  // Left screen: the dial grid (label over value, one cell per encoder). Up to 8
+  // params fit cols 0..39; today's processors use <= 7 (Echo). >8 would page here.
+  int i;
+  for(i=0; i<nparams && i<8; ++i) {
+    SEQ_LCD_CursorSet(i*5, 0);
+    SEQ_LCD_PrintFormattedString("%-4s", params[i].label);
+    SEQ_LCD_CursorSet(i*5, 1);
+    SEQ_UI_PROC_ParamPrintValue(track, &params[i]);
   }
 
-  SEQ_LCD_CursorSet(0, 1);
-  {
-    int i;
-    for(i=0; i<nparams; ++i)
-      SEQ_UI_PROC_ParamPrint(track, &params[i]);
+  // Right screen line 0: identity + rack position + track, and a steady BYP cue when
+  // the row carries a setting but is switched off (Echo repeats>0 with the 0x40
+  // disable bit — reachable from the FX page/preset or the B-row double-tap; the
+  // values would otherwise read exactly like live). Matches the winking-green LED.
+  SEQ_LCD_CursorSet(40, 0);
+  SEQ_LCD_PrintFormattedString("%-9s %d/%d Trk%2d",
+                               SEQ_UI_PROC_SlotName(slot), slot + 1, PROC_NUM_ROWS, track + 1);
+  if( rs.occupied && !rs.enabled ) {
+    SEQ_LCD_CursorSet(61, 0);
+    SEQ_LCD_PrintString("BYP");
   }
+
+  // Pitch readout: next to the Deg dial (cell 6, col 30) show the note the current
+  // scale degree lands on — the tonic walked Deg degrees (Deg 0 = root, +2 = the 3rd…),
+  // via the same WalkScale the transpose uses. Full scale name on the right screen (the
+  // "Scle" cell only shows the index; the name doesn't fit a cell).
+  if( slot == SEQ_CORE_PITCH_SLOT ) {
+    u8 rsel = seq_core_global_scale_root_selection;
+    u8 root_pc = (rsel == 0) ? seq_core_keyb_scale_root : (u8)(rsel - 1);
+    s32 dn = SEQ_SCALE_WalkScale((u8)(60 + (root_pc % 12)), seq_core_global_scale,
+                                 root_pc, seq_core_global_scale_transpose);
+    static const char *const pcn[12] = {
+      "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+    SEQ_LCD_CursorSet(30, 1);
+    SEQ_LCD_PrintFormattedString(">%-3s", pcn[dn % 12]);
+    SEQ_LCD_CursorSet(40, 1);
+    SEQ_LCD_PrintFormattedString("Scale: %s", SEQ_SCALE_NameGet(seq_core_global_scale));
+  }
+
+  // Right screen line 1: ChordMask's CUSTOM readout — the live 12-PC target set as
+  // note names (the mask the notes are pulled toward, read from the source bus).
   if( slot == SEQ_CORE_CHORDMASK_SLOT ) {
     const seq_processor_slot_t *cm = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
     if( cm->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
       u16 mask = SEQ_MIDI_IN_BusPCSetGet(cm->bus) & 0x0fff;
-      SEQ_LCD_PrintString("Mask:");
+      SEQ_LCD_CursorSet(40, 1);
+      SEQ_LCD_PrintString("M:");
       if( !mask ) {
         SEQ_LCD_PrintString(" -");
       } else {
@@ -2953,19 +3169,20 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	}
       } break;
       case SEQ_UI_SEL_VIEW_PROC: {
-	// PROC — the visible track's processor rack on the B-row. Keys 1..4 =
-	// slots 0..3 (PITCH / CHORDMASK / TENSION / LIMIT); keys 5..16 dark. Tap =
-	// focus (the GP encoders then operate that slot). Double-tap = the slot's
+	// PROC — the visible track's processor rack on the B-row. One key per rack
+	// ROW (PITCH / CHORDMASK / TENSION / LIMIT / Echo…); keys past the rack dark.
+	// Tap = focus (the GP encoders then operate that row). Double-tap = the row's
 	// on/off gesture: ChordMask toggles its playmode (add/remove — its slot
-	// presence IS the ChordMask playmode); the param-driven slots (Pitch/Tension/
-	// Limit) reset every param to pass-through (bypass). Both via SEQ_CC_Set /
-	// the setter, so the slot re-syncs. Acts on RELEASE, like the other views.
+	// presence IS the ChordMask playmode); the param-driven stack rows (Pitch/
+	// Tension/Limit) reset every param to pass-through (bypass); an EMISSION row
+	// (Echo) toggles its native disable bit, preserving the dialled value. All via
+	// SEQ_CC_Set / the setter. Acts on RELEASE, like the other views.
 	static u32 proc_tap_t0 = 0;
 	static u8  proc_tap_slot = 0xff;
 	if( depressed )
 	  return 0; // act on release
-	if( sel_button >= SEQ_CORE_NUM_PROCESSOR_SLOTS )
-	  return 0; // keys 5..16 unused
+	if( sel_button >= PROC_NUM_ROWS )
+	  return 0; // keys past the rack unused
 
 	u8 slot = (u8)sel_button;
 	u8 dbl = (slot == proc_tap_slot) &&
@@ -2976,7 +3193,15 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	ui_focused_proc_slot = slot; // a single tap always focuses
 
 	if( dbl ) {
-	  if( slot == SEQ_CORE_CHORDMASK_SLOT ) {
+	  if( proc_rows[slot].rowkind == PROC_ROW_EMISSION ) {
+	    // Echo (only emission row today): flip the 0x40 disable bit — a real bypass
+	    // that keeps the repeat count. When the count is 0 the row is dark either way.
+	    u8 raw = SEQ_CC_Get(visible_track, SEQ_CC_ECHO_REPEATS);
+	    raw ^= 0x40;
+	    SEQ_CC_Set(visible_track, SEQ_CC_ECHO_REPEATS, raw);
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, (char *)SEQ_UI_PROC_SlotName(slot),
+	               (raw & 0x40) ? "  bypassed" : "   enabled");
+	  } else if( slot == SEQ_CORE_CHORDMASK_SLOT ) {
 	    u8 mode = SEQ_CC_Get(visible_track, SEQ_CC_MODE);
 	    u8 newmode = (mode == SEQ_CORE_TRKMODE_ChordMask)
 	                   ? SEQ_CORE_TRKMODE_Normal : SEQ_CORE_TRKMODE_ChordMask;
@@ -4810,12 +5035,16 @@ s32 SEQ_UI_LED_Handler(void)
       // (the exact set the snap pulls toward) — keys 1..12 = pitch classes C..B,
       // keys 13..16 dark. Display-only in G0; shown whenever ChordMask is in the
       // rack, even at strength 0, so you see the filter before dialling into it.
-      // Any other focused slot has no 16-object surface yet -> dark.
+      // Any other focused row has no 16-object surface yet -> dark. Guard the stack
+      // read to the ChordMask row: an emission row (e.g. Echo, index >= 4) has no
+      // stack slot and must never index seq_processor_stack[..][row] out of bounds.
       u16 gp = 0x0000;
-      const seq_processor_slot_t *p =
-        &seq_processor_stack[SEQ_UI_VisibleTrackGet()][ui_focused_proc_slot];
-      if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled )
-        gp = SEQ_MIDI_IN_BusPCSetGet(p->bus) & 0x0fff;
+      if( ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT ) {
+        const seq_processor_slot_t *p =
+          &seq_processor_stack[SEQ_UI_VisibleTrackGet()][SEQ_CORE_CHORDMASK_SLOT];
+        if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled )
+          gp = SEQ_MIDI_IN_BusPCSetGet(p->bus) & 0x0fff;
+      }
       ui_gp_leds = gp;
     }
   }
@@ -5246,18 +5475,19 @@ s32 SEQ_UI_LED_Handler_Periodic()
 	}
 	break;
       case SEQ_UI_SEL_VIEW_PROC: {
-	// The visible track's rack: green = slot occupied (id != NONE), red on the
-	// focused slot (reads as amber = "you are here"). A slot that is occupied
-	// but at true pass-through (bypassed or strength 0) winks its green on
-	// ui_cursor_flash, so a processor that's doing something reads solid and a
-	// bypassed one blinks — invariant 4's "dark = pass-through" inside the
-	// 2-colour select plane. Slots 4..15 stay dark.
+	// The visible track's rack: green = row occupied (doing anything), red on the
+	// focused row (reads as amber = "you are here"). A row that is occupied but at
+	// true pass-through (bypassed or strength 0) winks its green on ui_cursor_flash,
+	// so a processor that's doing something reads solid and a bypassed one blinks —
+	// invariant 4's "dark = pass-through" inside the 2-colour select plane. Occupancy
+	// comes from SEQ_UI_PROC_RowState (stack slot OR emission-FX CCs). Rows past the
+	// rack stay dark.
 	int s;
-	for(s=0; s<SEQ_CORE_NUM_PROCESSOR_SLOTS; ++s) {
-	  const seq_processor_slot_t *p = &seq_processor_stack[visible_track][s];
-	  if( p->id == SEQ_PROCESSOR_ID_NONE )
+	for(s=0; s<PROC_NUM_ROWS; ++s) {
+	  proc_rowstate_t st = SEQ_UI_PROC_RowState(visible_track, s);
+	  if( !st.occupied )
 	    continue;
-	  u8 passthru = !p->enabled || !p->strength;
+	  u8 passthru = !st.enabled || !st.strength;
 	  if( !(passthru && ui_cursor_flash) )
 	    select_leds_green |= (1 << s);
 	}
