@@ -3126,6 +3126,38 @@ model by hand: operate **one** real processor (ChordMask) end-to-end through the
   What G0 proved unlocks the rest: every other processor becomes "fill in the descriptor + point
   the encoders at its params."
 
+**2026-07-05 — G1: the rack migrated onto a param-list grammar; PROC became a real page (SHIPPED, by-ear GO; committed main 82173e5c).**
+G0's ChordMask hardcode is gone. The operating surface is now **data-driven**: a per-processor
+**param list** (proto-descriptor — study §3.5 invariant 5) `{label, kind, cc, range, default}` keyed
+by the **fixed slot index**, iterated by the encoder routing / push-to-default / LCD readout. Adding
+a processor to the grammar = filling in a table row. Heterogeneous backings hide behind `kind`:
+plain CC, bus (A–D), **signed 4-bit nibble** (transpose — encoding verified against the consumer,
+not the display page), a **MODE_FLAGS bit** (FTS), and the **global GRAVITY s8** via its setter. All
+four rack slots now operate through the identical movement (Pitch: Semi/Oct/FTS · ChordMask: Str/Bus
+· Tension: Grip/**Grav** · Limit: Lo/Hi). Keyed by fixed slot index means Pitch/Tension/Limit stay
+focusable while neutral (id==NONE) — **dark rack key = true pass-through** (invariant 4), and turning
+a dial brings the slot alive via its sync. Double-tap a slot = its on/off (ChordMask toggles playmode;
+the param-driven slots reset to pass-through).
+- **The PROC presentation was reworked twice, by ear, to a firm conclusion — a DEDICATED PAGE, not an
+  LCD overlay or a latched-everywhere sel-view.** v1 (a persistent full-LCD overlay that suppressed
+  the current page) read as a modal takeover → rejected ("make it like other modes"). The fix is
+  `SEQ_UI_PAGE_PROC`: it owns the LCD *normally*, like FX/GRAVITY. **The processors are render-stack
+  DSP and run continuously regardless of page** (leaving PROC never silences them — the same as
+  leaving EDIT doesn't stop notes); **LIVE is pure navigation** to the rack to adjust the dials, not
+  an on/off switch. The old "Processor Rack on/off" message (which wrongly implied LIVE gated the
+  audio) is gone. Operate surface is **page-scoped**: `sel_view=PROC` set in the page Init, cleared
+  in its exit callback, so the B-row rack / GP-encoder operate / GP-row mask are live on the page and
+  revert on leave.
+- **Lesson (interaction-model, by-ear):** the grammar's "operate the focused processor from *anywhere*"
+  aspiration (§3.5) fought legibility — a persistent readout HAS to live somewhere, and hijacking the
+  current page's LCD to provide it feels modal and wrong. Making PROC a page you *navigate to* (and
+  the DSP stay running behind you) is the consistent resolution. "Operate from any page" is dropped
+  for now; revisit only if a live need surfaces.
+- **Verdict → G2 next.** GO. Operating Limit/Pitch/Tension feels like the *same* movement as
+  ChordMask. Remaining: the FX/generator pages aren't render-stack processors yet, so bringing them
+  onto the grammar is a separate lift (make them rack processors first) — call it **G1.5**. **G2** =
+  lock the descriptor as the extension point (formatter registry, defaults, optional CUSTOM surface).
+
 ---
 
 ## 10. Open questions (unresolved forks)
