@@ -408,6 +408,7 @@ extern s32 SEQ_UI_TRKEUCLID_Init(u32 mode);
 extern s32 SEQ_UI_TRKPITCHGEN_Init(u32 mode);
 extern s32 SEQ_UI_GRAVITY_Init(u32 mode);
 extern s32 SEQ_UI_CAPTURE_Init(u32 mode);
+extern s32 SEQ_UI_PROC_Init(u32 mode);
 extern s32 SEQ_UI_CAPTURE_Enter(void); // repurposed SONG button -> latched Capture page
 extern s32 SEQ_UI_CAPTURE_SetDstTrack(u8 track); // B-row sets the deposit destination
 extern u8  SEQ_UI_CAPTURE_DstTrackGet(void);     // for the select-row LED
