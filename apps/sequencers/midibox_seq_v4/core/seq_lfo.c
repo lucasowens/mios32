@@ -123,8 +123,8 @@ s32 SEQ_LFO_Event(u8 track, seq_layer_evnt_t *e)
 {
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
 
-  if( !tcc->lfo_waveform )
-    return 0; // LFO disabled
+  if( !tcc->lfo_waveform || (tcc->lfo_waveform & 0x80) )
+    return 0; // LFO off (waveform 0) or PROC-page bypassed (bit 7)
 
   seq_lfo_t *lfo = &seq_lfo[track];
   s32 lfo_value = SEQ_LFO_ValueGet(tcc, lfo);
@@ -180,6 +180,9 @@ s32 SEQ_LFO_FastCC_Event(u8 track, u32 bpm_tick, mios32_midi_package_t *p, u8 ig
 {
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
 
+  if( tcc->lfo_waveform & 0x80 )
+    return 0; // PROC-page bypassed (bit 7) — also silences the free-running CC stream
+
   if( !ignore_waveform && !tcc->lfo_waveform )
     return 0; // LFO disabled
 
@@ -225,7 +228,8 @@ s32 SEQ_LFO_FastCC_Event(u8 track, u32 bpm_tick, mios32_midi_package_t *p, u8 ig
 static s32 SEQ_LFO_ValueGet(seq_cc_trk_t *tcc, seq_lfo_t *lfo)
 {
   s32 lfo_value = (int)lfo->pos;
-  switch( tcc->lfo_waveform ) {
+  u8 waveform = tcc->lfo_waveform & 0x7f; // strip the PROC-page bit-7 disable flag
+  switch( waveform ) {
     case SEQ_LFO_WAVEFORM_Off:
       return 0;
 
@@ -257,7 +261,7 @@ static s32 SEQ_LFO_ValueGet(seq_cc_trk_t *tcc, seq_lfo_t *lfo)
       break;
 
     default: {// SEQ_LFO_WAVEFORM_Rec05..SEQ_LFO_WAVEFORM_Rec95
-      u16 trans = 5 * 655 * (tcc->lfo_waveform-SEQ_LFO_WAVEFORM_Rec05+1);
+      u16 trans = 5 * 655 * (waveform-SEQ_LFO_WAVEFORM_Rec05+1);
       lfo_value = (lfo_value >= trans) ? 0 : 65535;
     }
   }
