@@ -570,6 +570,7 @@ static s32 SEQ_FILE_T_Write_Hlp(u8 write_to_file, u8 track)
     case SEQ_CORE_TRKMODE_Normal: sprintf(str_buffer, "Normal"); break;
     case SEQ_CORE_TRKMODE_Transpose: sprintf(str_buffer, "Transpose"); break;
     case SEQ_CORE_TRKMODE_Arpeggiator: sprintf(str_buffer, "Arpeggiator"); break;
+    case SEQ_CORE_TRKMODE_ChordMask: sprintf(str_buffer, "ChordMask"); break;
     default: sprintf(str_buffer, "unknown"); break;
   }
   sprintf(line_buffer, "TrackMode %d (%s)\n", tcc->playmode, str_buffer);

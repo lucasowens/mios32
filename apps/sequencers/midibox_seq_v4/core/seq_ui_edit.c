@@ -303,7 +303,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 	return 1;
       } else if( encoder == SEQ_UI_ENCODER_GP5 ) {
 	ui_selected_par_layer = 0;
-	u8 note = SEQ_PAR_Get(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
+	u8 note = SEQ_PAR_GetSource(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
 	u8 note_octave = note / 12;
 	u8 note_key = note % 12;
 
@@ -314,7 +314,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
 	return 0;
       } else if( encoder == SEQ_UI_ENCODER_GP6 ) {
 	ui_selected_par_layer = 0;
-	u8 note = SEQ_PAR_Get(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
+	u8 note = SEQ_PAR_GetSource(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
 	u8 note_octave = note / 12;
 	u8 note_key = note % 12;
 
@@ -462,8 +462,8 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       value_changed |= 1;
     }
 
-    int value_selected_step = SEQ_PAR_Get(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
-    int value_changed_step = SEQ_PAR_Get(visible_track, changed_step, ui_selected_par_layer, ui_selected_instrument);
+    int value_selected_step = SEQ_PAR_GetSource(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
+    int value_changed_step = SEQ_PAR_GetSource(visible_track, changed_step, ui_selected_par_layer, ui_selected_instrument);
 
     // change value of all selected steps
     u8 track;
@@ -863,7 +863,7 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
     SEQ_LCD_PrintFormattedString("  %c  ", SEQ_TRG_AccentGet(visible_track, ui_selected_step, ui_selected_instrument) ? '*' : 'o');
     SEQ_LCD_PrintFormattedString("  %c  ", SEQ_TRG_GlideGet(visible_track, ui_selected_step, ui_selected_instrument) ? '*' : 'o');
 
-    u8 note = SEQ_PAR_Get(visible_track, ui_selected_step, 0, ui_selected_instrument);
+    u8 note = SEQ_PAR_GetSource(visible_track, ui_selected_step, 0, ui_selected_instrument);
     u8 note_octave = note / 12;
     u8 note_key = note % 12;
 
@@ -1130,13 +1130,13 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
           if( layer_type != SEQ_PAR_Type_Velocity ) {
             par_value = PassiveEditValid()
 	      ? edit_passive_value
-	      : SEQ_PAR_Get(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
+	      : SEQ_PAR_GetSource(visible_track, ui_selected_step, ui_selected_par_layer, ui_selected_instrument);
 
             chord_set = (layer_type == SEQ_PAR_Type_Chord2) ? 1 : ((layer_type == SEQ_PAR_Type_Chord3) ? 2 : 0);
           } else {
             par_value = PassiveEditValid()
 	      ? edit_passive_value
-	      : SEQ_PAR_Get(visible_track, ui_selected_step, 0, ui_selected_instrument);
+	      : SEQ_PAR_GetSource(visible_track, ui_selected_step, 0, ui_selected_instrument);
 
             chord_set = (master_layer_type == SEQ_PAR_Type_Chord2) ? 1 : ((master_layer_type == SEQ_PAR_Type_Chord3) ? 2 : 0);
           }
@@ -1363,7 +1363,7 @@ static s32 MIDI_IN_Handler(mios32_midi_port_t port, mios32_midi_package_t p)
 
 	  if( layer_type == rec_layer_type ||
 	      ((rec_layer_type == SEQ_PAR_Type_Note || rec_layer_type == SEQ_PAR_Type_Chord1 || rec_layer_type == SEQ_PAR_Type_Chord2 || rec_layer_type == SEQ_PAR_Type_Chord3) && (layer_type == SEQ_PAR_Type_Velocity || layer_type == SEQ_PAR_Type_Length)) ) {
-	    u8 value = SEQ_PAR_Get(visible_track, ui_selected_step, p_layer, ui_selected_instrument);
+	    u8 value = SEQ_PAR_GetSource(visible_track, ui_selected_step, p_layer, ui_selected_instrument);
 
 	    u16 step;
 	    for(step=0; step<num_steps; ++step) {
@@ -1489,7 +1489,7 @@ static s32 ChangeSingleEncValue(u8 track, u16 par_step, u16 trg_step, s32 increm
     ui_hold_msg_ctr_drum_edit = 0;
   }
 
-  s32 old_value = SEQ_PAR_Get(track, par_step, ui_selected_par_layer, ui_selected_instrument);
+  s32 old_value = SEQ_PAR_GetSource(track, par_step, ui_selected_par_layer, ui_selected_instrument);
   s32 new_value = (forced_value >= 0) ? forced_value : (old_value + incrementer);
   if( new_value < 0 )
     new_value = 0;
@@ -1558,7 +1558,7 @@ static s32 ChangeSingleEncValue(u8 track, u16 par_step, u16 trg_step, s32 increm
       for(i=0; i<num_p_layers; ++i) {
 	seq_par_layer_type_t localLayerType = SEQ_PAR_AssignmentGet(track, i);
 	if( (localLayerType == SEQ_PAR_Type_Note || localLayerType == SEQ_PAR_Type_Chord1 || localLayerType == SEQ_PAR_Type_Chord2 || localLayerType == SEQ_PAR_Type_Chord3) &&
-	    SEQ_PAR_Get(track, par_step, i, ui_selected_instrument) > 0 ) {
+	    SEQ_PAR_GetSource(track, par_step, i, ui_selected_instrument) > 0 ) {
 	  allNotesZero = 0;
 	  break;
 	}
@@ -1590,7 +1590,7 @@ static s32 PassiveEditEnter(void)
     edit_passive_step = ui_selected_step;
     edit_passive_par_layer = ui_selected_par_layer;
     edit_passive_instrument = ui_selected_instrument;
-    edit_passive_value = SEQ_PAR_Get(edit_passive_track, edit_passive_step, edit_passive_par_layer, edit_passive_instrument);
+    edit_passive_value = SEQ_PAR_GetSource(edit_passive_track, edit_passive_step, edit_passive_par_layer, edit_passive_instrument);
   } else {
     edit_passive_mode = 0;
   }
@@ -1616,7 +1616,7 @@ static s32 PassiveEditTakeOver(void)
   if( PassiveEditValid() ) {
     // take over change
     // handle it like a single increment/decrement so that no code needs to be duplicated
-    int current_value = SEQ_PAR_Get(edit_passive_track, edit_passive_step, edit_passive_par_layer, edit_passive_instrument);
+    int current_value = SEQ_PAR_GetSource(edit_passive_track, edit_passive_step, edit_passive_par_layer, edit_passive_instrument);
     int incrementer = (int)edit_passive_value - current_value;
 
     seq_ui_button_state.EDIT_PRESSED = 0; // just to avoid any overlay...

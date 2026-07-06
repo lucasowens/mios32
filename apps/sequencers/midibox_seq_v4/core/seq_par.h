@@ -86,6 +86,7 @@ extern seq_par_layer_type_t SEQ_PAR_AssignmentGet(u8 track, u8 par_layer);
 
 extern s32 SEQ_PAR_Set(u8 track, u16 step, u8 par_layer, u8 par_instrument, u8 value);
 extern s32 SEQ_PAR_Get(u8 track, u16 step, u8 par_layer, u8 par_instrument);
+extern s32 SEQ_PAR_GetSource(u8 track, u16 step, u8 par_layer, u8 par_instrument);
 
 extern s32 SEQ_PAR_NoteGet(u8 track, u8 step, u8 par_instrument, u16 layer_muted);
 extern s32 SEQ_PAR_ChordGet(u8 track, u8 step, u8 par_instrument, u16 layer_muted);

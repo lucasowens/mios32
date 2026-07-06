@@ -299,6 +299,28 @@ s32 SEQ_PAR_Get(u8 track, u16 step, u8 par_layer, u8 par_instrument)
   return SEQ_PAR_OutputActive(track)[step_ix];
 }
 
+// SOURCE twin of SEQ_PAR_Get: reads the un-rendered source layer (what the user
+// programs), NOT the processed output mirror. The EDIT page uses this so note
+// editing/display target the material — processors (transpose/FTS/chord-mask/
+// limit) overlay non-destructively and are heard, not edited. For unprocessed
+// layers/tracks source == mirror, so this matches SEQ_PAR_Get there.
+s32 SEQ_PAR_GetSource(u8 track, u16 step, u8 par_layer, u8 par_instrument)
+{
+  u8 num_p_layers = par_layer_num_layers[track];
+  u16 num_p_steps = par_layer_num_steps[track];
+
+  if( par_layer >= num_p_layers || par_instrument >= par_layer_num_instruments[track] )
+    return 0;
+
+  step %= num_p_steps;
+
+  u16 step_ix = (par_instrument * num_p_layers * num_p_steps) + (par_layer * num_p_steps) + step;
+  if( step_ix >= SEQ_PAR_MAX_BYTES )
+    return 0;
+
+  return seq_par_layer_value[track][step_ix];
+}
+
 
 /////////////////////////////////////////////////////////////////////////////
 // returns the first layer which plays a note
