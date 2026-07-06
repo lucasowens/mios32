@@ -75,6 +75,8 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->chordmask_bus      = 0;
     tcc->chordmask_drum_l   = 0xFF;
     tcc->chordmask_drum_h   = 0xFF;
+    tcc->chordmask_mask_l   = 0;
+    tcc->chordmask_mask_h   = 0;
     tcc->tension_grip       = 0;
 
     {
@@ -249,6 +251,8 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->chordmask_bus      = 0;
   tcc->chordmask_drum_l   = 0xFF;
   tcc->chordmask_drum_h   = 0xFF;
+  tcc->chordmask_mask_l   = 0;
+  tcc->chordmask_mask_h   = 0;
   tcc->tension_grip       = 0;
   {
     u8 i;
@@ -497,9 +501,17 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	sync_chordmask = 1; // strength follows tcc when ChordMask active
 	break;
       case SEQ_CC_CHORDMASK_BUS:
-	tcc->chordmask_bus = value & 0x03; // 4 buses (0..3)
+	tcc->chordmask_bus = value & 0x07; // bits 0..1 = bus A..D; bit 2 = Self (static mask)
 	sync_chordmask = 1;
-	sync_tension = 1; // tension shares the chord-context bus
+	sync_tension = 1; // tension shares the chord-context bus (bits 0..1 only)
+	break;
+      case SEQ_CC_CHORDMASK_MASK_L:
+	tcc->chordmask_mask_l = value & 0xff; // Self static mask, PCs 0..7
+	sync_chordmask = 1;                   // re-render (RenderTouched via the sync)
+	break;
+      case SEQ_CC_CHORDMASK_MASK_H:
+	tcc->chordmask_mask_h = value & 0x0f; // Self static mask, PCs 8..11
+	sync_chordmask = 1;
 	break;
       case SEQ_CC_CHORDMASK_DRUM_L:
 	tcc->chordmask_drum_l = value & 0xff;
@@ -731,6 +743,8 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_CHORDMASK_BUS:        return tcc->chordmask_bus;
     case SEQ_CC_CHORDMASK_DRUM_L:     return tcc->chordmask_drum_l;
     case SEQ_CC_CHORDMASK_DRUM_H:     return tcc->chordmask_drum_h;
+    case SEQ_CC_CHORDMASK_MASK_L:     return tcc->chordmask_mask_l;
+    case SEQ_CC_CHORDMASK_MASK_H:     return tcc->chordmask_mask_h;
     case SEQ_CC_TENSION_GRIP:         return tcc->tension_grip;
   }
 

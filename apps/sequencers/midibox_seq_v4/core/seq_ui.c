@@ -1354,7 +1354,7 @@ static s32 SEQ_UI_Button_JamStep(s32 depressed)
 // list of {label, cc, range, default} while the messy backings hide in one place.
 typedef enum {
   PROC_KIND_CC = 0,   // plain CC value 0..hi                (ChordMask Str, Limit Lo/Hi, Tension Grip)
-  PROC_KIND_BUS,      // plain CC value 0..3, shown A..D      (ChordMask Bus)
+  PROC_KIND_BUS,      // ChordMask mask source 0..4: A..D (live bus) or Self (bit2, static mask)
   PROC_KIND_SNIBBLE,  // CC holds a signed 4-bit nibble, logical -8..+7 (Pitch Semi/Oct)
   PROC_KIND_FLAG,     // the FORCE_SCALE bit of MODE_FLAGS, 0/1 (Pitch FTS)
   PROC_KIND_GRAVITY,  // global s8 -64..+63 via SEQ_CORE_TensionGravitySet (Tension Grav)
@@ -1424,7 +1424,7 @@ static const proc_param_t proc_params_pitch[] = {
 };
 static const proc_param_t proc_params_chordmask[] = {
   { "Str", PROC_KIND_CM_STR, SEQ_CC_CHORDMASK_STRENGTH, 0, 127, 0, PROC_FMT_DEFAULT },
-  { "Bus", PROC_KIND_BUS,    SEQ_CC_CHORDMASK_BUS,      0,   3, 0, PROC_FMT_DEFAULT },
+  { "Bus", PROC_KIND_BUS,    SEQ_CC_CHORDMASK_BUS,      0,   4, 0, PROC_FMT_DEFAULT },
 };
 static const proc_param_t proc_params_tension[] = {
   { "Grip", PROC_KIND_CC,      SEQ_CC_TENSION_GRIP, 0, 127, 0, PROC_FMT_DEFAULT },
@@ -1536,7 +1536,11 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
     return seq_core_global_scale_root_selection;
   case PROC_KIND_SDEG:
     return seq_core_global_scale_transpose;
-  default: // CC, BUS, CM_STR
+  case PROC_KIND_BUS: {
+    u8 b = SEQ_CC_Get(track, p->cc); // bits 0..1 = bus A..D, bit 2 = Self
+    return (b & 0x04) ? 4 : (b & 0x03);
+  }
+  default: // CC, CM_STR
     return SEQ_CC_Get(track, p->cc);
   }
 }
@@ -1611,7 +1615,27 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     SEQ_CORE_RenderDirtySetAll();
     ui_store_file_required = 1;
     break;
-  default: // CC, BUS, CM_STR
+  case PROC_KIND_BUS: {
+    // ChordMask mask source. 0..3 = bus A..D (clear the Self bit); 4 = Self (static
+    // mask — set bit 2, keep the underlying bus for Tension). Switching to Self while
+    // the static mask is empty SEEDS it from the current live bus chord (the "grab a
+    // bus chord as your static mask" bridge).
+    u8 cur = SEQ_CC_Get(track, p->cc);
+    if( v >= 4 ) {
+      u16 stat = (((u16)SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_H) << 8)
+                  | SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_L)) & 0x0fff;
+      if( !stat ) {
+        u16 chord = SEQ_MIDI_IN_BusPCSetGet(cur & 0x03) & 0x0fff;
+        SEQ_CC_Set(track, SEQ_CC_CHORDMASK_MASK_L, chord & 0xff);
+        SEQ_CC_Set(track, SEQ_CC_CHORDMASK_MASK_H, (chord >> 8) & 0x0f);
+      }
+      SEQ_CC_Set(track, p->cc, 0x04 | (cur & 0x03));
+    } else {
+      SEQ_CC_Set(track, p->cc, (u8)v & 0x03);
+    }
+    break;
+  }
+  default: // CC, CM_STR
     SEQ_CC_Set(track, p->cc, (u8)v);
     break;
   }
@@ -1648,7 +1672,8 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   s32 v = SEQ_UI_PROC_ParamRead(track, p);
   switch( p->kind ) {
   case PROC_KIND_BUS:
-    SEQ_LCD_PrintFormattedString("%c   ", 'A' + (v & 0x03));
+    if( v >= 4 ) SEQ_LCD_PrintString("Sf  ");            // Self = static hand-set mask
+    else         SEQ_LCD_PrintFormattedString("%c   ", 'A' + (v & 0x03));
     return;
   case PROC_KIND_FLAG:
     SEQ_LCD_PrintFormattedString("%-4s", v ? "on" : "off");
@@ -1755,14 +1780,19 @@ static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
     SEQ_LCD_PrintFormattedString("Scale: %s", SEQ_SCALE_NameGet(seq_core_global_scale));
   }
 
-  // Right screen line 1: ChordMask's CUSTOM readout — the live 12-PC target set as
-  // note names (the mask the notes are pulled toward, read from the source bus).
+  // Right screen line 1: ChordMask's CUSTOM readout — the 12-PC target set as note
+  // names. In Self mode it's the editable static mask (tap the GP row); otherwise the
+  // live chord on the source bus. "M:" = bus-derived, "M*:" = static/self (hand-set).
   if( slot == SEQ_CORE_CHORDMASK_SLOT ) {
     const seq_processor_slot_t *cm = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
     if( cm->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
-      u16 mask = SEQ_MIDI_IN_BusPCSetGet(cm->bus) & 0x0fff;
+      u8 self = (cm->bus & 0x04) ? 1 : 0;
+      u16 mask = self
+        ? ((((u16)SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_H) << 8)
+            | SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_L)) & 0x0fff)
+        : (SEQ_MIDI_IN_BusPCSetGet(cm->bus & 0x03) & 0x0fff);
       SEQ_LCD_CursorSet(40, 1);
-      SEQ_LCD_PrintString("M:");
+      SEQ_LCD_PrintString(self ? "M*:" : "M:");
       if( !mask ) {
         SEQ_LCD_PrintString(" -");
       } else {
@@ -1786,8 +1816,24 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
 {
   if( depressed ) return 0;
 
-  if( button >= SEQ_UI_BUTTON_GP1 && button <= SEQ_UI_BUTTON_GP16 )
-    return 1; // GP row paints the mask (read-only) — swallow
+  if( button >= SEQ_UI_BUTTON_GP1 && button <= SEQ_UI_BUTTON_GP16 ) {
+    // GP row = the 12-PC mask. Read-only when bus-derived; EDITABLE when ChordMask is
+    // focused, engaged, and in Self mode — GP1..12 toggle pitch classes C..B in the
+    // static mask. Gate on the live slot (same condition the LED paints on), so you
+    // never blind-edit a mask that isn't shown.
+    u8 track = SEQ_UI_VisibleTrackGet();
+    u8 pc = (u8)(button - SEQ_UI_BUTTON_GP1); // 0..15
+    const seq_processor_slot_t *cm = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
+    if( ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT && pc < 12 &&
+        cm->id == SEQ_PROCESSOR_ID_CHORD_MASK && cm->enabled && (cm->bus & 0x04) ) {
+      u16 mask = ((u16)SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_H) << 8)
+               | SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_L);
+      mask ^= (1u << pc); // toggle this pitch class
+      SEQ_CC_Set(track, SEQ_CC_CHORDMASK_MASK_L, mask & 0xff);
+      SEQ_CC_Set(track, SEQ_CC_CHORDMASK_MASK_H, (mask >> 8) & 0x0f);
+    }
+    return 1; // swallow either way
+  }
 
   switch( button ) {
   case SEQ_UI_BUTTON_Exit:
@@ -5040,10 +5086,13 @@ s32 SEQ_UI_LED_Handler(void)
       // stack slot and must never index seq_processor_stack[..][row] out of bounds.
       u16 gp = 0x0000;
       if( ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT ) {
-        const seq_processor_slot_t *p =
-          &seq_processor_stack[SEQ_UI_VisibleTrackGet()][SEQ_CORE_CHORDMASK_SLOT];
+        u8 vt = SEQ_UI_VisibleTrackGet();
+        const seq_processor_slot_t *p = &seq_processor_stack[vt][SEQ_CORE_CHORDMASK_SLOT];
         if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled )
-          gp = SEQ_MIDI_IN_BusPCSetGet(p->bus) & 0x0fff;
+          gp = (p->bus & 0x04) // Self: the editable static mask; else the live bus chord
+             ? ((((u16)SEQ_CC_Get(vt, SEQ_CC_CHORDMASK_MASK_H) << 8)
+                 | SEQ_CC_Get(vt, SEQ_CC_CHORDMASK_MASK_L)) & 0x0fff)
+             : (SEQ_MIDI_IN_BusPCSetGet(p->bus & 0x03) & 0x0fff);
       }
       ui_gp_leds = gp;
     }

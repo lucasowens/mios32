@@ -1107,7 +1107,7 @@ static void cmd_tension_band_get(mios32_midi_port_t port, const u8 *payload, u8 
   }
   s8 gravity = (s8)((s16)(payload[0] & 0x7f) - 64);
   u8 track   = (plen >= 2) ? (payload[1] & 0x0f) : 0;
-  u8 bus     = (plen >= 3) ? (payload[2] & 0x03) : seq_cc_trk[track].chordmask_bus;
+  u8 bus     = (plen >= 3) ? (payload[2] & 0x03) : (seq_cc_trk[track].chordmask_bus & 0x03); // mask off ChordMask's Self bit (0x04) — Tension uses the bus index only
   u8 zone = 0;
   u16 band = SEQ_CORE_TensionBandMask(gravity, bus, &zone);
   reply[0] = zone;

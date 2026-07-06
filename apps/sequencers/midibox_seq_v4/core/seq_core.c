@@ -1074,11 +1074,14 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
 {
   if( !p->strength )
     return;
-  u16 pc_mask = SEQ_MIDI_IN_BusPCSetGet(p->bus);
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  // Mask source: Self (bit 2 of the slot bus) = the track's static hand-set mask;
+  // otherwise the live chord on bus A..D (bits 0..1).
+  u16 pc_mask = (p->bus & 0x04)
+    ? ((((u16)tcc->chordmask_mask_h << 8) | tcc->chordmask_mask_l) & 0x0fff)
+    : SEQ_MIDI_IN_BusPCSetGet(p->bus & 0x03);
   if( !pc_mask )
     return;
-
-  seq_cc_trk_t *tcc = &seq_cc_trk[track];
   u8 num_p_layers      = SEQ_PAR_NumLayersGet(track);
   u16 num_p_steps      = SEQ_PAR_NumStepsGet(track);
   u8 num_p_instruments = SEQ_PAR_NumInstrumentsGet(track);
@@ -1751,7 +1754,7 @@ void SEQ_CORE_TensionSlotSync(u8 track)
     slot->id        = SEQ_PROCESSOR_ID_TENSION;
     slot->enabled   = 1;
     slot->strength  = tcc->tension_grip;
-    slot->bus       = tcc->chordmask_bus;
+    slot->bus       = tcc->chordmask_bus & 0x03; // shared bus only — ChordMask's Self bit (0x04) is not Tension's
     slot->drum_mask = ((u16)tcc->chordmask_drum_h << 8) | (u16)tcc->chordmask_drum_l;
     SEQ_CORE_RenderTouched(track);
   } else if( slot->id == SEQ_PROCESSOR_ID_TENSION ) {
@@ -2058,6 +2061,8 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
   tcc->chordmask_bus      = 0;
   tcc->chordmask_drum_l   = 0xFF;
   tcc->chordmask_drum_h   = 0xFF;
+  tcc->chordmask_mask_l   = 0; // clear the Self static mask on bounce
+  tcc->chordmask_mask_h   = 0;
 
   // Track 2: PITCH, TENSION and LIMIT are doubly-bound the same way — the
   // bounced source already holds their output, so a re-armed slot would

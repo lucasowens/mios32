@@ -986,17 +986,38 @@ static void phrase_morph_apply(void)
     u8 changed = 0;
     u8 i;
 
-    // ---- Loop A: ext CCs 0x80..0x9f ----------------------------------------
-    for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
-      s32 a = phrase_morph_a[slot][i];
-      s32 b = phrase_morph_b[slot][i];
-      s32 lerped = a + (b - a) * (s32)phrase_morph_pos / PHRASE_MORPH_MAX;
-      if( lerped < 0 ) lerped = 0;
-      if( lerped > 127 ) lerped = 127;
-      // Only write if changed; SEQ_CC_Set>=0 guard skips unimplemented CCs.
-      if( (u8)lerped != (u8)SEQ_CC_Get(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i) &&
-          SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, (u8)lerped) >= 0 )
-        changed = 1;
+    // ---- Loop A: ext CCs 0x80..0x9f (magnitudes lerp; bitfield/mode CCs snap) ---
+    // The chord-context family — chordmask BUS (bus index + the Self mode bit), the
+    // drum-scope bitmasks, and the Self static-mask bitmasks — are NOT magnitudes:
+    // a linear lerp yields garbage pitch-class sets and bus-hopping / Self-bit
+    // flicker. Snap them (A below the midpoint, B at/above), exactly like the
+    // groove_style/transpose_oct snap in Loop B. Everything else lerps as before.
+    {
+      static const u8 ext_snap_ccs[] = {
+        SEQ_CC_CHORDMASK_BUS,
+        SEQ_CC_CHORDMASK_DRUM_L, SEQ_CC_CHORDMASK_DRUM_H,
+        SEQ_CC_CHORDMASK_MASK_L, SEQ_CC_CHORDMASK_MASK_H,
+      };
+      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
+        u8 cc = SEQ_FILE_B_TRK_EXT_CC_FIRST + i;
+        s32 a = phrase_morph_a[slot][i];
+        s32 b = phrase_morph_b[slot][i];
+        u8 is_snap = 0, si;
+        for(si=0; si<sizeof(ext_snap_ccs); ++si)
+          if( ext_snap_ccs[si] == cc ) { is_snap = 1; break; }
+        s32 want;
+        if( is_snap ) {
+          want = (phrase_morph_pos >= PHRASE_MORPH_MAX/2) ? b : a; // discrete: snap, don't lerp
+        } else {
+          want = a + (b - a) * (s32)phrase_morph_pos / PHRASE_MORPH_MAX;
+          if( want < 0 ) want = 0;
+          if( want > 127 ) want = 127;
+        }
+        // Only write if changed; SEQ_CC_Set>=0 guard skips unimplemented CCs.
+        if( (u8)want != (u8)SEQ_CC_Get(track, cc) &&
+            SEQ_CC_Set(track, cc, (u8)want) >= 0 )
+          changed = 1;
+      }
     }
 
     // ---- Loop B: main CC whitelist ------------------------------------------

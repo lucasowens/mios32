@@ -204,9 +204,13 @@
 #define SEQ_CC_CHORDMASK_STRENGTH				0x96 // 0..127 — bus-chord mask probabilistic snap strength
 
 // Phase G/step-7 polish: per-processor knobs, independent of tcc->busasg.bus.
-#define SEQ_CC_CHORDMASK_BUS					0x97 // 0..3 — bus the chord_mask reads PC-set from
+#define SEQ_CC_CHORDMASK_BUS					0x97 // 0..4 — mask source: 0..3 = bus A..D (live chord), 4 = Self (static hand-set mask)
 #define SEQ_CC_CHORDMASK_DRUM_L					0x98 // bits 0..7  = drum slots 0..7  in scope (1=on)
 #define SEQ_CC_CHORDMASK_DRUM_H					0x99 // bits 0..7  = drum slots 8..15 in scope (1=on)
+// Self (static) mask: the 12-PC set used when BUS == 4 (hand-set on the GP row).
+// 0x9b/0x9c are free within the V3 ext-CC block (0x80..0x9f) → persist with the pattern.
+#define SEQ_CC_CHORDMASK_MASK_L					0x9b // bits 0..7 = pitch classes C..G (static mask)
+#define SEQ_CC_CHORDMASK_MASK_H					0x9c // bits 0..3 = pitch classes G#..B (static mask)
 
 // Tension Workbench (§3): per-track GRIP — how strongly the GRAVITY field holds
 // this track (0 = not held / bypass, 127 = fully held). Shares the chord-context
@@ -303,9 +307,11 @@ typedef struct {
   u8		robotize_sync_to_master; // if non-zero, resync the loop phase to bar 0 every time the song-level master cycle wraps (synch_to_measure_req in song mode)
   u8		robotize_palette_length; // 1..16 - total active anchors in the palette
   u8		chordmask_strength;      // 0..127 — bus-chord mask probabilistic snap strength (0 = bypass, 127 = hard lock)
-  u8		chordmask_bus;           // 0..3 — per-processor bus the chord_mask listens to (independent of busasg.bus)
+  u8		chordmask_bus;           // 0..4 — mask source: 0..3 = bus A..D, 4 = Self (static hand-set mask)
   u8		chordmask_drum_l;        // drums 0..7 in scope (bit i = drum i, 0xFF default = all drums)
   u8		chordmask_drum_h;        // drums 8..15 in scope (bit i = drum 8+i, 0xFF default = all drums)
+  u8		chordmask_mask_l;        // Self static mask, pitch classes 0..7  (bit i = PC i active)
+  u8		chordmask_mask_h;        // Self static mask, pitch classes 8..11 (bit i = PC 8+i active)
   u8		tension_grip;            // 0..127 — GRAVITY field grip (0 = not held by the field)
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
