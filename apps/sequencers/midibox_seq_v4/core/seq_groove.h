@@ -23,6 +23,12 @@
 #define SEQ_GROOVE_NUM_PRESETS    7
 #define SEQ_GROOVE_NUM_TEMPLATES 16
 
+// Template cell sentinels: a step whose lane value is VPOS/VNEG takes the track's
+// live groove_value (intensity) with +/- sign at emission (SEQ_GROOVE_Event /
+// _DelayGet). Exposed so the PROC-page paint surface can toggle cells to +intensity.
+#define SEQ_GROOVE_VPOS   127
+#define SEQ_GROOVE_VNEG  (-128)
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -33,6 +39,7 @@ typedef union {
   struct {
     u8  style:6;
     u8  sync_to_track:1;
+    u8  disable:1;        // bit 7: PROC-page live bypass (keeps style/intensity; A/B vs straight)
   };
 } seq_groove_style_t;
 
