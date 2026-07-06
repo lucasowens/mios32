@@ -677,6 +677,21 @@ That axis is kept faithful by one of **two mechanisms**:
     (0..127 intensity; scales the `VPOS`/`VNEG` template cells). Custom **templates are
     global** (`seq_groove_templates[16]`, `MBSEQ_G.V4`) — per-track you pick *which* via
     style, but the cells are a shared pool; the PROC-page GP-row paint edits that pool.
+  - **The PROC-page rack descriptor** (all in `seq_ui.c`, the G0–G2 grammar). `proc_rows[]`
+    is an ordered list of rows; a row is a dial bank (`proc_param_t params[]` — each
+    `{label, kind, cc, lo, hi, deflt, fmt}`) plus, optionally, a **2nd plane**
+    (`params2/n_params2/face2`) reached by the **Up/Down** plane toggle (`ui_proc_plane`;
+    **‹/› are `0xff`-disabled in `seq_hwcfg`**, so Left/Right are dead on the stock panel —
+    use Up/Down). `kind` hides the messy backing (signed nibble, bitfield, global, bipolar,
+    action…), `fmt` the display unit. Emission rows derive occupancy from CCs:
+    `{occ_cc, disable_mask}` (Echo `ECHO_REPEATS`/0x40, Groove `GROOVE_STYLE`/0x80, LFO
+    `LFO_WAVEFORM`/0x80 — waveform 0..25 leaves bit 7 free) OR `{occ_cc, enable_cc}` when the
+    effect splits them (**Robotize**: occupancy = `ROBOTIZE_PROBABILITY>0`, enable =
+    `ROBOTIZE_ACTIVE`). `PROC_KIND_ACTION` = a momentary dial whose **encoder-push executes**
+    (Robotize Reseed/Freeze). Bespoke GP-row surfaces: ChordMask mask / Groove step-shape /
+    LFO waveform-palette (per-slot branches), and `PROC_FACE_ROBOLOOP` (the LOOP plane's
+    16 bar-anchors, tap = reroll) — driven by the descriptor `face` id. Adding a processor =
+    a `proc_param_t[]` + a `proc_rows[]` entry (+ a face branch only for a bespoke surface).
 - **BAKE into the captured notes** when preserving the flag would couple the frozen copy to
   *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap was emission-time and
   `SEQ_CORE_BakeForceScale(track)` reproduced `noteLimit(forceScale(transpose(raw)))` at

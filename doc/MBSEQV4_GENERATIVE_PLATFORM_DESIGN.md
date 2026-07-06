@@ -3279,6 +3279,54 @@ groove isn't a preset picker on the rack, it's a **surface you paint by ear**.
   selector + VPOS-toggle paint is a hint at what a per-processor CUSTOM surface wants), and
   the per-track upgrades where global was the POC.
 
+**2026-07-05 — G1.7: LFO joins the grammar, the rack's first MODULATION SOURCE (SHIPPED,
+by-ear GO; committed main).**
+The 3rd emission tenant after Echo/Groove, and the load test that licensed G2 by pull. Six
+OPERATE dials: **Wave** (headline/occupancy 0..25, name on the right screen, bit-7 disable
+like Groove; engage-seeds a Vel target + depth so it's audible at once), **Amp** (the
+rack's first BIPOLAR dial — logical -128..+127 around raw 128, centre = pass-through),
+**Rate** (steps/cycle, shown +1), **Phas** (%), **Targ** (Note/Vel/Len/CC — CC = the
+free-running `FastCC_Event` stream, gated by `lfo_cc` + clearing `EXTRA_CC_OFF`, NOT the CC
+enable bit), **CC#**. CUSTOM surface = a **waveform palette** on the GP row (tap to pick;
+the lit key = current shape) — a third distinct GP-row content after ChordMask's mask and
+Groove's step-shape. 2-line DSP guard in `seq_lfo.c` (Event/FastCC early-out on bit 7,
+ValueGet masks). Plan: `doc/plans/2026-07-05-g17-lfo-tenant.md`.
+- **Friction it surfaced (the G2 pull):** (1) a 3rd bespoke CUSTOM branch on the same three
+  global sites; (2) the descriptor's `s8` ranges can't hold 0..255 (Rate capped at 128);
+  (3) engage-seed is per-processor imperative code (Echo/Groove/LFO each hand-roll it).
+  Three worked examples = rule-of-three → G2 licensed.
+
+**2026-07-06 — G2 (part 1): the PLANE toggle, proven by migrating Robotize as a two-faced
+unit (SHIPPED, by-ear GO; committed main).**
+Floated by the user from use: a two-faced unit (Robotize params ↔ the Robotize Loop) needs
+to *flip back and forth*; the split-view "bespoke on the right half" idea was dropped — a
+bespoke face gets a **full plane**, reached by a uniform toggle. This is §3.5's plane model.
+- **The plane mechanism (reusable, minimal-churn):** `proc_row_t` gained an OPTIONAL 2nd
+  plane (`params2/n_params2/face2`) rather than wrapping every row in a `planes[]` array —
+  only Robotize sets it. A global `ui_proc_plane` (0/1, reset to 0 on focus change / page
+  entry); `SlotParams()` is plane-aware; a top-right `OPER`/`LOOP` cue names the current
+  plane. `face2` (a `proc_face_t` id) drives the bespoke GP-row/button/readout branches by
+  **descriptor id**, not a per-slot compare — a step toward the full custom hook.
+- **The toggle gesture is Up/Down** (NOT ‹/› — `seq_hwcfg_button.left/right` default to
+  `0xff`/disabled on this panel; that was the "flip doesn't work" bug). Any nav button
+  FLIPS the two planes (toggle is exact for 2; split into prev/next when a 3rd lands).
+- **Occupancy generalised again:** `enable_cc`. An emission row's ENABLED bit is either a
+  mask in `occ_cc` (Echo 0x40 / Groove·LFO 0x80) OR a separate CC — Robotize splits
+  occupancy (`PROBABILITY>0`) from enable (`ACTIVE`). RowState + the double-tap read the
+  descriptor. New `PROC_KIND_ACTION`: a momentary dial where **encoder-push executes** (the
+  one non-snap push) — Robotize's Reseed/Freeze.
+- **Robotize, two planes.** Plane A OPERATE: Prob (headline — engages `active` + seeds the
+  per-dim ranges so the probability dials bite), Note/Vel/Len/Oct/Skip. Plane B LOOP
+  (`PROC_FACE_ROBOLOOP`): the GP row is the 16 bar-anchors (pool lit, playhead winks, **tap
+  = reroll**); dials Cyc/Pal/Strt/Rot + action dials Rsd/Frz (push = reseed / freeze last
+  Cyc bars, default 4). Stock `fx_robotize`/`robomold` pages KEPT for the deep config
+  (per-dim ranges, exotic probabilities, the step mask, sync-to-master). Plan:
+  `doc/plans/2026-07-05-g2-planes-robotize.md`.
+- **Verdict → G2 continues.** GO ("its good"). The plane model is validated. Left: the
+  formatter/defaults registry, a `planes[]` generalisation + a CONFIG plane to pull the
+  deferred Robotize params onto the grammar, and folding the bespoke CUSTOM branches
+  (ChordMask/Groove/LFO) into the `face` hook now that Robotize proved it.
+
 ---
 
 ## 10. Open questions (unresolved forks)
