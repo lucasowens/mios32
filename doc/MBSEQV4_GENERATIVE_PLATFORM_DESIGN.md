@@ -3204,6 +3204,37 @@ stays at emission** — zero audio-path risk. The rule is bent, not broken.
   and the ChordMask GP-mask/LCD compare a row index to the stack-slot constant (holds only while
   `proc_rows[]` keeps stack rows in slot order). Plan: `doc/plans/2026-07-05-g15-emission-fx-on-the-grammar.md`.
 
+**2026-07-05 — ChordMask gains a static Self mask + the EDIT page anchors on SOURCE, not the
+processed mirror (both SHIPPED, by-ear GO; committed main c7209731 [Self mask] + 8aec049f [EDIT fix]).**
+Two things landed on the ChordMask track in one run — one feature, one regression the feature flushed out.
+- **ChordMask Self mask — a static, hand-set 12-PC target (feature).** ChordMask could only snap to a
+  *live* chord read off a routing bus; now it works **standalone**. The **Bus** dial sweeps 0..4 —
+  A..D (live bus) then **Sf** (Self). Self is a static 12-PC set stored on the track (new ext CCs
+  `CHORDMASK_MASK_L` 0x9b / `_H` 0x9c in the free V3 block, so it persists with the pattern);
+  **GP1..12 toggle pitch classes C..B**, LEDs paint the set, the right screen reads `M*:` (vs `M:` for
+  bus-derived). Encoding: **bit 2 of `chordmask_bus` = Self, bits 0..1 = bus index** — so the bus index
+  survives underneath for **Tension** (which shares the CC; `TensionSlotSync` and the testctrl path mask
+  `& 0x03`). The bridge move: **selecting Sf while the static mask is empty seeds it from the current
+  live bus chord** — grab a chord off the bus and freeze it, per the constraints-are-materials rule
+  (Self at "empty" is a true pass-through you fill by ear). *Morph fix flushed out en route:* phrase-morph
+  Loop A lerped every ext CC 0x80..0x9f as a magnitude — nonsense for **bitfield/mode** CCs (bus-hopping,
+  Self-bit flicker, garbage PC sets, and a **pre-existing** corruption of the drum-scope masks). Fixed by
+  **snapping** the chord-context family (BUS + both drum masks + both Self masks) at the morph midpoint,
+  like the groove/transpose snaps already in Loop B.
+- **EDIT edits the SOURCE note, not the mirror (regression fix, from the pitch-chain migration ~2026-06-10).**
+  On a heavily-processed track (transpose+FTS+diatonic+chord-mask+Limit) the EDIT page went **dead** — a
+  step's LED lit but you couldn't set a note, the C-3 gate-on default never fired, the encoder did nothing.
+  Cause: EDIT *read* notes through `SEQ_PAR_Get` (the **output mirror** — the fully-rendered note the tick
+  plays) while it *writes* the **source** layer. On a processed track those diverge: the mirror is pinned
+  by the chain (Limit floors it above the C-3 sentinel), so the empty→default test and the increment base
+  both read a non-moving nonzero value. Fix: **`SEQ_PAR_GetSource()`** — a source twin of `SEQ_PAR_Get`
+  with identical index math returning `seq_par_layer_value[]`; every note read on the EDIT page (12 sites)
+  points at it. **Editing/display now target the material; processors overlay non-destructively and are
+  heard, not edited** — the durable rule for how the EDIT page relates to the render stack. Safe by
+  construction: when nothing processes, **source == mirror**, so unprocessed editing is byte-identical.
+  *Consequence to know:* on a processed track EDIT now shows the note you **programmed**, not the heard
+  output; a "heard note" secondary readout is an easy future add if wanted.
+
 ---
 
 ## 10. Open questions (unresolved forks)
