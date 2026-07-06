@@ -668,6 +668,15 @@ That axis is kept faithful by one of **two mechanisms**:
 - **PRESERVE the CC** when re-applying it on playback reproduces the heard sound exactly —
   **groove** (per-step swing/velocity/length; its negative timing delays can't be baked into
   step params anyway). `ResetGenerativeForBounce` leaves groove (style+value) alone.
+  - **`groove_style` byte (CC `0x53`) bit layout** (`seq_groove_style_t`): `style:6`
+    (0=off, 1..6 presets, 7..22 custom templates), `sync_to_track:1` (bit 6),
+    **`disable:1` (bit 7) — G1.6 PROC-page live bypass** (keeps style/intensity, A/B vs
+    straight; `SEQ_GROOVE_DelayGet`/`_Event` early-out on it). Bit 7 was free pre-G1.6, so
+    old patterns load with groove enabled. The whole byte round-trips as one CC, so the
+    bypass is preserved-as-config (capture/morph) for free. `groove_value` = CC `0x52`
+    (0..127 intensity; scales the `VPOS`/`VNEG` template cells). Custom **templates are
+    global** (`seq_groove_templates[16]`, `MBSEQ_G.V4`) — per-track you pick *which* via
+    style, but the cells are a shared pool; the PROC-page GP-row paint edits that pool.
 - **BAKE into the captured notes** when preserving the flag would couple the frozen copy to
   *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap was emission-time and
   `SEQ_CORE_BakeForceScale(track)` reproduced `noteLimit(forceScale(transpose(raw)))` at

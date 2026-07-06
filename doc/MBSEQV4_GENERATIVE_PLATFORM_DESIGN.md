@@ -3235,6 +3235,50 @@ Two things landed on the ChordMask track in one run — one feature, one regress
   *Consequence to know:* on a processed track EDIT now shows the note you **programmed**, not the heard
   output; a "heard note" secondary readout is an easy future add if wanted.
 
+**2026-07-05 — G1.6: Groove joins the grammar as the 2nd emission tenant, as a PAINTABLE
+16-step shape (SHIPPED, by-ear GO; committed main).**
+Groove was the design's named "config-copy archetype" and the explicit next emission
+tenant after Echo. Bringing it on did the two jobs G1.5 predicted: it proved the
+emission-row pattern generalises to a real 2nd instance, and it flushed out the two
+`ECHO_REPEATS` hardcodes that flag had called. The user pulled the *rich* cut forward:
+groove isn't a preset picker on the rack, it's a **surface you paint by ear**.
+- **The row = four operate dials, mirroring Echo.** `Styl` (headline/occupancy — 0=off
+  dark row, 1..6 presets, 7..22 custom templates; index in the cell, **name on the right
+  screen** like Pitch's Scale; engage-seeds intensity so it's audible at once), `Intn`
+  (intensity — scales the VPOS/VNEG template cells, so on the classic Shuffle it *is* the
+  swing depth; true 0→max, pass-through at 0), `Sync` (phase reference Trk/RefS), and
+  `Lane` (a UI-only selector — Dly/Len/Vel — for which template lane the GP row paints).
+- **The GP row is the paintable shape.** On a *custom* style, GP1..16 toggle that step's
+  selected-lane cell between 0 and `+intensity` (`VPOS`); the LEDs paint the lane's
+  non-zero steps (presets show read-only; off = dark). First paint **expands the template
+  to a full 16-step bar** (`num_steps=16`) and seeds intensity if still 0, so a painted
+  step sounds immediately. This is groove's analogue of ChordMask's live 12-PC mask — the
+  first emission tenant to get a 16-object GP-row surface.
+- **Bypass = a new bit-7 `disable` in `groove_style`**, mirroring Echo's `0x40` on
+  `ECHO_REPEATS`: **double-tap the row** flips it — a live A/B against straight that keeps
+  the dialled config. Two-line DSP guard in `SEQ_GROOVE_DelayGet`/`_Event` (the only audio-
+  path touch, both melodic + drum). It rides the same CC that morph already snaps and that
+  capture copies-as-config, so it's faithful for free.
+- **The G1.5 hardcodes are now generalised.** `proc_row_t` carries `{occ_cc, disable_mask}`;
+  `SEQ_UI_PROC_RowState` and the B-row double-tap read the row's descriptor instead of
+  naming `ECHO_REPEATS`. Echo = `{ECHO_REPEATS, 0x40}`, Groove = `{GROOVE_STYLE, 0x80}`.
+  Row identity for the Groove-specific GP/LCD branches is a **params-pointer compare**
+  (`proc_params_groove`), reorder-safe — deliberately NOT the stack-slot index compare the
+  ChordMask branches use (those only hold while the 4 stack rows keep slot order).
+- **Persistence:** paint sets a dirty flag; `SEQ_UI_PROC_page_Exit` writes `MBSEQ_G.V4`
+  under `MUTEX_SDCARD` on leave — the same file + gesture as the stock TRKGRV exit.
+- **Two consequences to know.** (1) Groove **templates are global** (the existing groove
+  architecture — you pick *which* template per-track via Styl, but the template cells are a
+  shared pool): painting edits the shared slot, so other tracks on that same style move too.
+  Style/intensity/sync/disable are per-track. (2) PROC paint forces a **16-step bar** and
+  toggles cells to `+intensity` only — **negative (VNEG) / graded per-step values and
+  short-loop customs stay on the stock TRKGRV page**. Both deferred, by choice.
+- **Verdict → G2.** GO. Groove operates and paints like the same movement as
+  ChordMask/Echo. Plan: `doc/plans/2026-07-05-g16-groove-tenant.md`. Left as before: the
+  **G2** descriptor lock (formatter registry, defaults, optional CUSTOM surface — the Lane
+  selector + VPOS-toggle paint is a hint at what a per-processor CUSTOM surface wants), and
+  the per-track upgrades where global was the POC.
+
 ---
 
 ## 10. Open questions (unresolved forks)
