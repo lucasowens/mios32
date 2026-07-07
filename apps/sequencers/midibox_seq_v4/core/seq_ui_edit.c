@@ -1118,7 +1118,13 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
     } else {
       SEQ_LCD_PrintSpaces(2);
 
-      if( layer_event.midi_package.note && layer_event.midi_package.velocity && (layer_event.len >= 0) ) {
+      // Note byte alone decides whether there's something to show — velocity==0
+      // just means the step is currently silent (e.g. a TrigGen-decoupled gate
+      // off), not that the note is unset. Requiring velocity too made a real,
+      // editable note byte invisible (and edits to it looked like no-ops) on
+      // any silent step (fork 2026-07-07: PitchGen+TrigGen decoupled pitch from
+      // gate, making silent-but-pitched steps common for the first time).
+      if( layer_event.midi_package.note && (layer_event.len >= 0) ) {
         if( SEQ_CC_Get(visible_track, SEQ_CC_MODE) == SEQ_CORE_TRKMODE_Arpeggiator ) {
           u8 par_value = PassiveEditValid() ? edit_passive_value : layer_event.midi_package.note;
           SEQ_LCD_PrintArp(par_value);
