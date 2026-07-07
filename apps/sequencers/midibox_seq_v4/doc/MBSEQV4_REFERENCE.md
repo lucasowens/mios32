@@ -688,10 +688,22 @@ That axis is kept faithful by one of **two mechanisms**:
     `LFO_WAVEFORM`/0x80 — waveform 0..25 leaves bit 7 free) OR `{occ_cc, enable_cc}` when the
     effect splits them (**Robotize**: occupancy = `ROBOTIZE_PROBABILITY>0`, enable =
     `ROBOTIZE_ACTIVE`). `PROC_KIND_ACTION` = a momentary dial whose **encoder-push executes**
-    (Robotize Reseed/Freeze). Bespoke GP-row surfaces: ChordMask mask / Groove step-shape /
-    LFO waveform-palette (per-slot branches), and `PROC_FACE_ROBOLOOP` (the LOOP plane's
-    16 bar-anchors, tap = reroll) — driven by the descriptor `face` id. Adding a processor =
-    a `proc_param_t[]` + a `proc_rows[]` entry (+ a face branch only for a bespoke surface).
+    (Robotize Reseed/Freeze; PitchGen Roll/Anchor/Snap/Bounce). Bespoke GP-row surfaces:
+    ChordMask mask / Groove step-shape / LFO waveform-palette (per-slot branches),
+    `PROC_FACE_ROBOLOOP` (the LOOP plane's 16 bar-anchors, tap = reroll), and
+    `PROC_FACE_PITCHGEN_STEPS` (a 16-step LOCK window into a 64-step loop, `Win` selects
+    which quarter) — driven by the descriptor `face` id. **A THIRD rowkind,
+    `PROC_ROW_GENERATOR`** (PitchGen): occupancy is a `SEQ_GENERATOR_*` **pool-slot
+    allocation** (`SEQ_GENERATOR_Get`/`IsEngaged`/`Engage`/`Disengage`/`Bounce`), not a CC at
+    all — the B-row double-tap does ENGAGE⟷DISENGAGE directly rather than flipping a bit,
+    because `mutation_rate==0` is a legitimate *engaged* (frozen) state, so no dial can proxy
+    occupancy the way Groove/LFO/Robotize's kind-0-means-off headline does. Params reach the
+    pool slot straight (`g->range_min` etc. via `SEQ_GENERATOR_Get`), not through
+    `SEQ_CC_Get`/`Set` — dials **no-op pre-ENGAGE** (dashes shown), matching the stock
+    `seq_ui_trkpitchgen.c` page's own contract; both surfaces share one pool slot, so a tweak
+    on either is visible on the other. Adding a processor = a `proc_param_t[]` + a
+    `proc_rows[]` entry (+ a face branch only for a bespoke surface; a new rowkind only if
+    the backing is neither a stack slot nor a CC).
 - **BAKE into the captured notes** when preserving the flag would couple the frozen copy to
   *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap was emission-time and
   `SEQ_CORE_BakeForceScale(track)` reproduced `noteLimit(forceScale(transpose(raw)))` at

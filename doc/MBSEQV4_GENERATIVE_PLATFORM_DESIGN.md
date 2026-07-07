@@ -3327,6 +3327,46 @@ bespoke face gets a **full plane**, reached by a uniform toggle. This is §3.5's
   deferred Robotize params onto the grammar, and folding the bespoke CUSTOM branches
   (ChordMask/Groove/LFO) into the `face` hook now that Robotize proved it.
 
+**2026-07-07 — G2 (part 2): PitchGen onto the grammar — the rack's first GENERATOR row, a
+genuinely CONTINUOUS/self-mutating tenant (SHIPPED, by-ear GO; committed main).**
+A "what's next" design conversation surfaced that the dynamic pitch Turing machine the user
+was picturing to build **already exists and ships** — `seq_generator.c`, a 64-step self-
+mutating loop (lock/depth/contour/anchor/roll/bounce) running live on drum + normal tracks
+via its own dedicated page. The actual gap is a **trigger** Turing machine (GENERATE's five
+types — Eucl/CA/Poly/Sub/Lsys — are all static one-shot fills, nothing runs live). User's
+call: rack-ify the existing PitchGen FIRST, both because it's the smaller lift and because
+it proves the rack can host a truly continuous tenant (not just emission FX or config-copy)
+before the trigger machine needs the same slot shape.
+- **A new rowkind, `PROC_ROW_GENERATOR`.** PitchGen's state is a `SEQ_GENERATOR_*` **pool-
+  slot allocation** (ENGAGE/DISENGAGE/BOUNCE), not a CC — `{occ_cc, disable_mask/enable_cc}`
+  can't express it. Occupied = slot allocated; enabled = `SEQ_GENERATOR_IsEngaged`; strength
+  = `mutation_rate` (an acknowledged-imperfect proxy — Rate=0 is a legitimate *engaged*
+  frozen state, not silence, unlike every other row's kind-0-means-off).
+- **B-row double-tap = ENGAGE ⟷ DISENGAGE**, not a headline-dial-up gesture — there's no
+  clean 0-means-off dial here, so the toggle carries occupancy directly. Surfaces the stock
+  page's own ENGAGE failure reasons (pool full / bad track / no Note layer assigned).
+- **Plane A OPERATE:** Lo/Hi (range), Rate/Dpth (touch probability / perturb-vs-reroll
+  depth), Cont (reroll bias Uni/Lo/Hi/Tri), Roll (ACTION — on-demand reroll of unlocked
+  steps). Dials no-op pre-ENGAGE, printing dashes — mirrors the stock page's own contract
+  exactly, not a new rule.
+- **Plane B STEPS** (`PROC_FACE_PITCHGEN_STEPS`): Win (0..3, UI-only, which 16-step quarter
+  of the 64-step loop the GP row shows — mirrors Groove's Lane selector), Anc/Snp/Bnc
+  (ACTIONS — snapshot identity / hard-restore it / freeze-into-source-and-free-the-slot, the
+  generator's own harvest verb). **GP row = LOCK toggle for the window** — the paintable-
+  shape idiom's 4th tenant (ChordMask mask → Groove step-shape → Robotize bar-anchors →
+  this). Target resolution (`gen_instr`/`gen_par_layer`: drum = cursor instrument, normal =
+  cursor's Note layer if it is one else the linked layer) is duplicated verbatim from the
+  stock page — small, no cross-file coupling, the PROC module stays self-contained.
+- **The stock PITCHGEN page is unchanged and shares the same pool slot** — both are views
+  onto one engine, not two engines; a tweak on either surface is visible on the other.
+- **Verdict → G2 continues.** GO ("works great"). Proves a rowkind whose backing is neither
+  a stack slot nor a CC — the descriptor now spans all three shapes state can take in this
+  codebase. Plan: `doc/plans/2026-07-07-g2-pitchgen-tenant.md`. **Next: the trigger Turing
+  machine** — the genuine gap — now with a proven slot shape (rowkind + 2-plane + GP-row-
+  paint) to build toward, plus the earlier-surfaced insight that Robotize's bar-anchor loop
+  is the *same* register-primitive at bar-granularity — worth a consolidation look once the
+  trigger engine exists and the shared shape is undeniable across three implementations.
+
 ---
 
 ## 10. Open questions (unresolved forks)
