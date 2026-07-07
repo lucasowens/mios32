@@ -49,6 +49,7 @@
 #include "seq_groove.h"
 #include "seq_lfo.h"
 #include "seq_robotize.h"
+#include "seq_generator.h"
 
 #include "file.h"
 #include "seq_file.h"
@@ -87,6 +88,10 @@ static u8 proc_groove_dirty = 0;
 // PROC-page plane (G2): which plane of the focused row is showing (0 = primary, 1 = the
 // optional 2nd plane). Toggled by ‹/›; reset to 0 whenever focus changes (B-row tap).
 static u8 ui_proc_plane = 0;
+
+// PROC-page PitchGen STEPS plane (G2): which 16-step quarter of the 64-step loop the GP
+// row shows/edits (0..3). UI-only, mirrors proc_groove_paint_lane.
+static u8 proc_gen_step_window = 0;
 
 u8 ui_selected_item;
 
@@ -1397,10 +1402,22 @@ typedef enum {
                       //   (sets robotize_active) and seeds the per-dim RANGES (Robotize, G2).
   PROC_KIND_ACTION,   // A momentary ACTION dial — turning is a no-op, ENCODER-PUSH executes.
                       //   `cc` holds the action id (PROC_ACT_*). The one non-snap push (G2).
+  PROC_KIND_GEN_RANGE_LO, // PitchGen range_min (1..127). Reads/writes the pool-slot struct
+                      //   directly (no CC) via SEQ_GENERATOR_Get; no-ops pre-ENGAGE (PitchGen).
+  PROC_KIND_GEN_RANGE_HI, // PitchGen range_max (1..127), clamped >= range_min (PitchGen).
+  PROC_KIND_GEN_RATE, // PitchGen mutation_rate 0..127 — per-measure touch probability.
+                      //   0 is a valid ENGAGED state (frozen, not off) — unlike the other
+                      //   emission rows' kind-0-means-off, so occupancy can't proxy off this
+                      //   dial; ENGAGE is the B-row double-tap instead (PitchGen).
+  PROC_KIND_GEN_DEPTH,// PitchGen mutation_depth 0..127 (0=frozen, 127=full reroll) (PitchGen).
+  PROC_KIND_GEN_CONTOUR, // PitchGen contour_shape 0..3 (Uni/Lo/Hi/Tri reroll bias) (PitchGen).
+  PROC_KIND_GEN_WINDOW,  // PitchGen GP-row window select 0..3 (which 16-step quarter of the
+                      //   64-step loop the GP row shows/edits). UI-only static, no CC (PitchGen).
 } proc_pkind_t;
 
 // Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot).
-enum { PROC_ACT_RESEED = 1, PROC_ACT_FREEZE };
+enum { PROC_ACT_RESEED = 1, PROC_ACT_FREEZE,
+       PROC_ACT_GEN_ROLL, PROC_ACT_GEN_ANCHOR, PROC_ACT_GEN_SNAP, PROC_ACT_GEN_BOUNCE };
 
 // How a param's VALUE is rendered (orthogonal to the backing kind). DEFAULT derives
 // from the kind (int / bus / on-off / signed); the rest are per-param display maps so
@@ -1433,13 +1450,16 @@ typedef struct {
 typedef enum {
   PROC_ROW_STACK = 0,  // occupancy/enable/strength from seq_processor_stack[track][stack_slot]
   PROC_ROW_EMISSION,   // occupancy derived from the effect's tcc CCs (no stack slot)
+  PROC_ROW_GENERATOR,  // occupancy from a SEQ_GENERATOR_* pool-slot allocation (no CC at all;
+                       // G2 — PitchGen, the first genuinely CONTINUOUS/self-mutating tenant)
 } proc_rowkind_t;
 
 // A bespoke full-plane face id (G2). 0 = a plain dial bank; else a hand-drawn surface
 // (its GP-row / GP-button / right-screen branches keyed on this id, not a per-slot compare).
 typedef enum {
   PROC_FACE_NONE = 0,
-  PROC_FACE_ROBOLOOP,   // Robotize's LOOP plane: the 16 bar-anchors + reseed/freeze/reroll
+  PROC_FACE_ROBOLOOP,       // Robotize's LOOP plane: the 16 bar-anchors + reseed/freeze/reroll
+  PROC_FACE_PITCHGEN_STEPS, // PitchGen's STEPS plane: a 16-step LOCK window into the 64-step loop
 } proc_face_t;
 
 typedef struct {
@@ -1565,6 +1585,34 @@ static const proc_param_t proc_params_robo_loop[] = {
   { "Rsd",  PROC_KIND_ACTION, PROC_ACT_RESEED,                0,  0,  0, PROC_FMT_DEFAULT },
   { "Frz",  PROC_KIND_ACTION, PROC_ACT_FREEZE,                0,  0,  0, PROC_FMT_DEFAULT },
 };
+// PitchGen — the rack's first GENERATOR row (G2): a continuous, self-mutating tenant, not
+// an emission effect. Its state lives in a SEQ_GENERATOR_* pool slot (ENGAGE/DISENGAGE/
+// BOUNCE), not a CC, so PROC_ROW_GENERATOR reads it via SEQ_GENERATOR_Get/IsEngaged instead
+// of {occ_cc,...}. Plane A (OPERATE) — "how much chaos": Lo/Hi (range), Rate/Dpth (touch
+// probability / how far), Cont (reroll bias), Roll (ACTION — on-demand reroll of unlocked
+// steps). Dials no-op until ENGAGED (mirrors the stock PITCHGEN page's own contract) — the
+// B-row DOUBLE-TAP is ENGAGE<->DISENGAGE (Rate=0 is a valid engaged/frozen state here, unlike
+// the other rows' kind-0-means-off, so no dial can proxy occupancy the way Groove/LFO/
+// Robotize's headline dial does). deflts mirror SEQ_GENERATOR_Engage's own seed values.
+static const proc_param_t proc_params_pitchgen_op[] = {
+  { "Lo",   PROC_KIND_GEN_RANGE_LO, 0, 1, 127, SEQ_GENERATOR_DEFAULT_RANGE_MIN, PROC_FMT_DEFAULT },
+  { "Hi",   PROC_KIND_GEN_RANGE_HI, 0, 1, 127, SEQ_GENERATOR_DEFAULT_RANGE_MAX, PROC_FMT_DEFAULT },
+  { "Rate", PROC_KIND_GEN_RATE,     0, 0, 127, SEQ_GENERATOR_DEFAULT_RATE,      PROC_FMT_DEFAULT },
+  { "Dpth", PROC_KIND_GEN_DEPTH,    0, 0, 127, SEQ_GENERATOR_DEFAULT_DEPTH,     PROC_FMT_DEFAULT },
+  { "Cont", PROC_KIND_GEN_CONTOUR,  0, 0,   3, SEQ_GENERATOR_DEFAULT_CONTOUR,   PROC_FMT_DEFAULT },
+  { "Roll", PROC_KIND_ACTION, PROC_ACT_GEN_ROLL, 0, 0, 0, PROC_FMT_DEFAULT },
+};
+// Plane B (STEPS) — the loop's IDENTITY face. Win picks which 16-step quarter of the 64-step
+// loop the GP row shows (UI-only, no CC — mirrors Groove's Lane selector); GP row = LOCK
+// toggle for that window (the paintable-shape idiom, 4th tenant now). Anc/Snp/Bnc are ACTIONS:
+// Anchor = snapshot current loop as identity; Snap = hard-restore it; Bounce = freeze the loop
+// into the source and free the slot (the generator's own "harvest to static" verb).
+static const proc_param_t proc_params_pitchgen_steps[] = {
+  { "Win",  PROC_KIND_GEN_WINDOW, 0, 0, 3, 0, PROC_FMT_DEFAULT },
+  { "Anc",  PROC_KIND_ACTION, PROC_ACT_GEN_ANCHOR, 0, 0, 0, PROC_FMT_DEFAULT },
+  { "Snp",  PROC_KIND_ACTION, PROC_ACT_GEN_SNAP,   0, 0, 0, PROC_FMT_DEFAULT },
+  { "Bnc",  PROC_KIND_ACTION, PROC_ACT_GEN_BOUNCE, 0, 0, 0, PROC_FMT_DEFAULT },
+};
 
 static const proc_row_t proc_rows[] = {
   { "Pitch",     PROC_ROW_STACK,    SEQ_CORE_PITCH_SLOT,     proc_params_pitch,     6, 0, 0 },
@@ -1580,6 +1628,9 @@ static const proc_row_t proc_rows[] = {
   { "Robotize",  PROC_ROW_EMISSION, 0,                       proc_params_robo_op,   6,
     SEQ_CC_ROBOTIZE_PROBABILITY, 0, SEQ_CC_ROBOTIZE_ACTIVE,
     proc_params_robo_loop, 6, PROC_FACE_ROBOLOOP },
+  { "PitchGen",  PROC_ROW_GENERATOR, 0,                      proc_params_pitchgen_op, 6,
+    0, 0, 0,
+    proc_params_pitchgen_steps, 4, PROC_FACE_PITCHGEN_STEPS },
 };
 #define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
 
@@ -1630,6 +1681,37 @@ static u8 SEQ_UI_PROC_RoboPlayingAnchor(u8 track)
   u8 head = (SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LOOP_START)
              + SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LOOP_ROTATE)) % pal;
   return (head + (u8)(seq_core_trk[track].robotize_loop_phase % pal)) % pal;
+}
+
+// Is rack row `row` the PitchGen row? (matches on its primary/OPERATE param list.)
+static u8 SEQ_UI_PROC_IsPitchGen(u8 row)
+{
+  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_pitchgen_op;
+}
+
+// PitchGen target resolution — duplicated verbatim from seq_ui_trkpitchgen.c's static
+// gen_instr()/gen_par_layer() (small, no cross-file coupling; the PROC grammar module is
+// deliberately self-contained). Drum track: instrument = the drum cursor, one line per
+// drum. Normal track: instrument 0 (single melodic line); the gen targets the CURSOR's Note
+// layer if it is one (deliberate placement wins), else the track's linked Note layer.
+static u8 SEQ_UI_PROC_GenInstr(u8 track)
+{
+  return (seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum) ? ui_selected_instrument : 0;
+}
+
+static u8 SEQ_UI_PROC_GenParLayer(u8 track)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->event_mode != SEQ_EVENT_MODE_Drum &&
+      SEQ_PAR_AssignmentGet(track, ui_selected_par_layer) == SEQ_PAR_Type_Note )
+    return ui_selected_par_layer;
+  return (u8)tcc->link_par_layer_note;
+}
+
+// The pool slot for the visible track's PitchGen target, or NULL if never engaged.
+static seq_generator_t *SEQ_UI_PROC_GenGet(u8 track)
+{
+  return SEQ_GENERATOR_Get(track, SEQ_UI_PROC_GenInstr(track));
 }
 
 // The LFO's GP-row CUSTOM surface: a palette of 16 waveforms (tap to pick). A curated
@@ -1720,6 +1802,30 @@ static void SEQ_UI_PROC_RunAction(u8 track, u8 action)
     SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "Robotize", "   frozen");
     break;
   }
+  // PitchGen LOOP-plane verbs (G2). Roll = one-shot reroll of unlocked steps; Anchor =
+  // snapshot the current loop as identity; Snap = hard-restore it; Bounce = freeze the
+  // loop into the source and free the pool slot (the generator's "harvest" verb).
+  case PROC_ACT_GEN_ROLL: {
+    u8 n = SEQ_GENERATOR_Roll(track);
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", n ? "   rolled" : "not engaged");
+    break;
+  }
+  case PROC_ACT_GEN_ANCHOR: {
+    s32 r = SEQ_GENERATOR_Anchor(track, SEQ_UI_PROC_GenInstr(track));
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", (r == 0) ? " anchored" : "not engaged");
+    break;
+  }
+  case PROC_ACT_GEN_SNAP: {
+    s32 r = SEQ_GENERATOR_Snap(track, SEQ_UI_PROC_GenInstr(track));
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen",
+               (r == 0) ? "  snapped" : (r == -2) ? "no anchor" : "not engaged");
+    break;
+  }
+  case PROC_ACT_GEN_BOUNCE: {
+    s32 r = SEQ_GENERATOR_Bounce(track, SEQ_UI_PROC_GenInstr(track));
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", (r == 0) ? "  bounced" : "not engaged");
+    break;
+  }
   }
 }
 
@@ -1739,6 +1845,15 @@ static proc_rowstate_t SEQ_UI_PROC_RowState(u8 track, u8 row)
     s.occupied = (p->id != SEQ_PROCESSOR_ID_NONE);
     s.enabled  = s.occupied && p->enabled;
     s.strength = p->strength;
+  } else if( r->rowkind == PROC_ROW_GENERATOR ) {
+    // Generator row: occupancy is a POOL-SLOT allocation, not a CC. occupied = a slot
+    // exists (ENGAGEd at least once, config persists across DISENGAGE); enabled =
+    // currently ENGAGEd (mutating). strength = mutation_rate — an imperfect proxy (rate=0
+    // is a legitimate *engaged* frozen state, not silence) but the closest "how alive" cue.
+    seq_generator_t *g = SEQ_GENERATOR_Get(track, SEQ_UI_PROC_GenInstr(track));
+    s.occupied = (g != NULL);
+    s.enabled  = SEQ_GENERATOR_IsEngaged(track, SEQ_UI_PROC_GenInstr(track));
+    s.strength = g ? g->mutation_rate : 0;
   } else {
     // Emission row: occupancy count/index in bits 0..5 of occ_cc. The ENABLED bit lives
     // either in the same byte (disable_mask — Echo 0x40 / Groove/LFO 0x80) or, when the
@@ -1804,6 +1919,28 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
     return SEQ_CC_Get(track, p->cc); // overall probability 0..31
   case PROC_KIND_ACTION:
     return 0; // momentary — no value (push executes)
+  case PROC_KIND_GEN_RANGE_LO: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    return g ? g->range_min : 0; // 0 pre-ENGAGE; ParamPrintValue shows dashes, not 0
+  }
+  case PROC_KIND_GEN_RANGE_HI: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    return g ? g->range_max : 0;
+  }
+  case PROC_KIND_GEN_RATE: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    return g ? g->mutation_rate : 0;
+  }
+  case PROC_KIND_GEN_DEPTH: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    return g ? g->mutation_depth : 0;
+  }
+  case PROC_KIND_GEN_CONTOUR: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    return g ? g->contour_shape : 0;
+  }
+  case PROC_KIND_GEN_WINDOW:
+    return proc_gen_step_window;
   case PROC_KIND_BUS: {
     u8 b = SEQ_CC_Get(track, p->cc); // bits 0..1 = bus A..D, bit 2 = Self
     return (b & 0x04) ? 4 : (b & 0x03);
@@ -1959,6 +2096,34 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
   }
   case PROC_KIND_ACTION:
     break; // momentary — turning does nothing; the encoder PUSH executes (see below)
+  case PROC_KIND_GEN_RANGE_LO: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    if( g ) g->range_min = (u8)((v > g->range_max) ? g->range_max : v); // clamp <= range_max
+    break; // no-op pre-ENGAGE — mirrors the stock page's "nothing to tune yet" contract
+  }
+  case PROC_KIND_GEN_RANGE_HI: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    if( g ) g->range_max = (u8)((v < g->range_min) ? g->range_min : v); // clamp >= range_min
+    break;
+  }
+  case PROC_KIND_GEN_RATE: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    if( g ) g->mutation_rate = (u8)v;
+    break;
+  }
+  case PROC_KIND_GEN_DEPTH: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    if( g ) g->mutation_depth = (u8)v;
+    break;
+  }
+  case PROC_KIND_GEN_CONTOUR: {
+    seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+    if( g ) g->contour_shape = (u8)v;
+    break;
+  }
+  case PROC_KIND_GEN_WINDOW:
+    proc_gen_step_window = (u8)v; // UI-only: which 16-step quarter the GP row shows/edits
+    break;
   case PROC_KIND_BUS: {
     // ChordMask mask source. 0..3 = bus A..D (clear the Self bit); 4 = Self (static
     // mask — set bit 2, keep the underlying bus for Tension). Switching to Self while
@@ -2057,6 +2222,23 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_KIND_ACTION:
     SEQ_LCD_PrintString("push");  // momentary — press the encoder to fire
     return;
+  case PROC_KIND_GEN_RANGE_LO:
+  case PROC_KIND_GEN_RANGE_HI:
+  case PROC_KIND_GEN_RATE:
+  case PROC_KIND_GEN_DEPTH:
+    // Dashes pre-ENGAGE (mirrors the stock PITCHGEN page's "Lo:--  Hi:--  R:---" idiom) —
+    // else fall through to the generic %3d map (PROC_FMT_DEFAULT) below.
+    if( !SEQ_UI_PROC_GenGet(track) ) { SEQ_LCD_PrintString("--- "); return; }
+    break;
+  case PROC_KIND_GEN_CONTOUR: {
+    static const char *const cn[4] = { "Uni", "Lo ", "Hi ", "Tri" };
+    if( !SEQ_UI_PROC_GenGet(track) ) { SEQ_LCD_PrintString("--- "); return; }
+    SEQ_LCD_PrintFormattedString("%-4s", cn[v & 0x03]);
+    return;
+  }
+  case PROC_KIND_GEN_WINDOW:
+    SEQ_LCD_PrintFormattedString("Q%d/4", (int)v + 1); // which quarter of the 64-step loop
+    return;
   default: break; // CC / ECHO_REP / CM_STR / SCALE -> fmt map below (SCALE = numeric index)
   }
   switch( p->fmt ) {
@@ -2131,11 +2313,12 @@ static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
     SEQ_LCD_PrintString("BYP");
   }
   // Plane cue (G2): when the focused row has a 2nd plane, name the current one at the far
-  // right — ‹/› flips it. "OPER" (dials) vs the 2nd plane's identity (Robotize = "LOOP").
+  // right — ‹/› flips it. "OPER" (dials) vs the 2nd plane's identity (per-face name).
   if( SEQ_UI_PROC_HasPlane2(slot) ) {
     SEQ_LCD_CursorSet(75, 0);
-    SEQ_LCD_PrintFormattedString("%-4s", (ui_proc_plane == 0) ? "OPER"
-      : (proc_rows[slot].face2 == PROC_FACE_ROBOLOOP) ? "LOOP" : "CFG");
+    const char *plane2_name = (proc_rows[slot].face2 == PROC_FACE_ROBOLOOP) ? "LOOP"
+      : (proc_rows[slot].face2 == PROC_FACE_PITCHGEN_STEPS) ? "STEP" : "CFG";
+    SEQ_LCD_PrintFormattedString("%-4s", (ui_proc_plane == 0) ? "OPER" : plane2_name);
   }
 
   // Pitch readout: next to the Deg dial (cell 6, col 30) show the note the current
@@ -2225,6 +2408,34 @@ static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
     }
   }
 
+  // Right screen line 1: PitchGen — target identity + engaged state + a "Up/Dn=STEPS"
+  // discoverability hint on OPERATE; the window range + lock count on STEPS.
+  if( SEQ_UI_PROC_IsPitchGen(slot) ) {
+    SEQ_LCD_CursorSet(40, 1);
+    u8 instr = SEQ_UI_PROC_GenInstr(track);
+    seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+    if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_PITCHGEN_STEPS ) {
+      u8 locked = 0;
+      if( g ) {
+        int i;
+        for(i=0; i<16; ++i)
+          if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
+            ++locked;
+      }
+      SEQ_LCD_PrintFormattedString("Steps %2d-%-3d locked:%-2d",
+        proc_gen_step_window*16 + 1, proc_gen_step_window*16 + 16, locked);
+    } else if( g && SEQ_GENERATOR_IsEngaged(track, instr) ) {
+      if( seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum )
+        SEQ_LCD_PrintFormattedString("D%-2d ENGAGED   Up/Dn=STEPS", instr + 1);
+      else
+        SEQ_LCD_PrintString("ENGAGED       Up/Dn=STEPS");
+    } else if( g ) {
+      SEQ_LCD_PrintString("disengaged  dblTap=ENGAGE");
+    } else {
+      SEQ_LCD_PrintString("dbl-tap B-row = ENGAGE");
+    }
+  }
+
   return 0; // no error
 }
 
@@ -2280,6 +2491,13 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
     // tool) — fresh random for that bar, others locked. Only on the LOOP plane.
     else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_ROBOLOOP && pc < 16 ) {
       SEQ_ROBOTIZE_RerollBar(track, pc);
+    }
+    // PitchGen STEPS face: GP row = LOCK toggle for the current 16-step WINDOW (Win selects
+    // which quarter of the 64-step loop). No-op pre-ENGAGE (no slot to lock steps on).
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_PITCHGEN_STEPS && pc < 16 ) {
+      seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
+      if( g )
+        SEQ_GENERATOR_LockToggle(track, SEQ_UI_PROC_GenInstr(track), proc_gen_step_window*16 + pc);
     }
     return 1; // swallow either way
   }
@@ -3733,6 +3951,26 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	    }
 	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, (char *)SEQ_UI_PROC_SlotName(slot),
 	               bypassed ? "  bypassed" : "   enabled");
+	  } else if( proc_rows[slot].rowkind == PROC_ROW_GENERATOR ) {
+	    // Generator row: ENGAGE <-> DISENGAGE — a pool-slot alloc/stop, not a CC flip.
+	    // DISENGAGE keeps the slot + loop (config preserved, same spirit as bypass);
+	    // ENGAGE (re-)allocates and seeds via SEQ_GENERATOR_Engage, surfacing its own
+	    // failure reasons (pool full / bad track / no Note layer assigned) like the
+	    // stock PITCHGEN page does.
+	    u8 instr = SEQ_UI_PROC_GenInstr(visible_track);
+	    if( SEQ_GENERATOR_IsEngaged(visible_track, instr) ) {
+	      SEQ_GENERATOR_Disengage(visible_track, instr);
+	      SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", "disengaged");
+	    } else {
+	      s32 r = SEQ_GENERATOR_Engage(visible_track, instr, SEQ_UI_PROC_GenParLayer(visible_track));
+	      switch( r ) {
+	      case 0:  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", "   ENGAGED"); break;
+	      case -1: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "PitchGen", "pool full"); break;
+	      case -2: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "PitchGen", "bad trk/line"); break;
+	      case -3: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "PitchGen", "need Note layer"); break;
+	      default: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "PitchGen", "ENGAGE failed");
+	      }
+	    }
 	  } else if( slot == SEQ_CORE_CHORDMASK_SLOT ) {
 	    u8 mode = SEQ_CC_Get(visible_track, SEQ_CC_MODE);
 	    u8 newmode = (mode == SEQ_CORE_TRKMODE_ChordMask)
@@ -5569,8 +5807,8 @@ s32 SEQ_UI_LED_Handler(void)
       // rack, even at strength 0, so you see the filter before dialling into it.
       // Groove's shape is its 16-step template lane (below). Any other focused row has
       // no 16-object surface -> dark. Guard the stack read to the ChordMask row: an
-      // emission row (Echo/Groove/LFO/Robotize) has no stack slot and must never index
-      // seq_processor_stack[..][row] out of bounds.
+      // emission/generator row (Echo/Groove/LFO/Robotize/PitchGen) has no stack slot and
+      // must never index seq_processor_stack[..][row] out of bounds.
       u16 gp = 0x0000;
       if( ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT ) {
         u8 vt = SEQ_UI_VisibleTrackGet();
@@ -5611,6 +5849,17 @@ s32 SEQ_UI_LED_Handler(void)
           gp |= (1u << i);
         if( SEQ_CC_Get(vt, SEQ_CC_ROBOTIZE_LOOP_CYCLES) && ui_cursor_flash )
           gp &= ~(1u << SEQ_UI_PROC_RoboPlayingAnchor(vt)); // wink the playhead
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_PITCHGEN_STEPS ) {
+        // PitchGen STEPS: LOCK state for the current 16-step window — lit = locked.
+        // Dark throughout pre-ENGAGE (no slot, nothing to lock).
+        u8 vt = SEQ_UI_VisibleTrackGet();
+        seq_generator_t *g = SEQ_UI_PROC_GenGet(vt);
+        if( g ) {
+          int i;
+          for(i=0; i<16; ++i)
+            if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
+              gp |= (1u << i);
+        }
       }
       ui_gp_leds = gp;
     }
