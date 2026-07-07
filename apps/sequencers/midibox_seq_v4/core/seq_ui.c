@@ -1450,6 +1450,10 @@ typedef struct {
   s8           lo, hi;  // logical range (signed for SNIBBLE/GRAVITY)
   s8           deflt;   // encoder-push / bypass target (the pass-through / detent value)
   proc_fmt_t   fmt;     // value display map (DEFAULT = derive from kind)
+  s8           eng;     // engage-seed override, 0 = same as deflt (G2 defaults registry). Only
+                        // needed where "make it audible on first touch" differs from the
+                        // pass-through detent (Groove Intn, LFO Amp, Robotize Note/Vel/Len/Oct)
+                        // — see SEQ_UI_PROC_SeedRowDefaults.
 } proc_param_t;
 
 // The rack is an ordered list of ROWS, not a raw walk of the 4 render-stack slots.
@@ -1497,7 +1501,21 @@ typedef struct {
   const proc_param_t *params2;
   u8                  n_params2;
   proc_face_t         face2;
+  // Optional per-row CUSTOM right-screen readout (line 1) — style/waveform names, engaged
+  // state, loop status, whatever doesn't fit a 4-char cell. NULL = the generic rack draws
+  // nothing extra there (Tension/Limit). Replaces a 7-tenant if-chain (G2 defaults registry).
+  void (*status)(u8 track, u8 slot);
 } proc_row_t;
+
+// Forward decls for proc_rows[]'s .status hooks — defined further down, once their
+// dependencies (SEQ_UI_PROC_CurFace, SEQ_UI_PROC_LfoWaveName, ...) exist.
+static void SEQ_UI_PROC_Status_Pitch(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_ChordMask(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_Groove(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_LFO(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_Robotize(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_PitchGen(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_TrigGen(u8 track, u8 slot);
 
 // Pitch — transpose (Semi/Oct) + force-to-scale (FTS on/off, and the GLOBAL Scale +
 // Root that FTS snaps to). Scale/Root are global (shared by all tracks + the keyboard,
@@ -1556,7 +1574,7 @@ static const proc_param_t proc_params_echo[] = {
 static const proc_param_t proc_params_groove[] = {
   { "Styl", PROC_KIND_GRV_STYLE, SEQ_CC_GROOVE_STYLE, 0,
     (SEQ_GROOVE_NUM_PRESETS + SEQ_GROOVE_NUM_TEMPLATES - 1), 0, PROC_FMT_DEFAULT },
-  { "Intn", PROC_KIND_CC,        SEQ_CC_GROOVE_VALUE, 0, 127, 0, PROC_FMT_DEFAULT },
+  { "Intn", PROC_KIND_CC,        SEQ_CC_GROOVE_VALUE, 0, 127, 0, PROC_FMT_DEFAULT, 32 },
   { "Sync", PROC_KIND_GRV_SYNC,  SEQ_CC_GROOVE_STYLE, 0,   1, 0, PROC_FMT_DEFAULT },
   { "Lane", PROC_KIND_GRV_LANE,  0,                   0,   2, 0, PROC_FMT_DEFAULT },
 };
@@ -1569,7 +1587,7 @@ static const proc_param_t proc_params_groove[] = {
 // stream's controller. The GP row is a waveform PALETTE (tap to pick) — see page_Button.
 static const proc_param_t proc_params_lfo[] = {
   { "Wave", PROC_KIND_LFO_WAVE, SEQ_CC_LFO_WAVEFORM, 0,  25,  0, PROC_FMT_DEFAULT },
-  { "Amp",  PROC_KIND_LFO_AMP,  SEQ_CC_LFO_AMPLITUDE, -128, 127, 0, PROC_FMT_DEFAULT },
+  { "Amp",  PROC_KIND_LFO_AMP,  SEQ_CC_LFO_AMPLITUDE, -128, 127, 0, PROC_FMT_DEFAULT, 96 },
   { "Rate", PROC_KIND_CC,       SEQ_CC_LFO_STEPS,    0, 127, 15, PROC_FMT_PLUS1   },
   { "Phas", PROC_KIND_CC,       SEQ_CC_LFO_PHASE,    0,  99,  0, PROC_FMT_PCT     },
   { "Targ", PROC_KIND_LFO_TARG, SEQ_CC_LFO_ENABLE_FLAGS, 0, 3, 1, PROC_FMT_DEFAULT },
@@ -1582,10 +1600,10 @@ static const proc_param_t proc_params_lfo[] = {
 // the {occ_cc,disable_mask} model can't express, so the row also carries enable_cc).
 static const proc_param_t proc_params_robo_op[] = {
   { "Prob", PROC_KIND_ROBO_PROB, SEQ_CC_ROBOTIZE_PROBABILITY,      0, 31, 0, PROC_FMT_DEFAULT },
-  { "Note", PROC_KIND_CC,        SEQ_CC_ROBOTIZE_NOTE_PROBABILITY, 0, 31, 0, PROC_FMT_DEFAULT },
-  { "Vel",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_VEL_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT },
-  { "Len",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_LEN_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT },
-  { "Oct",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_OCT_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT },
+  { "Note", PROC_KIND_CC,        SEQ_CC_ROBOTIZE_NOTE_PROBABILITY, 0, 31, 0, PROC_FMT_DEFAULT, 5 },
+  { "Vel",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_VEL_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT, 32 },
+  { "Len",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_LEN_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT, 32 },
+  { "Oct",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_OCT_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT, 1 },
   { "Skip", PROC_KIND_CC,        SEQ_CC_ROBOTIZE_SKIP_PROBABILITY, 0, 31, 0, PROC_FMT_DEFAULT },
 };
 // Plane B (LOOP) — the ROBOLOOP bar-anchor machine. Dials Cyc/Pal/Strt/Rot shape the loop
@@ -1650,25 +1668,40 @@ static const proc_param_t proc_params_triggen_steps[] = {
 };
 
 static const proc_row_t proc_rows[] = {
-  { "Pitch",     PROC_ROW_STACK,    SEQ_CORE_PITCH_SLOT,     proc_params_pitch,     6, 0, 0 },
-  { "ChordMask", PROC_ROW_STACK,    SEQ_CORE_CHORDMASK_SLOT, proc_params_chordmask, 2, 0, 0 },
-  { "Tension",   PROC_ROW_STACK,    SEQ_CORE_TENSION_SLOT,   proc_params_tension,   2, 0, 0 },
-  { "Limit",     PROC_ROW_STACK,    SEQ_CORE_LIMIT_SLOT,     proc_params_limit,     2, 0, 0 },
-  { "Echo",      PROC_ROW_EMISSION, 0,                       proc_params_echo,      7,
-    SEQ_CC_ECHO_REPEATS, 0x40 },
-  { "Groove",    PROC_ROW_EMISSION, 0,                       proc_params_groove,    4,
-    SEQ_CC_GROOVE_STYLE, 0x80 },
-  { "LFO",       PROC_ROW_EMISSION, 0,                       proc_params_lfo,       6,
-    SEQ_CC_LFO_WAVEFORM, 0x80 },
-  { "Robotize",  PROC_ROW_EMISSION, 0,                       proc_params_robo_op,   6,
-    SEQ_CC_ROBOTIZE_PROBABILITY, 0, SEQ_CC_ROBOTIZE_ACTIVE,
-    proc_params_robo_loop, 6, PROC_FACE_ROBOLOOP },
-  { "PitchGen",  PROC_ROW_GENERATOR, 0,                      proc_params_pitchgen_op, 6,
-    0, 0, 0,
-    proc_params_pitchgen_steps, 4, PROC_FACE_PITCHGEN_STEPS },
-  { "TrigGen",   PROC_ROW_GENERATOR, 0,                      proc_params_triggen_op, 4,
-    0, 0, 0,
-    proc_params_triggen_steps, 4, PROC_FACE_TRIGGEN_STEPS },
+  { .name = "Pitch",     .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_PITCH_SLOT,
+    .params = proc_params_pitch,     .n_params = 6,
+    .status = SEQ_UI_PROC_Status_Pitch },
+  { .name = "ChordMask", .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_CHORDMASK_SLOT,
+    .params = proc_params_chordmask, .n_params = 2,
+    .status = SEQ_UI_PROC_Status_ChordMask },
+  { .name = "Tension",   .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_TENSION_SLOT,
+    .params = proc_params_tension,   .n_params = 2 },
+  { .name = "Limit",     .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_LIMIT_SLOT,
+    .params = proc_params_limit,     .n_params = 2 },
+  { .name = "Echo",      .rowkind = PROC_ROW_EMISSION,
+    .params = proc_params_echo,      .n_params = 7,
+    .occ_cc = SEQ_CC_ECHO_REPEATS, .disable_mask = 0x40 },
+  { .name = "Groove",    .rowkind = PROC_ROW_EMISSION,
+    .params = proc_params_groove,    .n_params = 4,
+    .occ_cc = SEQ_CC_GROOVE_STYLE, .disable_mask = 0x80,
+    .status = SEQ_UI_PROC_Status_Groove },
+  { .name = "LFO",       .rowkind = PROC_ROW_EMISSION,
+    .params = proc_params_lfo,       .n_params = 6,
+    .occ_cc = SEQ_CC_LFO_WAVEFORM, .disable_mask = 0x80,
+    .status = SEQ_UI_PROC_Status_LFO },
+  { .name = "Robotize",  .rowkind = PROC_ROW_EMISSION,
+    .params = proc_params_robo_op,   .n_params = 6,
+    .occ_cc = SEQ_CC_ROBOTIZE_PROBABILITY, .enable_cc = SEQ_CC_ROBOTIZE_ACTIVE,
+    .params2 = proc_params_robo_loop, .n_params2 = 6, .face2 = PROC_FACE_ROBOLOOP,
+    .status = SEQ_UI_PROC_Status_Robotize },
+  { .name = "PitchGen",  .rowkind = PROC_ROW_GENERATOR,
+    .params = proc_params_pitchgen_op, .n_params = 6,
+    .params2 = proc_params_pitchgen_steps, .n_params2 = 4, .face2 = PROC_FACE_PITCHGEN_STEPS,
+    .status = SEQ_UI_PROC_Status_PitchGen },
+  { .name = "TrigGen",   .rowkind = PROC_ROW_GENERATOR,
+    .params = proc_params_triggen_op,  .n_params = 4,
+    .params2 = proc_params_triggen_steps, .n_params2 = 4, .face2 = PROC_FACE_TRIGGEN_STEPS,
+    .status = SEQ_UI_PROC_Status_TrigGen },
 };
 #define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
 
@@ -1704,12 +1737,6 @@ static u8 SEQ_UI_PROC_IsLFO(u8 row)
   return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_lfo;
 }
 
-// Is rack row `row` the Robotize row? (matches on its primary/OPERATE param list.)
-static u8 SEQ_UI_PROC_IsRobotize(u8 row)
-{
-  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_robo_op;
-}
-
 // Index of the anchor currently playing in Robotize's loop window (matches Reseed's head
 // formula + the running phase), for the LOOP-face LED flash + readout.
 static u8 SEQ_UI_PROC_RoboPlayingAnchor(u8 track)
@@ -1719,12 +1746,6 @@ static u8 SEQ_UI_PROC_RoboPlayingAnchor(u8 track)
   u8 head = (SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LOOP_START)
              + SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LOOP_ROTATE)) % pal;
   return (head + (u8)(seq_core_trk[track].robotize_loop_phase % pal)) % pal;
-}
-
-// Is rack row `row` the PitchGen row? (matches on its primary/OPERATE param list.)
-static u8 SEQ_UI_PROC_IsPitchGen(u8 row)
-{
-  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_pitchgen_op;
 }
 
 // PitchGen target resolution — duplicated verbatim from seq_ui_trkpitchgen.c's static
@@ -2056,6 +2077,11 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
   }
 }
 
+// Forward decl: ParamWrite's headline cases (ECHO_REP/GRV_STYLE/LFO_WAVE/ROBO_PROB) call
+// this on their own 0->on transition; its body (below ParamWrite, once ParamWrite exists
+// to call) writes the row's OTHER dials.
+static void SEQ_UI_PROC_SeedRowDefaults(u8 track, const proc_param_t *headline);
+
 // Write a param's LOGICAL value (already range-clamped by the caller) to its
 // backing — always via SEQ_CC_Set or the processor's own setter, never the slot.
 static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
@@ -2080,19 +2106,11 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     raw = (raw & ~0x3f) | ((u8)v & 0x3f); // preserve the 0x40 disable flag (and never set bit7 — #59)
     SEQ_CC_Set(track, p->cc, raw);
     // Engage-seed: a fresh track's echo feedback params are all 0, which makes the
-    // echo train SILENT (velocity 0%). On the 0->on turn, if the effect is still
-    // unconfigured (echo_velocity == 0), seed the neutral "clean repeat" detents so
-    // dialling Rpt up is immediately audible. Fires once; never overrides shaped values.
-    if( oldcount == 0 && ((u8)v & 0x3f) &&
-        SEQ_CC_Get(track, SEQ_CC_ECHO_VELOCITY) == 0 ) {
-      SEQ_CC_Set(track, SEQ_CC_ECHO_VELOCITY,     20); // 100%
-      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_VELOCITY,  20); // 100% (no decay)
-      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_NOTE,      24); // 0 semitones
-      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_GATELENGTH,20); // 100%
-      SEQ_CC_Set(track, SEQ_CC_ECHO_FB_TICKS,     20); // 100% (constant spacing)
-      SEQ_CC_Set(track, SEQ_CC_ECHO_DELAY,
-                 SEQ_CORE_Echo_MapUserToInternal(8)); // ~16th-note spacing
-    }
+    // echo train SILENT (velocity 0%). On the 0->on turn, seed the row's other dials
+    // (each independently guarded on its own untouched state) so dialling Rpt up is
+    // immediately audible. Fires once per field; never overrides a shaped value.
+    if( oldcount == 0 && ((u8)v & 0x3f) )
+      SEQ_UI_PROC_SeedRowDefaults(track, p);
     break;
   }
   case PROC_KIND_ECHO_DLY:
@@ -2132,10 +2150,10 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     raw = (raw & ~0x3f) | ((u8)v & 0x3f); // preserve sync (0x40) + disable (0x80)
     SEQ_CC_Set(track, p->cc, raw);
     // Engage-seed: turning groove on from off with intensity 0 is SILENT (the VPOS/VNEG
-    // cells resolve to 0). On the 0->on turn, if intensity is still 0, seed a musical
-    // depth so dialling Styl up (or picking a preset) is immediately audible. Fires once.
-    if( oldstyle == 0 && ((u8)v & 0x3f) && SEQ_CC_Get(track, SEQ_CC_GROOVE_VALUE) == 0 )
-      SEQ_CC_Set(track, SEQ_CC_GROOVE_VALUE, 32);
+    // cells resolve to 0). On the 0->on turn, seed a musical depth (Intn's `eng`, guarded
+    // on its own untouched state) so dialling Styl up (or picking a preset) is audible.
+    if( oldstyle == 0 && ((u8)v & 0x3f) )
+      SEQ_UI_PROC_SeedRowDefaults(track, p);
     break;
   }
   case PROC_KIND_GRV_SYNC: {
@@ -2152,19 +2170,11 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     u8 oldwave = raw & 0x3f;
     raw = (raw & 0x80) | ((u8)v & 0x3f); // set waveform, preserve the 0x80 disable bit
     SEQ_CC_Set(track, p->cc, raw);
-    // Engage-seed: on the 0->on turn, give a fresh/neutral LFO a musical baseline so
-    // dialling Wave up is immediately audible. A fresh track inits amplitude to raw 0
-    // (logical -128) and a centred one sits at 128 (0 depth) — both mean "no positive
-    // depth set", so seed +96 unless the user already has a positive depth. Also set a
-    // known target (Vel on, free-CC off) and a 16-step cycle. Fires once per re-engage.
-    if( oldwave == 0 && ((u8)v & 0x3f) ) {
-      if( SEQ_CC_Get(track, SEQ_CC_LFO_AMPLITUDE) <= 128 )
-        SEQ_CC_Set(track, SEQ_CC_LFO_AMPLITUDE, 128 + 96);         // ~+96 depth
-      u8 f = SEQ_CC_Get(track, SEQ_CC_LFO_ENABLE_FLAGS) & ~0x1e;    // clear NOTE|VEL|LEN|CC
-      SEQ_CC_Set(track, SEQ_CC_LFO_ENABLE_FLAGS, f | (1 << 2) | (1 << 5)); // VEL on, EXTRA_CC_OFF on
-      if( SEQ_CC_Get(track, SEQ_CC_LFO_STEPS) == 0 )
-        SEQ_CC_Set(track, SEQ_CC_LFO_STEPS, 15);                    // 16-step cycle
-    }
+    // Engage-seed: on the 0->on turn, give a fresh/neutral LFO a musical baseline (each
+    // dial independently guarded on its own untouched state — see SeedRowDefaults) so
+    // dialling Wave up is immediately audible.
+    if( oldwave == 0 && ((u8)v & 0x3f) )
+      SEQ_UI_PROC_SeedRowDefaults(track, p);
     break;
   }
   case PROC_KIND_LFO_AMP:
@@ -2189,14 +2199,13 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     SEQ_CC_Set(track, p->cc, (u8)v); // overall probability 0..31
     // Engage: robotize is gated on `active AND probability>0`. Turning Prob up arms
     // active, and — since the per-dimension probabilities have nothing to move unless the
-    // matching RANGE is non-zero — seeds musical default ranges (Note/Vel/Len/Oct) if
-    // still 0. The ranges live on the stock FX-Robotize page for finer control.
+    // matching RANGE is non-zero — seeds musical default ranges (Note/Vel/Len/Oct, each
+    // independently guarded on its own untouched state) if still 0. Skip is deliberately
+    // left unseeded (its `eng` is unset). The ranges also live on the stock FX-Robotize
+    // page for finer control.
     if( v > 0 ) {
       SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_ACTIVE, 1);
-      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_NOTE) == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_NOTE, 5);
-      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_VEL)  == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_VEL, 32);
-      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LEN)  == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_LEN, 32);
-      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_OCT)  == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_OCT, 1);
+      SEQ_UI_PROC_SeedRowDefaults(track, p);
     }
     break;
   }
@@ -2268,6 +2277,47 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
   default: // CC, CM_STR
     SEQ_CC_Set(track, p->cc, (u8)v);
     break;
+  }
+}
+
+// G2 defaults registry: seed a freshly-engaged row's OTHER dials (params[1..n-1] — index 0
+// is the headline the caller just wrote, e.g. Rpt/Styl/Wave/Prob, already correct) from the
+// table instead of a hand-written literal block per tenant. `eng` (falling back to `deflt`
+// when 0) is the seed value; a seed that resolves to 0 is a true pass-through with nothing
+// to make audible, so it's skipped. Each field is independently guarded on its own backing
+// still reading "untouched" — this is a genuine tightening, not just a refactor: Echo's old
+// gate checked ONLY Velocity before blindly overwriting all six dials, and LFO's Target had
+// no guard at all (always reset to Vel on every re-engage); both now respect a field the
+// user already shaped, the same way Robotize's per-field checks always did.
+static void SEQ_UI_PROC_SeedRowDefaults(u8 track, const proc_param_t *headline)
+{
+  u8 row;
+  for(row = 0; row < PROC_NUM_ROWS; ++row)
+    if( proc_rows[row].params == headline )
+      break;
+  if( row >= PROC_NUM_ROWS )
+    return;
+
+  const proc_param_t *params = proc_rows[row].params;
+  u8 n = proc_rows[row].n_params;
+  u8 i;
+  for(i = 1; i < n; ++i) {
+    const proc_param_t *p = &params[i];
+    if( p->kind == PROC_KIND_ACTION )
+      continue; // momentary — nothing to seed
+
+    s32 seed = p->eng ? p->eng : p->deflt;
+    if( !seed )
+      continue; // true pass-through already — nothing to make audible
+
+    // "Still untouched" reads as raw CC==0 for every kind here except LFO_AMP: its raw-0
+    // boot state decodes to logical -128 (not 0), and ANY non-positive depth — not just a
+    // literal 0 — still wants the seed (matches the amplitude dial's own original guard).
+    u8 untouched = (p->kind == PROC_KIND_LFO_AMP)
+      ? (SEQ_CC_Get(track, p->cc) <= 128)
+      : (SEQ_CC_Get(track, p->cc) == 0);
+    if( untouched )
+      SEQ_UI_PROC_ParamWrite(track, p, seed);
   }
 }
 
@@ -2451,150 +2501,140 @@ static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
     SEQ_LCD_PrintFormattedString("%-4s", (ui_proc_plane == 0) ? "OPER" : plane2_name);
   }
 
-  // Pitch readout: next to the Deg dial (cell 6, col 30) show the note the current
-  // scale degree lands on — the tonic walked Deg degrees (Deg 0 = root, +2 = the 3rd…),
-  // via the same WalkScale the transpose uses. Full scale name on the right screen (the
-  // "Scle" cell only shows the index; the name doesn't fit a cell).
-  if( slot == SEQ_CORE_PITCH_SLOT ) {
-    u8 rsel = seq_core_global_scale_root_selection;
-    u8 root_pc = (rsel == 0) ? seq_core_keyb_scale_root : (u8)(rsel - 1);
-    s32 dn = SEQ_SCALE_WalkScale((u8)(60 + (root_pc % 12)), seq_core_global_scale,
-                                 root_pc, seq_core_global_scale_transpose);
-    static const char *const pcn[12] = {
-      "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-    SEQ_LCD_CursorSet(30, 1);
-    SEQ_LCD_PrintFormattedString(">%-3s", pcn[dn % 12]);
-    SEQ_LCD_CursorSet(40, 1);
-    SEQ_LCD_PrintFormattedString("Scale: %s", SEQ_SCALE_NameGet(seq_core_global_scale));
-  }
-
-  // Right screen line 1: ChordMask's CUSTOM readout — the 12-PC target set as note
-  // names. In Self mode it's the editable static mask (tap the GP row); otherwise the
-  // live chord on the source bus. "M:" = bus-derived, "M*:" = static/self (hand-set).
-  if( slot == SEQ_CORE_CHORDMASK_SLOT ) {
-    const seq_processor_slot_t *cm = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
-    if( cm->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
-      u8 self = (cm->bus & 0x04) ? 1 : 0;
-      u16 mask = self
-        ? ((((u16)SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_H) << 8)
-            | SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_L)) & 0x0fff)
-        : (SEQ_MIDI_IN_BusPCSetGet(cm->bus & 0x03) & 0x0fff);
-      SEQ_LCD_CursorSet(40, 1);
-      SEQ_LCD_PrintString(self ? "M*:" : "M:");
-      if( !mask ) {
-        SEQ_LCD_PrintString(" -");
-      } else {
-        static const char *const pc_name[12] = {
-          "C ","C#","D ","D#","E ","F ","F#","G ","G#","A ","A#","B " };
-        int pc;
-        for(pc=0; pc<12; ++pc)
-          if( mask & (1 << pc) )
-            SEQ_LCD_PrintFormattedString(" %s", pc_name[pc]);
-      }
-    }
-  }
-
-  // Right screen line 1: Groove's CUSTOM readout — the selected style's name and, for a
-  // custom template, which lane the GP row is painting; presets read "(ro)" (paint the
-  // GP row only on a custom slot), off reads "(off)".
-  if( SEQ_UI_PROC_IsGroove(slot) ) {
-    u8 style = SEQ_CC_Get(track, SEQ_CC_GROOVE_STYLE) & 0x3f;
-    SEQ_LCD_CursorSet(40, 1);
-    SEQ_LCD_PrintFormattedString("%-12s ", SEQ_GROOVE_NameGet(style));
-    if( !style )
-      SEQ_LCD_PrintString("(off)");
-    else if( style < SEQ_GROOVE_NUM_PRESETS )
-      SEQ_LCD_PrintString("(ro)");
-    else
-      SEQ_LCD_PrintFormattedString("paint %s",
-        (proc_groove_paint_lane == 0) ? "Dly"
-        : (proc_groove_paint_lane == 1) ? "Len" : "Vel");
-  }
-
-  // Right screen line 1: LFO's CUSTOM readout — waveform (full), target, and cycle length.
-  // The GP row is the waveform palette; this names what's selected + where it's routed.
-  if( SEQ_UI_PROC_IsLFO(slot) ) {
-    u8 wave = SEQ_CC_Get(track, SEQ_CC_LFO_WAVEFORM) & 0x3f;
-    s32 targ = SEQ_UI_PROC_ParamRead(track, &proc_params_lfo[4]); // 0=Note 1=Vel 2=Len 3=CC
-    SEQ_LCD_CursorSet(40, 1);
-    SEQ_LCD_PrintFormattedString("LFO %-4s >%-4s x%dst",
-      SEQ_UI_PROC_LfoWaveName(wave),
-      (targ == 0) ? "Note" : (targ == 1) ? "Vel" : (targ == 2) ? "Len" : "CC",
-      (int)SEQ_CC_Get(track, SEQ_CC_LFO_STEPS) + 1);
-  }
-
-  // Right screen line 1: Robotize — a "‹/› LOOP" discoverability hint on the OPERATE plane,
-  // the live loop status (cycles / palette / playing anchor) on the LOOP plane.
-  if( SEQ_UI_PROC_IsRobotize(slot) ) {
-    SEQ_LCD_CursorSet(40, 1);
-    if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_ROBOLOOP ) {
-      u8 cyc = SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LOOP_CYCLES);
-      SEQ_LCD_PrintFormattedString("Cyc%-2d Pal%-2d play b%-2d",
-        cyc, SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_PALETTE_LENGTH),
-        cyc ? (SEQ_UI_PROC_RoboPlayingAnchor(track) + 1) : 0);
-    } else {
-      SEQ_LCD_PrintFormattedString("robotize %-3s  Up/Dn=LOOP",
-        SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_ACTIVE) ? "on" : "off");
-    }
-  }
-
-  // Right screen line 1: PitchGen — target identity + engaged state + a "Up/Dn=STEPS"
-  // discoverability hint on OPERATE; the window range + lock count on STEPS.
-  if( SEQ_UI_PROC_IsPitchGen(slot) ) {
-    SEQ_LCD_CursorSet(40, 1);
-    u8 instr = SEQ_UI_PROC_GenInstr(track);
-    seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
-    if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_PITCHGEN_STEPS ) {
-      u8 locked = 0;
-      if( g ) {
-        int i;
-        for(i=0; i<16; ++i)
-          if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
-            ++locked;
-      }
-      SEQ_LCD_PrintFormattedString("Steps %2d-%-3d locked:%-2d",
-        proc_gen_step_window*16 + 1, proc_gen_step_window*16 + 16, locked);
-    } else if( g && SEQ_GENERATOR_IsEngaged(track, instr) ) {
-      if( seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum )
-        SEQ_LCD_PrintFormattedString("D%-2d ENGAGED   Up/Dn=STEPS", instr + 1);
-      else
-        SEQ_LCD_PrintString("ENGAGED       Up/Dn=STEPS");
-    } else if( g ) {
-      SEQ_LCD_PrintString("disengaged  dblTap=ENGAGE");
-    } else {
-      SEQ_LCD_PrintString("dbl-tap B-row = ENGAGE");
-    }
-  }
-
-  // Right screen line 1: TrigGen (G3) — same shape as PitchGen's, trigger key-space.
-  if( SEQ_UI_PROC_IsTrigGen(slot) ) {
-    SEQ_LCD_CursorSet(40, 1);
-    u8 instr = SEQ_UI_PROC_GenInstr(track);
-    seq_generator_t *g = SEQ_GENERATOR_TrgGet(track, instr);
-    if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_TRIGGEN_STEPS ) {
-      u8 locked = 0;
-      if( g ) {
-        int i;
-        for(i=0; i<16; ++i)
-          if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
-            ++locked;
-      }
-      SEQ_LCD_PrintFormattedString("Steps %2d-%-3d locked:%-2d",
-        proc_gen_step_window*16 + 1, proc_gen_step_window*16 + 16, locked);
-    } else if( g && SEQ_GENERATOR_TrgIsEngaged(track, instr) ) {
-      if( seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum )
-        SEQ_LCD_PrintFormattedString("D%-2d ENGAGED   Up/Dn=STEPS", instr + 1);
-      else
-        SEQ_LCD_PrintString("ENGAGED       Up/Dn=STEPS");
-    } else if( g ) {
-      SEQ_LCD_PrintString("disengaged  dblTap=ENGAGE");
-    } else {
-      SEQ_LCD_PrintString("dbl-tap B-row = ENGAGE");
-    }
-  }
+  // Right screen line 1: per-row CUSTOM readout (style/waveform names, engaged state,
+  // loop status...) — dispatched through the row's own .status hook instead of a
+  // 7-tenant if-chain (G2 defaults registry). Tension/Limit have none (NULL).
+  if( proc_rows[slot].status )
+    proc_rows[slot].status(track, slot);
 
   return 0; // no error
 }
+
+// Pitch's .status: next to the Deg dial (cell 6, col 30) show the note the current scale
+// degree lands on — the tonic walked Deg degrees (Deg 0 = root, +2 = the 3rd…), via the
+// same WalkScale the transpose uses. Full scale name on the right screen (the "Scle" cell
+// only shows the index; the name doesn't fit a cell).
+static void SEQ_UI_PROC_Status_Pitch(u8 track, u8 slot)
+{
+  u8 rsel = seq_core_global_scale_root_selection;
+  u8 root_pc = (rsel == 0) ? seq_core_keyb_scale_root : (u8)(rsel - 1);
+  s32 dn = SEQ_SCALE_WalkScale((u8)(60 + (root_pc % 12)), seq_core_global_scale,
+                               root_pc, seq_core_global_scale_transpose);
+  static const char *const pcn[12] = {
+    "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+  SEQ_LCD_CursorSet(30, 1);
+  SEQ_LCD_PrintFormattedString(">%-3s", pcn[dn % 12]);
+  SEQ_LCD_CursorSet(40, 1);
+  SEQ_LCD_PrintFormattedString("Scale: %s", SEQ_SCALE_NameGet(seq_core_global_scale));
+}
+
+// ChordMask's .status: the 12-PC target set as note names. In Self mode it's the editable
+// static mask (tap the GP row); otherwise the live chord on the source bus. "M:" =
+// bus-derived, "M*:" = static/self (hand-set).
+static void SEQ_UI_PROC_Status_ChordMask(u8 track, u8 slot)
+{
+  const seq_processor_slot_t *cm = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
+  if( cm->id != SEQ_PROCESSOR_ID_CHORD_MASK )
+    return;
+  u8 self = (cm->bus & 0x04) ? 1 : 0;
+  u16 mask = self
+    ? ((((u16)SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_H) << 8)
+        | SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_L)) & 0x0fff)
+    : (SEQ_MIDI_IN_BusPCSetGet(cm->bus & 0x03) & 0x0fff);
+  SEQ_LCD_CursorSet(40, 1);
+  SEQ_LCD_PrintString(self ? "M*:" : "M:");
+  if( !mask ) {
+    SEQ_LCD_PrintString(" -");
+  } else {
+    static const char *const pc_name[12] = {
+      "C ","C#","D ","D#","E ","F ","F#","G ","G#","A ","A#","B " };
+    int pc;
+    for(pc=0; pc<12; ++pc)
+      if( mask & (1 << pc) )
+        SEQ_LCD_PrintFormattedString(" %s", pc_name[pc]);
+  }
+}
+
+// Groove's .status: the selected style's name and, for a custom template, which lane the
+// GP row is painting; presets read "(ro)" (paint the GP row only on a custom slot), off
+// reads "(off)".
+static void SEQ_UI_PROC_Status_Groove(u8 track, u8 slot)
+{
+  u8 style = SEQ_CC_Get(track, SEQ_CC_GROOVE_STYLE) & 0x3f;
+  SEQ_LCD_CursorSet(40, 1);
+  SEQ_LCD_PrintFormattedString("%-12s ", SEQ_GROOVE_NameGet(style));
+  if( !style )
+    SEQ_LCD_PrintString("(off)");
+  else if( style < SEQ_GROOVE_NUM_PRESETS )
+    SEQ_LCD_PrintString("(ro)");
+  else
+    SEQ_LCD_PrintFormattedString("paint %s",
+      (proc_groove_paint_lane == 0) ? "Dly"
+      : (proc_groove_paint_lane == 1) ? "Len" : "Vel");
+}
+
+// LFO's .status: waveform (full name), target, and cycle length. The GP row is the
+// waveform palette; this names what's selected + where it's routed.
+static void SEQ_UI_PROC_Status_LFO(u8 track, u8 slot)
+{
+  u8 wave = SEQ_CC_Get(track, SEQ_CC_LFO_WAVEFORM) & 0x3f;
+  s32 targ = SEQ_UI_PROC_ParamRead(track, &proc_params_lfo[4]); // 0=Note 1=Vel 2=Len 3=CC
+  SEQ_LCD_CursorSet(40, 1);
+  SEQ_LCD_PrintFormattedString("LFO %-4s >%-4s x%dst",
+    SEQ_UI_PROC_LfoWaveName(wave),
+    (targ == 0) ? "Note" : (targ == 1) ? "Vel" : (targ == 2) ? "Len" : "CC",
+    (int)SEQ_CC_Get(track, SEQ_CC_LFO_STEPS) + 1);
+}
+
+// Robotize's .status: a "‹/› LOOP" discoverability hint on the OPERATE plane, the live
+// loop status (cycles / palette / playing anchor) on the LOOP plane.
+static void SEQ_UI_PROC_Status_Robotize(u8 track, u8 slot)
+{
+  SEQ_LCD_CursorSet(40, 1);
+  if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_ROBOLOOP ) {
+    u8 cyc = SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LOOP_CYCLES);
+    SEQ_LCD_PrintFormattedString("Cyc%-2d Pal%-2d play b%-2d",
+      cyc, SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_PALETTE_LENGTH),
+      cyc ? (SEQ_UI_PROC_RoboPlayingAnchor(track) + 1) : 0);
+  } else {
+    SEQ_LCD_PrintFormattedString("robotize %-3s  Up/Dn=LOOP",
+      SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_ACTIVE) ? "on" : "off");
+  }
+}
+
+// Shared by PitchGen/TrigGen's .status (G2/G3) — identical shape (target identity +
+// engaged state + a "Up/Dn=STEPS" discoverability hint on OPERATE; window range + lock
+// count on STEPS), differing only in which key-space's Get/IsEngaged pair to call.
+static void SEQ_UI_PROC_Status_Gen(u8 track, u8 slot, u8 is_trg)
+{
+  SEQ_LCD_CursorSet(40, 1);
+  u8 instr = SEQ_UI_PROC_GenInstr(track);
+  seq_generator_t *g = is_trg ? SEQ_GENERATOR_TrgGet(track, instr) : SEQ_GENERATOR_Get(track, instr);
+  proc_face_t steps_face = is_trg ? PROC_FACE_TRIGGEN_STEPS : PROC_FACE_PITCHGEN_STEPS;
+  u8 engaged = is_trg ? SEQ_GENERATOR_TrgIsEngaged(track, instr) : SEQ_GENERATOR_IsEngaged(track, instr);
+  if( SEQ_UI_PROC_CurFace(slot) == steps_face ) {
+    u8 locked = 0;
+    if( g ) {
+      int i;
+      for(i=0; i<16; ++i)
+        if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
+          ++locked;
+    }
+    SEQ_LCD_PrintFormattedString("Steps %2d-%-3d locked:%-2d",
+      proc_gen_step_window*16 + 1, proc_gen_step_window*16 + 16, locked);
+  } else if( g && engaged ) {
+    if( seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum )
+      SEQ_LCD_PrintFormattedString("D%-2d ENGAGED   Up/Dn=STEPS", instr + 1);
+    else
+      SEQ_LCD_PrintString("ENGAGED       Up/Dn=STEPS");
+  } else if( g ) {
+    SEQ_LCD_PrintString("disengaged  dblTap=ENGAGE");
+  } else {
+    SEQ_LCD_PrintString("dbl-tap B-row = ENGAGE");
+  }
+}
+static void SEQ_UI_PROC_Status_PitchGen(u8 track, u8 slot) { SEQ_UI_PROC_Status_Gen(track, slot, 0); }
+static void SEQ_UI_PROC_Status_TrigGen(u8 track, u8 slot)  { SEQ_UI_PROC_Status_Gen(track, slot, 1); }
 
 // Page buttons. The B-row (rack), GP encoders (operate), and GP-row mask are all
 // global sel_view==PROC intercepts; the GP button ROW is the read-only mask, so
