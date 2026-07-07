@@ -3469,6 +3469,32 @@ those two:
   (PitchGen/Robotize/TrigGen) was investigated (2026-07-08) and found NOT to be the same
   primitive — parked as a hybrid idea in §10, not pursued.
 
+**2026-07-08 — G2: fold ChordMask/Groove/LFO's GP-row surfaces into the face hook (SHIPPED,
+by-ear GO; committed main 90b9bc5e).**
+The last of the four follow-ups left after the formatter/defaults registry. Robotize/
+PitchGen/TrigGen's bespoke GP-row surfaces already dispatched by descriptor id
+(`proc_face_t`/`.face2`) — but only for a row's OPTIONAL SECOND plane. ChordMask's Self-mask
+paint, Groove's paintable 16-step shape, and LFO's waveform palette live on each row's ONLY
+plane, so they'd never had a face id to hang on — their GP-row button and LED branches were
+still ad-hoc identity checks (`ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT`, `IsGroove`/
+`IsLFO` params-pointer compares).
+- **`proc_row_t.face1`**, paralleling `face2` — a face on the PRIMARY plane. `SEQ_UI_PROC_
+  CurFace` now reads `face1` on plane 0 / `face2` on plane 1 (previously hardcoded
+  `PROC_FACE_NONE` for plane 0, since only the 2nd plane had ever carried a face). New ids:
+  `PROC_FACE_CHORDMASK_SELF`, `PROC_FACE_GROOVE_PAINT`, `PROC_FACE_LFO_PALETTE`.
+- **Pure identity-check swap** — every inner behavior (mask toggle, lane paint, palette
+  pick, the Self/bus-mode branch) is untouched; only the OUTER gate moved from a slot-index
+  or params-pointer compare to `SEQ_UI_PROC_CurFace(slot) == PROC_FACE_*`, the same idiom
+  the 2nd-plane faces already used. `IsGroove`/`IsLFO` had no other callers and were deleted.
+- **Deliberately left alone**: ChordMask's B-row double-tap bypass gesture (still its own
+  `slot ==` check) — that's the row's engage/disengage gesture, orthogonal to the GP-row
+  paint surface, out of scope for this fold.
+- **Verdict → G2's four named follow-ups are now all closed** (formatter/defaults registry,
+  the note-display velocity-gate bug, the step-register consolidation investigation, and
+  this fold). By-ear GO — "everything working the same as far as I can tell," which is
+  exactly the bar for a pure dispatch-mechanism swap. No new open G2 thread named; next
+  rack work is whatever the ear asks for from here, not a queued follow-up.
+
 ---
 
 ## 10. Open questions (unresolved forks)
