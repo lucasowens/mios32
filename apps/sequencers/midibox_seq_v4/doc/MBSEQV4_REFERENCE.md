@@ -704,6 +704,27 @@ That axis is kept faithful by one of **two mechanisms**:
     on either is visible on the other. Adding a processor = a `proc_param_t[]` + a
     `proc_rows[]` entry (+ a face branch only for a bespoke surface; a new rowkind only if
     the backing is neither a stack slot nor a CC).
+  - **G3 — `seq_generator_t` grew a TRIGGER mode, not a separate engine.** The struct's old
+    alignment-pad byte is now `trg_layer_p1`: `0` = PITCH mode (every pre-G3 slot, unchanged
+    behavior); `N>0` = TRIGGER mode, writes trigger-layer `N-1` via `SEQ_TRG_Set` instead of
+    a Note par-layer via `SEQ_PAR_Set` (mirrors `seq_trg_assignments_t`'s own
+    "0=unassigned,index+1" convention). `range_min` doubles as **density** (0..127 on-
+    probability) in TRIGGER mode; `range_max`/`contour_shape` are unused there — no
+    analogue for a boolean. `mutation_depth>=127` = reroll (Bernoulli @ density, same
+    threshold pitch's full-reroll uses), 1..126 = flip (toggle) — a coarser, deliberately
+    flagged divergence from pitch's continuous ±depth. **Two independent pool key-spaces**
+    share one physical 64-slot pool: `pool_index` (pitch, unchanged) and `pool_index_trg`
+    (new) — so a melodic track can run a pitch-gen AND a trigger-gen at once (both always
+    resolve instrument 0, so a shared key-space would have made them mutually exclusive on
+    exactly that case). `SEQ_GENERATOR_Trg*` twins (`Get/IsEngaged/Disengage/Bounce/Anchor/
+    Snap/LockToggle/Roll`) consult the second table; `Get/IsEngaged/...` (pitch) are
+    unchanged. `TrackSnapshot`/`Restore`/`Clear`/`EngagedCount`/`SlotSet` all walk **both**
+    key-spaces now — required for UNDO/FEARLESS SWITCHING/CAPTURE/PHRASES to cover
+    trigger-mode slots too (they all route through these four). `SEQ_GENERATOR_Roll`
+    gained a mode filter (`trg_layer_p1`-based) it didn't need before G3 — once two engines
+    share one pool, an unfiltered per-track walk would reroll the sibling engine too. The
+    rack row (`TrigGen`) targets the track's assigned **Gate** trigger layer
+    (`trg_assignments.gate`), same choice PitchGen made for Note.
 - **BAKE into the captured notes** when preserving the flag would couple the frozen copy to
   *mutable global state* — **FORCE_SCALE** (2026-06-07). The snap was emission-time and
   `SEQ_CORE_BakeForceScale(track)` reproduced `noteLimit(forceScale(transpose(raw)))` at

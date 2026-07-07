@@ -3367,6 +3367,62 @@ before the trigger machine needs the same slot shape.
   is the *same* register-primitive at bar-granularity — worth a consolidation look once the
   trigger engine exists and the shared shape is undeniable across three implementations.
 
+**2026-07-07 — G3: the trigger Turing machine, extending `seq_generator.c` with an
+independent key-space (SHIPPED, by-ear GO — "so far so good"; committed main).**
+The genuine gap named a few turns earlier: GENERATE's five types (Eucl/CA/Poly/Sub/Lsys)
+are static one-shot fills — nothing writes triggers *live*. This builds a second Turing
+engine reusing PitchGen's proven mechanics (lock/rate/depth/anchor/roll/bounce), now
+writing 0/1 into a trigger layer instead of a note value into a par-layer.
+- **Extended the existing pool rather than building a separate one (recon-driven call).**
+  `seq_generator.c`'s pool is wired into UNDO (`SEQ_CORE_JournalArm`), FEARLESS SWITCHING,
+  the CAPTURE ring, and slot save/restore — ~10 call sites in `seq_core.c`, all via
+  `TrackSnapshot`/`TrackRestore`/`TrackClear`/`TrackEngagedCount`. A standalone pool would
+  need all of that re-wired or would silently leave "ghost" engaged generators after an
+  UNDO/switch — a real bug, not a hypothetical. Extending inherits it for free.
+- **A size-neutral mode discriminator.** Renamed the struct's old alignment-pad byte to
+  `trg_layer_p1`: `0` = PITCH mode (every existing slot defaults here via memset — zero
+  behavior change for the shipped pitch generator, confirmed by matching every refactored
+  function's body against the original); `N>0` = TRIGGER mode, targets trigger-layer
+  `N-1` (the same "0=unassigned,index+1" convention `seq_trg_assignments_t` already uses
+  elsewhere). `range_min` doubles as **density** in TRIGGER mode; `range_max`/
+  `contour_shape` go unused there — no analogue for a boolean (a coin flip has no
+  distribution shape), an honest divergence, not an oversight.
+- **Independent key-space, built in full (user's call).** A single melodic track always
+  resolves generator instrument 0 for both kinds, so a shared key space would make
+  pitch-gen and trigger-gen mutually exclusive on exactly the highest-value case — one
+  track, decoupled pitch + rhythm. Added a second sparse index (`pool_index_trg`), same
+  shared physical 64-slot pool underneath. ~8 (track,instrument)-keyed lookups
+  (Get/IsEngaged/Disengage/Bounce/Anchor/Snap/LockToggle/Roll) got a `Trg`-prefixed twin,
+  refactored through a shared static core parameterized by which index table to consult —
+  the pointer-based helpers (Lock/MultGet/Set) needed no twin. **`Roll` gained a real
+  correctness fix**: it used to walk the whole pool by track membership only, which would
+  have rerolled the sibling engine's slots too once both shared one pool; now mode-filtered.
+  `TrackSnapshot`/`Restore`/`Clear`/`EngagedCount`/`SlotSet` all extended to cover **both**
+  key-spaces — otherwise the exact "ghost generator" risk extending the pool was meant to
+  avoid would have reappeared, just scoped to the new key-space instead.
+- **Mutation semantics for a boolean register.** `mutation_depth>=127` = reroll (Bernoulli
+  @ density, same threshold pitch uses for full-reroll); 1..126 = flip (toggle) — no
+  graduated "how far" is possible for a 2-state value, so the continuous ±depth window
+  collapses to one outcome across that whole range. Coarser than pitch's dial, flagged not
+  hidden. Both draws share the slot's own xorshift stream — same deterministic/seekable
+  discipline as pitch.
+- **The rack row (TrigGen, row 10) mirrors PitchGen's shape exactly**: B-row double-tap =
+  ENGAGE⟷DISENGAGE (no dial here has clean 0-means-off semantics either); Plane A OPERATE
+  (Dens/Rate/Dpth/Roll, no Contour); Plane B STEPS (`PROC_FACE_TRIGGEN_STEPS`: Win + GP-row
+  LOCK toggle + Anc/Snp/Bnc). Target resolves the track's assigned **Gate** trigger layer
+  (mirrors PitchGen targeting the semantically-loaded Note layer). `PROC_ROW_GENERATOR` is
+  now shared by two tenants living in different key-spaces — disambiguated by row identity
+  (`IsTrigGen`/`IsPitchGen`) at each of RowState/double-tap/GP-button/GP-LED/readout, the
+  same shape every prior tenant's branches already take. Plan:
+  `doc/plans/2026-07-07-g3-trigger-turing.md`.
+- **Verdict → the fusion-instrument thesis has its second half.** By-ear GO covered
+  TrigGen alone (engage/sweep/lock/anchor/snap/bounce) and — the actual point — PitchGen
+  and TrigGen running **simultaneously on one melodic track**, pitch and rhythm decoupled.
+  +1344B flash total, +256B RAM (one new 16×16 index table). Left: the noted consolidation
+  candidate (PitchGen's step-register and Robotize's bar-anchor register are now provably
+  the same primitive at two granularities, with a 3rd data point); G2's formatter/defaults
+  registry and folding the bespoke CUSTOM branches into the `face` hook.
+
 ---
 
 ## 10. Open questions (unresolved forks)
