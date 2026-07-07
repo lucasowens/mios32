@@ -1478,6 +1478,11 @@ typedef enum {
   PROC_FACE_ROBOLOOP,       // Robotize's LOOP plane: the 16 bar-anchors + reseed/freeze/reroll
   PROC_FACE_PITCHGEN_STEPS, // PitchGen's STEPS plane: a 16-step LOCK window into the 64-step loop
   PROC_FACE_TRIGGEN_STEPS,  // G3 TrigGen's STEPS plane: same shape, trigger key-space
+  // Faces on a row's PRIMARY (only) plane — these tenants never had a 2nd plane to reach
+  // via ‹/›, so their bespoke GP-row surface rides the row's face1 instead of face2.
+  PROC_FACE_CHORDMASK_SELF, // ChordMask's Self mask: GP1-12 toggle PCs (bus mode == Self only)
+  PROC_FACE_GROOVE_PAINT,   // Groove's paintable 16-step shape (custom templates only)
+  PROC_FACE_LFO_PALETTE,    // LFO's waveform palette: tap a GP button to pick a shape
 } proc_face_t;
 
 typedef struct {
@@ -1486,6 +1491,10 @@ typedef struct {
   u8                  stack_slot;    // PROC_ROW_STACK only
   const proc_param_t *params;
   u8                  n_params;
+  // Bespoke face on the PRIMARY (only) plane — NONE for a plain dial bank. Parallels face2
+  // below but for rows that never had a 2nd plane to reach via ‹/› (ChordMask/Groove/LFO's
+  // GP-row paint surfaces). See SEQ_UI_PROC_CurFace.
+  proc_face_t         face1;
   // PROC_ROW_EMISSION only: the CC carrying the row's occupancy (count/style in bits
   // 0..5) and, if non-zero, the bit that BYPASSES the effect while keeping its config.
   // This is the one generalisation of G1.5's ECHO_REPEATS hardcode — RowState + the
@@ -1672,7 +1681,7 @@ static const proc_row_t proc_rows[] = {
     .params = proc_params_pitch,     .n_params = 6,
     .status = SEQ_UI_PROC_Status_Pitch },
   { .name = "ChordMask", .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_CHORDMASK_SLOT,
-    .params = proc_params_chordmask, .n_params = 2,
+    .params = proc_params_chordmask, .n_params = 2, .face1 = PROC_FACE_CHORDMASK_SELF,
     .status = SEQ_UI_PROC_Status_ChordMask },
   { .name = "Tension",   .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_TENSION_SLOT,
     .params = proc_params_tension,   .n_params = 2 },
@@ -1683,11 +1692,11 @@ static const proc_row_t proc_rows[] = {
     .occ_cc = SEQ_CC_ECHO_REPEATS, .disable_mask = 0x40 },
   { .name = "Groove",    .rowkind = PROC_ROW_EMISSION,
     .params = proc_params_groove,    .n_params = 4,
-    .occ_cc = SEQ_CC_GROOVE_STYLE, .disable_mask = 0x80,
+    .occ_cc = SEQ_CC_GROOVE_STYLE, .disable_mask = 0x80, .face1 = PROC_FACE_GROOVE_PAINT,
     .status = SEQ_UI_PROC_Status_Groove },
   { .name = "LFO",       .rowkind = PROC_ROW_EMISSION,
     .params = proc_params_lfo,       .n_params = 6,
-    .occ_cc = SEQ_CC_LFO_WAVEFORM, .disable_mask = 0x80,
+    .occ_cc = SEQ_CC_LFO_WAVEFORM, .disable_mask = 0x80, .face1 = PROC_FACE_LFO_PALETTE,
     .status = SEQ_UI_PROC_Status_LFO },
   { .name = "Robotize",  .rowkind = PROC_ROW_EMISSION,
     .params = proc_params_robo_op,   .n_params = 6,
@@ -1705,14 +1714,6 @@ static const proc_row_t proc_rows[] = {
 };
 #define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
 
-// Is rack row `row` the Groove row? Compared by params-pointer so it's reorder-safe
-// (no hardcoded index — the ChordMask/stack-slot compares only hold while the 4 stack
-// rows keep slot order; the emission rows have no such guarantee).
-static u8 SEQ_UI_PROC_IsGroove(u8 row)
-{
-  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_groove;
-}
-
 // The active groove template's SELECTED paint lane (Dly/Len/Vel), as a read-only 16-cell
 // array for the GP-row LED display — presets included (const). NULL when the style is
 // off/out of range. num_steps tiling is ignored here: the paint surface addresses all 16.
@@ -1729,12 +1730,6 @@ static const s8 *SEQ_UI_PROC_GrooveLane(u8 track)
   case 2:  return g->add_step_velocity;
   default: return g->add_step_delay;
   }
-}
-
-// Is rack row `row` the LFO row? (params-pointer compare, reorder-safe — as IsGroove.)
-static u8 SEQ_UI_PROC_IsLFO(u8 row)
-{
-  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_lfo;
 }
 
 // Index of the anchor currently playing in Robotize's loop window (matches Reseed's head
@@ -1859,13 +1854,14 @@ static u8 SEQ_UI_PROC_HasPlane2(u8 row)
 }
 
 // The bespoke face of the row's CURRENT plane (PROC_FACE_NONE for a plain dial bank).
-// Only the 2nd plane carries a face today (Robotize's LOOP). Drives the custom GP-row /
-// GP-button / right-screen branches by descriptor id, not a per-slot compare.
+// Drives the custom GP-row / GP-button / right-screen branches by descriptor id, not a
+// per-slot compare. Plane 0 (the only plane most rows have) can carry a face too
+// (ChordMask/Groove/LFO's paint surfaces) — face2 is reached only via the ‹/› toggle.
 static proc_face_t SEQ_UI_PROC_CurFace(u8 row)
 {
   if( row >= PROC_NUM_ROWS )
     return PROC_FACE_NONE;
-  return (ui_proc_plane == 1) ? proc_rows[row].face2 : PROC_FACE_NONE;
+  return (ui_proc_plane == 1) ? proc_rows[row].face2 : proc_rows[row].face1;
 }
 
 // Execute a PROC_KIND_ACTION (fired by the encoder PUSH — the one non-snap push). The
@@ -2651,7 +2647,7 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
     u8 track = SEQ_UI_VisibleTrackGet();
     u8 pc = (u8)(button - SEQ_UI_BUTTON_GP1); // 0..15
     const seq_processor_slot_t *cm = &seq_processor_stack[track][SEQ_CORE_CHORDMASK_SLOT];
-    if( ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT && pc < 12 &&
+    if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_CHORDMASK_SELF && pc < 12 &&
         cm->id == SEQ_PROCESSOR_ID_CHORD_MASK && cm->enabled && (cm->bus & 0x04) ) {
       u16 mask = ((u16)SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_H) << 8)
                | SEQ_CC_Get(track, SEQ_CC_CHORDMASK_MASK_L);
@@ -2664,7 +2660,7 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
     // (VPOS). First paint expands the template to a full 16-step bar and, if intensity
     // is still 0, seeds it so the painted step is immediately audible. Edits persist to
     // MBSEQ_G.V4 on page exit (proc_groove_dirty).
-    else if( SEQ_UI_PROC_IsGroove(ui_focused_proc_slot) ) {
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_GROOVE_PAINT ) {
       u8 style = SEQ_CC_Get(track, SEQ_CC_GROOVE_STYLE) & 0x3f;
       if( style >= SEQ_GROOVE_NUM_PRESETS &&
           style < (SEQ_GROOVE_NUM_PRESETS + SEQ_GROOVE_NUM_TEMPLATES) ) {
@@ -2681,7 +2677,7 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
     }
     // LFO GP row = the waveform PALETTE. GP1..16 pick the palette shape; routed through
     // the Wave param so it engage-seeds depth/target just like turning the Wave dial.
-    else if( SEQ_UI_PROC_IsLFO(ui_focused_proc_slot) && pc < 16 ) {
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_LFO_PALETTE && pc < 16 ) {
       SEQ_UI_PROC_ParamWrite(track, &proc_params_lfo[0], lfo_wave_palette[pc]);
     }
     // Robotize LOOP face: GP row = the 16 bar-anchors. Tap = REROLL that slot (the molding
@@ -6028,7 +6024,7 @@ s32 SEQ_UI_LED_Handler(void)
       // emission/generator row (Echo/Groove/LFO/Robotize/PitchGen) has no stack slot and
       // must never index seq_processor_stack[..][row] out of bounds.
       u16 gp = 0x0000;
-      if( ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT ) {
+      if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_CHORDMASK_SELF ) {
         u8 vt = SEQ_UI_VisibleTrackGet();
         const seq_processor_slot_t *p = &seq_processor_stack[vt][SEQ_CORE_CHORDMASK_SLOT];
         if( p->id == SEQ_PROCESSOR_ID_CHORD_MASK && p->enabled )
@@ -6036,7 +6032,7 @@ s32 SEQ_UI_LED_Handler(void)
              ? ((((u16)SEQ_CC_Get(vt, SEQ_CC_CHORDMASK_MASK_H) << 8)
                  | SEQ_CC_Get(vt, SEQ_CC_CHORDMASK_MASK_L)) & 0x0fff)
              : (SEQ_MIDI_IN_BusPCSetGet(p->bus & 0x03) & 0x0fff);
-      } else if( SEQ_UI_PROC_IsGroove(ui_focused_proc_slot) ) {
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_GROOVE_PAINT ) {
         // Groove: the 16-step template shape for the SELECTED lane (Dly/Len/Vel) — a
         // lit key = that step's cell is non-zero. Custom templates are paintable (GP
         // buttons toggle); presets show read-only; off = dark.
@@ -6047,7 +6043,7 @@ s32 SEQ_UI_LED_Handler(void)
             if( lane[i] )
               gp |= (1u << i);
         }
-      } else if( SEQ_UI_PROC_IsLFO(ui_focused_proc_slot) ) {
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_LFO_PALETTE ) {
         // LFO: the waveform palette — light the one key whose palette entry matches the
         // current waveform (bit-7 disable masked off). No match (a non-palette waveform
         // set via the stock page) -> dark.
