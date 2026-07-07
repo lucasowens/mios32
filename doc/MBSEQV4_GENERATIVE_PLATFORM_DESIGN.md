@@ -3423,6 +3423,51 @@ writing 0/1 into a trigger layer instead of a note value into a par-layer.
   the same primitive at two granularities, with a 3rd data point); G2's formatter/defaults
   registry and folding the bespoke CUSTOM branches into the `face` hook.
 
+**2026-07-08 — G2: the formatter/defaults registry, collapsing 6 tenants' duplication
+(SHIPPED, by-ear GO; committed main 1d336c9c).**
+Named as a follow-up at every milestone since G1.5 and re-deferred five times running
+(G1.6/G1.7/G2 part1/G2 part2/G3). A grounded survey first (not from memory — CLAUDE.md's
+own rule) found the rack already had a real partial registry (`proc_param_t.deflt`,
+`proc_fmt_t`/`fmt`), just under-used in two spots — not a stub, so the scope narrowed to
+those two:
+- **Defaults.** Each tenant hardcoded its own first-engage seed values inline at its
+  `ParamWrite` 0→on transition, duplicating numbers that already sat in that row's
+  `deflt` field (only consumed by `SlotReset`/push-to-default before this). Added
+  `proc_param_t.eng` — an engage-seed override, 0 = same as `deflt` — needed only where
+  "make it audible on first touch" differs from the pass-through detent (Groove Intn=32,
+  LFO Amp=+96, Robotize Note/Vel/Len/Oct=5/32/32/1; Echo's 6 dials all happened to have
+  `eng==deflt` already). One shared `SEQ_UI_PROC_SeedRowDefaults(track, headline)` finds
+  its row by `params`-pointer identity (the same reorder-safe idiom `IsGroove`/`IsLFO`
+  already used) and walks `params[1..n-1]` (index 0 = the headline just written by the
+  caller), skipping `PROC_KIND_ACTION` and any param whose seed resolves to 0.
+- **The "untouched" test is per-field, not a proxy** — a genuine tightening, not just a
+  refactor. Echo's old gate checked ONLY Velocity before blindly overwriting all six
+  dials (a hand-tuned FbNote sitting at raw 0-adjacent-but-Velocity-still-0 would have
+  been silently stomped); LFO's Target had no guard at all (always reset to Vel on every
+  re-engage, discarding a deliberate Len/CC choice). Both now respect any dial the user
+  already shaped, matching the guarantee the original comments claimed but didn't fully
+  implement. One kind needs its own predicate: `PROC_KIND_LFO_AMP`'s raw-0 boot state
+  decodes to logical −128, and any non-positive depth (not just literal 0) still wants
+  the seed, so it checks `raw <= 128` instead of `raw == 0`.
+- **Status-line dispatch.** The right-screen "line 1" custom readout (style/waveform
+  names, engaged state, loop status) was a 7-way if-chain (`slot==PITCH_SLOT`,
+  `slot==CHORDMASK_SLOT`, `IsGroove`/`IsLFO`/`IsRobotize`/`IsPitchGen`/`IsTrigGen`) with
+  zero table backing. Added `proc_row_t.status`, a per-row function pointer (NULL for
+  Tension/Limit, which never had custom text); each tenant's block became its own named
+  function (PitchGen/TrigGen share one body, parameterized by which key-space's
+  Get/IsEngaged pair to call — the same shared-shape idiom the rest of the rack already
+  uses). `proc_rows[]` moved to designated initializers now that `.status` is sparse
+  (cleaner than threading zeros through 11 positional fields). `IsRobotize`/`IsPitchGen`
+  had no other callers and were deleted; `IsGroove`/`IsLFO`/`IsTrigGen` remain (used by
+  `RowState` + GP-row button handlers).
+- **Net effect**: flash size dropped ~248B from collapsing the duplication (not a
+  feature — a side effect of deleting dead literal copies).
+- **Verdict → G2 continues.** By-ear GO on the flashed firmware across all 7 tenants'
+  engage-seeding and right-screen readouts. Left: folding the bespoke CUSTOM GP-row/
+  button branches (ChordMask/Groove/LFO still hand-roll theirs) into the `face` hook now
+  that Robotize proved the mechanism; the step-register consolidation candidate
+  (PitchGen/Robotize/TrigGen).
+
 ---
 
 ## 10. Open questions (unresolved forks)
