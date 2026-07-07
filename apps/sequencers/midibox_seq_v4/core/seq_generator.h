@@ -84,6 +84,11 @@
 #define SEQ_GENERATOR_DEFAULT_DEPTH     120   // near-full reroll
 #define SEQ_GENERATOR_DEFAULT_CONTOUR     3   // TRIANGLE (mid-biased)
 
+// G3 — TRIGGER mode (a slot with trg_layer_p1 != 0). Density seeds `range_min` (which
+// doubles as the ongoing reroll odds in this mode) at ENGAGE. ~50%: a legible starting
+// rhythm, neither empty nor solid.
+#define SEQ_GENERATOR_DEFAULT_DENSITY     64
+
 // MULT codes (4-bit). Codes 0..3 are the live UI cycle; 4..15 are reserved
 // (treated as default 1× by the mutate path) so future expansion is non-
 // breaking. Default = 2 (1× — phase G behavior preserved).
@@ -121,12 +126,26 @@ typedef struct {
                      //   0   = no change (frozen)
                      //   127 = full reroll (= phase E behavior)
                      //   N   = perturb existing by ±N semitones, clamped
+                     // G3 TRIGGER mode reinterprets this on a boolean: 127 = reroll
+                     //   (Bernoulli draw @ density), 1..126 = flip (toggle 0<->1) — no
+                     //   graduated "how far" is possible for a 2-state value, so the
+                     //   continuous ±N window collapses to a single flip outcome across
+                     //   that whole range. Coarser than pitch's dial; a deliberate,
+                     //   flagged divergence, not an oversight.
   u8 contour_shape;  // seq_generator_contour_t — biases full-reroll only
   u8 anchor_valid;   // 1 = anchor[] holds a captured snapshot (phase H)
-  u8 par_layer;      // target Note par-layer this gen writes into. Drum track:
-                     //   the shared link_par_layer_note. Normal track: the
-                     //   cursor's Note layer at ENGAGE (cursor-aware target).
-  u8 reserved[1];    // pad — keep the header 4B-aligned ahead of the u32 seed
+  u8 par_layer;      // PITCH mode target Note par-layer. Drum track: the shared
+                     //   link_par_layer_note. Normal track: the cursor's Note layer at
+                     //   ENGAGE (cursor-aware target). Ignored in TRIGGER mode.
+  u8 trg_layer_p1;   // G3 — mode discriminator, repurposing the old alignment-pad byte
+                     //   (struct size unchanged). 0 = PITCH mode (every existing slot
+                     //   defaults here via memset — no behavior change). N>0 = TRIGGER
+                     //   mode: writes trigger-layer (N-1) via SEQ_TRG_Set instead of a
+                     //   Note par-layer ("0=unassigned,N=index+1" mirrors
+                     //   seq_trg_assignments_t's own convention). In TRIGGER mode,
+                     //   range_min doubles as DENSITY (0..127 on-probability for a
+                     //   reroll draw); range_max/contour_shape are unused — no analogue
+                     //   for a boolean (a coin flip has no distribution shape).
   u32 seed;          // per-slot xorshift32 stream state (per-track-RNG keystone,
                      //   2026-06-19). Minted fresh from the global RNG at ENGAGE
                      //   (preserves today's fresh-line feel) and advanced by every
@@ -259,10 +278,12 @@ extern void SEQ_GENERATOR_ReSimOnlyTrackSet(u8 track);
 // generator audible without waiting for the next wrap.
 extern void SEQ_GENERATOR_ForceRewrite(u8 track);
 
-// Phase G ROLL gesture: for every engaged generator on `track`, reroll every
-// *unlocked* step in its loop (locked steps preserved verbatim) and rewrite
-// the source par-layer. Independent of measure-boundary cadence and of the
-// rate dial — this is the on-demand reroll button. Honors contour_shape.
+// Phase G ROLL gesture: for every engaged PITCH-mode generator on `track` (G3:
+// mode-filtered — TRIGGER-mode slots on the same track have their own
+// SEQ_GENERATOR_TrgRoll and are NOT touched here), reroll every *unlocked*
+// step in its loop (locked steps preserved verbatim) and rewrite the source
+// par-layer. Independent of measure-boundary cadence and of the rate dial —
+// this is the on-demand reroll button. Honors contour_shape.
 // Returns the number of generators rolled (0 if none engaged on track).
 extern u8 SEQ_GENERATOR_Roll(u8 track);
 
@@ -333,6 +354,42 @@ extern s32 SEQ_GENERATOR_ForceMutate(u8 track, u8 instrument);
 // and write the loop into the source par-layer. Sets render-dirty so phase D
 // picks it up.
 extern void SEQ_GENERATOR_Tick(void);
+
+
+/////////////////////////////////////////////////////////////////////////////
+// G3 — TRIGGER mode: the same engine (pool, mutate-on-measure-boundary, lock/
+// anchor/snap/roll), writing a 0/1 Turing loop into a trigger layer instead of
+// a Note par-layer. Lives in a SEPARATE (track,instrument) key space from the
+// PITCH generator above — a single melodic track always resolves instrument 0
+// for both, and a shared key space would make pitch-gen and trigger-gen
+// mutually exclusive on exactly the highest-value case (one track, decoupled
+// pitch + rhythm). Same physical 64-slot pool underneath either way. The
+// pointer-based helpers (LockGet/LockSet/MultGet/MultSet) need no twin — a
+// caller resolves the pointer via Get or TrgGet first, then calls those as-is.
+/////////////////////////////////////////////////////////////////////////////
+
+// Engage/re-engage a TRIGGER-mode generator writing trigger-layer `trg_layer`
+// (already-resolved index, e.g. trg_assignments.gate - 1) for (track,
+// instrument). `density` seeds range_min (the ongoing reroll odds) on a FRESH
+// engage only — re-engage keeps the dialled density. Returns 0 on success, -1
+// pool full, -2 bad track/instrument, -3 trg_layer out of range for this
+// track's geometry (including "no layer assigned" — the caller resolves that
+// to an out-of-range index the same way PitchGen's UI collapses a missing
+// Note-layer cursor).
+extern s32 SEQ_GENERATOR_EngageTrigger(u8 track, u8 instrument, u8 trg_layer, u8 density);
+
+extern seq_generator_t *SEQ_GENERATOR_TrgGet(u8 track, u8 instrument);
+extern s32 SEQ_GENERATOR_TrgIsEngaged(u8 track, u8 instrument);
+extern s32 SEQ_GENERATOR_TrgDisengage(u8 track, u8 instrument);
+extern s32 SEQ_GENERATOR_TrgBounce(u8 track, u8 instrument);
+extern s32 SEQ_GENERATOR_TrgAnchor(u8 track, u8 instrument);
+extern s32 SEQ_GENERATOR_TrgSnap(u8 track, u8 instrument);
+extern s32 SEQ_GENERATOR_TrgLockToggle(u8 track, u8 instrument, u8 step);
+
+// Track-wide ROLL, TRIGGER slots only (mode-filtered — see SEQ_GENERATOR_Roll,
+// which now filters to PITCH-only for the same reason: once both modes share
+// the pool, an unfiltered walk would roll the other kind too).
+extern u8 SEQ_GENERATOR_TrgRoll(u8 track);
 
 
 #endif /* _SEQ_GENERATOR_H */

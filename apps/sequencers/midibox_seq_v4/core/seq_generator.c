@@ -31,6 +31,7 @@
 #include "seq_core.h"
 #include "seq_cc.h"
 #include "seq_par.h"
+#include "seq_trg.h"
 #include "seq_pattern.h"
 #include "seq_layer.h"
 #include "seq_random.h"
@@ -52,8 +53,14 @@ static seq_generator_t CCM_SECTION pool[SEQ_GENERATOR_POOL_SIZE];
 // wandering out of the phrase-drift signal without touching seq_pattern_dirty.
 u8 seq_generator_in_automutate = 0;
 
-// Sparse map: pool index per (track, instrument), 0xFF = unallocated.
+// Sparse map: pool index per (track, instrument), 0xFF = unallocated. PITCH key space.
 static u8 CCM_SECTION pool_index[SEQ_CORE_NUM_TRACKS][SEQ_GENERATOR_INSTRUMENTS];
+
+// G3 — a SECOND, independent sparse map for TRIGGER-mode slots, same shared pool[]
+// underneath. A single melodic track always resolves instrument 0 for both kinds, so a
+// shared key space would make pitch-gen and trigger-gen mutually exclusive on exactly the
+// highest-value case (one track, decoupled pitch + rhythm).
+static u8 CCM_SECTION pool_index_trg[SEQ_CORE_NUM_TRACKS][SEQ_GENERATOR_INSTRUMENTS];
 
 // The generator one-deep auto-undo is now part of the unified action journal
 // (seq_core.c, §10(a2)): ENGAGE arms it via SEQ_CORE_JournalArm and the GP2
@@ -147,6 +154,25 @@ static u8 perturb_pitch(u32 *seed, u8 existing, u8 lo, u8 hi, u8 depth)
 }
 
 
+// G3 TRIGGER mode — the boolean equivalents of reroll_pitch/perturb_pitch. A coin flip has
+// no distribution shape, so there's no contour-equivalent here: reroll_trigger is a plain
+// Bernoulli draw from the slot's own xorshift stream (same discipline as pitch's reroll).
+static u8 reroll_trigger(u32 *seed, u8 density)
+{
+  u32 r = SEQ_RANDOM_GenRangeXorshift(seed, 0, 126); // 127 buckets, matches density's 0..127
+  return (r < density) ? 1 : 0;
+}
+
+// "Perturb" for a 2-state value is just a flip — no graduated ±depth is possible (see the
+// header's mutation_depth doc). Deterministic (no RNG draw): the per-step ordered-stream
+// invariant only requires THIS slot's own replay be consistent, which a zero-draw flip
+// still is (same as a locked step consuming zero draws).
+static u8 flip_trigger(u8 existing)
+{
+  return existing ? 0 : 1;
+}
+
+
 // Phase H — map a 4-bit MULT code to the rate-gate threshold. Comparison in
 // mutate_loop is `r >= threshold` with r ∈ [0, 254]. MULT_DEFAULT (code 2)
 // gives the phase G threshold rate*2 unchanged; codes 0 / 1 / 3 give the
@@ -197,7 +223,11 @@ static void mutate_loop(seq_generator_t *g)
     if( r >= threshold )
       continue;
 
-    if( g->mutation_depth >= 127 ) {
+    if( g->trg_layer_p1 ) { // G3 TRIGGER mode
+      g->loop[i] = (g->mutation_depth >= 127)
+        ? reroll_trigger(&g->seed, g->range_min /* density */)
+        : flip_trigger(g->loop[i]);
+    } else if( g->mutation_depth >= 127 ) {
       g->loop[i] = reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
     } else {
       g->loop[i] = perturb_pitch(&g->seed, g->loop[i], g->range_min, g->range_max,
@@ -217,23 +247,46 @@ static void roll_loop(seq_generator_t *g)
   for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i) {
     if( SEQ_GENERATOR_LockGet(g, i) )
       continue;
-    g->loop[i] = reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
+    g->loop[i] = g->trg_layer_p1 // G3
+      ? reroll_trigger(&g->seed, g->range_min /* density */)
+      : reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
   }
 }
 
 
-// Transcribe loop[] → Note par-layer `par_layer` of the *target* (track,
-// instrument). Track-type-agnostic: on a drum track dst_instr selects the drum
-// line and par_layer is the shared link_par_layer_note; on a normal track
-// dst_instr is 0 and par_layer is the cursor's chosen Note layer — SEQ_PAR
-// addressing is the same (track, step, par_layer, instrument). Tiles when
-// num_p_steps > LOOP_LEN. Sets render-dirty on the target track. Returns 0 on
-// success, -1 if par_layer is out of range (or the track has zero steps).
+// Transcribe loop[] → the *target* (track, instrument)'s destination — a Note
+// par-layer `par_layer` in PITCH mode, or trigger-layer (g->trg_layer_p1 - 1)
+// in G3 TRIGGER mode (par_layer is ignored there). Track-type-agnostic: on a
+// drum track dst_instr selects the drum line; on a normal track dst_instr is 0.
+// Tiles when the track's real step count > LOOP_LEN. Sets render-dirty on the
+// target track. Returns 0 on success, -1 if the target layer is out of range
+// (or the track has zero steps).
 static s32 write_loop_to(const seq_generator_t *g, u8 dst_track, u8 dst_instr,
                          u8 par_layer)
 {
   if( dst_track >= SEQ_CORE_NUM_TRACKS ) return -1;
   if( dst_instr >= SEQ_GENERATOR_INSTRUMENTS ) return -1;
+
+  if( g->trg_layer_p1 ) { // G3 TRIGGER mode
+    u8 trg_layer = g->trg_layer_p1 - 1;
+    if( trg_layer >= SEQ_TRG_NumLayersGet(dst_track) ) return -1;
+    if( dst_instr >= SEQ_TRG_NumInstrumentsGet(dst_track) ) return -1;
+
+    s32 num_t_steps_s = SEQ_TRG_NumStepsGet(dst_track);
+    if( num_t_steps_s <= 0 ) return -1;
+    u16 num_t_steps = (u16)num_t_steps_s;
+
+    u16 step;
+    for(step=0; step<num_t_steps; ++step) {
+      u8 v = g->loop[step & (SEQ_GENERATOR_LOOP_LEN - 1)];
+      SEQ_TRG_Set(dst_track, step, trg_layer, dst_instr, v);
+    }
+
+    seq_render_dirty[dst_track] = 1;
+    return 0;
+  }
+
+  // PITCH mode
   if( par_layer >= SEQ_PAR_NumLayersGet(dst_track) ) return -1;
 
   s32 num_p_steps_s = SEQ_PAR_NumStepsGet(dst_track);
@@ -254,20 +307,25 @@ static s32 write_loop_to(const seq_generator_t *g, u8 dst_track, u8 dst_instr,
 // Convenience wrapper: write to the gen's own (track, instrument, par_layer) —
 // the engage / measure-boundary path. Failures here are by construction the
 // "track misconfigured" case which the engage path already screens for.
+// par_layer is simply unused/ignored when the slot is in G3 TRIGGER mode.
 static void write_loop_to_source(const seq_generator_t *g)
 {
   (void)write_loop_to(g, g->track, g->instrument, g->par_layer);
 }
 
 
-// Seed loop[] with an initial reroll across the range (called once at first
-// ENGAGE so the engaged generator is immediately audible without waiting for
-// the next measure). Honors contour; locks aren't relevant — fresh slot.
+// Seed loop[] with an initial reroll (called once at first ENGAGE so the
+// engaged generator is immediately audible without waiting for the next
+// measure). PITCH mode honors contour across [range_min..range_max]; G3
+// TRIGGER mode draws a Bernoulli @ density (range_min). Locks aren't relevant
+// — fresh slot.
 static void seed_loop(seq_generator_t *g)
 {
   u8 i;
   for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i)
-    g->loop[i] = reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
+    g->loop[i] = g->trg_layer_p1
+      ? reroll_trigger(&g->seed, g->range_min /* density */)
+      : reroll_pitch(&g->seed, g->range_min, g->range_max, g->contour_shape);
 }
 
 
@@ -295,8 +353,110 @@ s32 SEQ_GENERATOR_Init(u32 mode)
   // also lets a runtime re-init (mode-1 reload) start clean.
   memset(pool, 0, sizeof(pool));
   memset(pool_index, 0xFF, sizeof(pool_index));
+  memset(pool_index_trg, 0xFF, sizeof(pool_index_trg));
   memset(last_seen_step, 0xFF, sizeof(last_seen_step));
   return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// G3 — shared cores for the (track,instrument)-keyed lookups, parameterized by
+// WHICH index table to consult. Each has two thin public wrappers below: the
+// existing name (PITCH, pool_index — behavior byte-for-byte unchanged from
+// before G3) and a "Trg"-prefixed twin (TRIGGER, pool_index_trg). Both draw
+// from the SAME physical pool[] — only the sparse map differs.
+/////////////////////////////////////////////////////////////////////////////
+
+static seq_generator_t *get_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS || instrument >= SEQ_GENERATOR_INSTRUMENTS )
+    return NULL;
+  u8 ix = idx[track][instrument];
+  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return NULL;
+  if( !pool[ix].in_use ) return NULL;
+  return &pool[ix];
+}
+
+static s32 is_engaged_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument)
+{
+  seq_generator_t *g = get_from(idx, track, instrument);
+  return (g && g->engaged) ? 1 : 0;
+}
+
+static s32 disengage_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument)
+{
+  seq_generator_t *g = get_from(idx, track, instrument);
+  if( g == NULL ) return -1;
+  g->engaged = 0;
+  return 0;
+}
+
+static s32 bounce_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS || instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -1;
+  u8 ix = idx[track][instrument];
+  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return -1;
+  memset(&pool[ix], 0, sizeof(pool[ix]));
+  idx[track][instrument] = 0xFF;
+  return 0;
+}
+
+static s32 anchor_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument)
+{
+  seq_generator_t *g = get_from(idx, track, instrument);
+  if( g == NULL ) return -1;
+  // fence vs the Tick's mutate on the same slot, or the anchor can capture a
+  // half-mutated loop (#16)
+  portENTER_CRITICAL();
+  memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
+  g->anchor_valid = 1;
+  portEXIT_CRITICAL();
+  return 0;
+}
+
+static s32 snap_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument)
+{
+  seq_generator_t *g = get_from(idx, track, instrument);
+  if( g == NULL ) return -1;
+  if( !g->anchor_valid ) return -2;
+  // fence vs the Tick's mutate+write on the same slot (#16)
+  portENTER_CRITICAL();
+  memcpy(g->loop, g->anchor, SEQ_GENERATOR_LOOP_LEN);
+  write_loop_to_source(g); // audible immediately, not just on the next wrap
+  portEXIT_CRITICAL();
+  return 0;
+}
+
+static s32 locktoggle_from(u8 idx[][SEQ_GENERATOR_INSTRUMENTS], u8 track, u8 instrument, u8 step)
+{
+  if( step >= SEQ_GENERATOR_LOOP_LEN ) return -1;
+  seq_generator_t *g = get_from(idx, track, instrument);
+  if( g == NULL ) return -1;
+  u8 next = SEQ_GENERATOR_LockGet(g, step) ? 0 : 1;
+  SEQ_GENERATOR_LockSet(g, step, next);
+  return next;
+}
+
+// Track-wide ROLL core, mode-filtered: walks the whole pool by track membership
+// (as before G3), now also excluding the OTHER mode's slots — once both modes
+// share one pool, an unfiltered walk would roll the sibling engine too.
+static u8 roll_mode(u8 track, u8 want_trigger_mode)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
+  u8 i, n = 0;
+  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
+    seq_generator_t *g = &pool[i];
+    if( !g->in_use || !g->engaged || g->track != track ) continue;
+    if( (g->trg_layer_p1 != 0) != (want_trigger_mode != 0) ) continue;
+    // per-slot fence vs the +4 emission Tick's measure-wrap mutate+write on the
+    // same slot — the seed draw and loop bytes are one ordered stream (#16)
+    portENTER_CRITICAL();
+    roll_loop(g);
+    write_loop_to_source(g);
+    portEXIT_CRITICAL();
+    ++n;
+  }
+  return n;
 }
 
 
@@ -306,24 +466,27 @@ s32 SEQ_GENERATOR_Init(u32 mode)
 
 s32 SEQ_GENERATOR_IsEngaged(u8 track, u8 instrument)
 {
-  if( track >= SEQ_CORE_NUM_TRACKS || instrument >= SEQ_GENERATOR_INSTRUMENTS )
-    return 0;
-  u8 ix = pool_index[track][instrument];
-  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return 0;
-  return pool[ix].engaged ? 1 : 0;
+  return is_engaged_from(pool_index, track, instrument);
+}
+
+s32 SEQ_GENERATOR_TrgIsEngaged(u8 track, u8 instrument)
+{
+  return is_engaged_from(pool_index_trg, track, instrument);
 }
 
 
-// Count this track's allocated (in_use) generator slots — matches what
-// SEQ_GENERATOR_TrackSnapshot will copy. Used by the CAPTURE ring to detect
-// when a track has more slots than the ring caps (incomplete capture -> refuse).
+// Count this track's allocated (in_use) generator slots, BOTH modes — matches
+// what SEQ_GENERATOR_TrackSnapshot will copy. Used by the CAPTURE ring to
+// detect when a track has more slots than the ring caps (incomplete capture
+// -> refuse).
 u8 SEQ_GENERATOR_TrackEngagedCount(u8 track)
 {
   if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
   u8 n = 0, instr;
-  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS; ++instr)
-    if( SEQ_GENERATOR_Get(track, instr) != NULL )
-      ++n;
+  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS; ++instr) {
+    if( SEQ_GENERATOR_Get(track, instr) != NULL ) ++n;
+    if( SEQ_GENERATOR_TrgGet(track, instr) != NULL ) ++n; // G3
+  }
   return n;
 }
 
@@ -348,12 +511,12 @@ void SEQ_GENERATOR_LastSeenStepSet(u8 track, u8 step)
 
 seq_generator_t *SEQ_GENERATOR_Get(u8 track, u8 instrument)
 {
-  if( track >= SEQ_CORE_NUM_TRACKS || instrument >= SEQ_GENERATOR_INSTRUMENTS )
-    return NULL;
-  u8 ix = pool_index[track][instrument];
-  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return NULL;
-  if( !pool[ix].in_use ) return NULL;
-  return &pool[ix];
+  return get_from(pool_index, track, instrument);
+}
+
+seq_generator_t *SEQ_GENERATOR_TrgGet(u8 track, u8 instrument)
+{
+  return get_from(pool_index_trg, track, instrument);
 }
 
 
@@ -448,32 +611,83 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
 }
 
 
-s32 SEQ_GENERATOR_Disengage(u8 track, u8 instrument)
+// G3 — TRIGGER-mode ENGAGE. Parallels SEQ_GENERATOR_Engage above (same pool,
+// same alloc/journal/publish discipline) but validates+targets a trigger
+// layer instead of a Note par-layer, and lives in the SEPARATE pool_index_trg
+// key space so it can run alongside a PITCH generator on the same
+// (track, instrument) — the "decoupled pitch + rhythm on one track" case.
+s32 SEQ_GENERATOR_EngageTrigger(u8 track, u8 instrument, u8 trg_layer, u8 density)
 {
-  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
-  if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -1;
-  u8 ix = pool_index[track][instrument];
-  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return -1;
-  pool[ix].engaged = 0;
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -2;
+  if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
+  if( trg_layer >= SEQ_TRG_NumLayersGet(track) ) return -3;
+
+  u8 ix = pool_index_trg[track][instrument];
+  if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
+    // Re-engage: keep loop + density, adopt the (possibly new) trigger-layer
+    // target, flip engaged on, force a rewrite. Same fence as pitch's re-engage.
+    portENTER_CRITICAL();
+    pool[ix].trg_layer_p1 = trg_layer + 1;
+    pool[ix].engaged = 1;
+    write_loop_to_source(&pool[ix]);
+    portEXIT_CRITICAL();
+    return 0;
+  }
+
+  seq_generator_t *g = alloc_slot();
+  if( g == NULL ) return -1;
+
+  SEQ_CORE_JournalArm(track);
+
+  g->track          = track;
+  g->instrument     = instrument;
+  g->trg_layer_p1   = trg_layer + 1;
+  g->range_min      = density; // doubles as density in TRIGGER mode
+  g->mutation_rate  = SEQ_GENERATOR_DEFAULT_RATE;
+  g->mutation_depth = SEQ_GENERATOR_DEFAULT_DEPTH;
+  g->seed = SEQ_RANDOM_Gen(0) | 1;
+  seed_loop(g);
+
+  memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
+  g->anchor_valid = 1;
+  memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
+
+  pool_index_trg[track][instrument] = (u8)(g - pool);
+
+  write_loop_to_source(g);
+
+  portENTER_CRITICAL();
+  g->engaged = 1;
+  g->in_use  = 1;
+  portEXIT_CRITICAL();
   return 0;
 }
 
 
+s32 SEQ_GENERATOR_Disengage(u8 track, u8 instrument)
+{
+  return disengage_from(pool_index, track, instrument);
+}
+
+s32 SEQ_GENERATOR_TrgDisengage(u8 track, u8 instrument)
+{
+  return disengage_from(pool_index_trg, track, instrument);
+}
+
+
+// Source already holds the last transcribed loop — nothing to write here.
+// Clear the slot (loop discarded) and the sparse index so a subsequent
+// ENGAGE allocates fresh and reroll-seeds. The undo slot is intentionally
+// left intact: BOUNCE freezes-and-disengages but the user can still UNDO
+// back to pre-engagement (§3 live-safety net).
 s32 SEQ_GENERATOR_Bounce(u8 track, u8 instrument)
 {
-  if( track >= SEQ_CORE_NUM_TRACKS ) return -1;
-  if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -1;
-  u8 ix = pool_index[track][instrument];
-  if( ix == 0xFF || ix >= SEQ_GENERATOR_POOL_SIZE ) return -1;
+  return bounce_from(pool_index, track, instrument);
+}
 
-  // Source already holds the last transcribed loop — nothing to write here.
-  // Clear the slot (loop discarded) and the sparse index so a subsequent
-  // ENGAGE allocates fresh and reroll-seeds. The undo slot is intentionally
-  // left intact: BOUNCE freezes-and-disengages but the user can still UNDO
-  // back to pre-engagement (§3 live-safety net).
-  memset(&pool[ix], 0, sizeof(pool[ix]));
-  pool_index[track][instrument] = 0xFF;
-  return 0;
+s32 SEQ_GENERATOR_TrgBounce(u8 track, u8 instrument)
+{
+  return bounce_from(pool_index_trg, track, instrument);
 }
 
 
@@ -514,6 +728,7 @@ s32 SEQ_GENERATOR_TrackClear(u8 track)
       memset(&pool[i], 0, sizeof(pool[i]));
   }
   memset(pool_index[track], 0xFF, SEQ_GENERATOR_INSTRUMENTS);
+  memset(pool_index_trg[track], 0xFF, SEQ_GENERATOR_INSTRUMENTS); // G3
   return 0;
 }
 
@@ -524,8 +739,36 @@ s32 SEQ_GENERATOR_SlotSet(u8 track, u8 instrument, const seq_generator_t *src)
   if( track >= SEQ_CORE_NUM_TRACKS ) return -2;
   if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
 
-  // Same defensive collapse as Engage: a par_layer the just-loaded geometry
-  // doesn't have falls back to the track's linked Note layer.
+  // G3: a TRIGGER-mode snapshot restores into the SEPARATE trigger key space,
+  // validating the trigger-layer target against the destination track's
+  // CURRENT geometry — the trigger-mode mirror of the PITCH branch's
+  // par_layer collapse below (a geometry change between save and restore
+  // shouldn't crash either mode).
+  if( src->trg_layer_p1 ) {
+    u8 trg_layer = src->trg_layer_p1 - 1;
+    if( trg_layer >= SEQ_TRG_NumLayersGet(track) ) return -3;
+
+    seq_generator_t *g;
+    u8 ix = pool_index_trg[track][instrument];
+    if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
+      g = &pool[ix];
+    } else {
+      g = alloc_slot();
+      if( g == NULL ) return -1;
+      pool_index_trg[track][instrument] = (u8)(g - pool);
+    }
+
+    *g = *src;
+    g->in_use     = 1;
+    g->track      = track;
+    g->instrument = instrument;
+    if( !g->seed )
+      g->seed = SEQ_RANDOM_Gen(0) | 1;
+    return 0;
+  }
+
+  // PITCH mode (unchanged). Same defensive collapse as Engage: a par_layer the
+  // just-loaded geometry doesn't have falls back to the track's linked Note layer.
   u8 par_layer = src->par_layer;
   if( par_layer >= SEQ_PAR_NumLayersGet(track) ) {
     seq_cc_trk_t *tcc = &seq_cc_trk[track];
@@ -569,6 +812,15 @@ u8 SEQ_GENERATOR_TrackSnapshot(u8 track, seq_generator_t *buf, u8 max)
     if( g != NULL )
       buf[count++] = *g;
   }
+  // G3: also snapshot this track's TRIGGER-mode slots, into the SAME buffer —
+  // trg_layer_p1 disambiguates on restore (SlotSet branches on it). Without
+  // this, UNDO/FEARLESS SWITCHING/CAPTURE/PHRASES would silently not cover
+  // trigger generators at all.
+  for(instr=0; instr<SEQ_GENERATOR_INSTRUMENTS && count<max; ++instr) {
+    seq_generator_t *g = SEQ_GENERATOR_TrgGet(track, instr);
+    if( g != NULL )
+      buf[count++] = *g;
+  }
   return count;
 }
 
@@ -599,64 +851,45 @@ void SEQ_GENERATOR_ForceRewrite(u8 track)
 
 u8 SEQ_GENERATOR_Roll(u8 track)
 {
-  if( track >= SEQ_CORE_NUM_TRACKS ) return 0;
-  u8 i, n = 0;
-  for(i=0; i<SEQ_GENERATOR_POOL_SIZE; ++i) {
-    seq_generator_t *g = &pool[i];
-    if( !g->in_use || !g->engaged || g->track != track )
-      continue;
-    // per-slot fence vs the +4 emission Tick's measure-wrap mutate+write on the
-    // same slot — the seed draw and loop bytes are one ordered stream (#16)
-    portENTER_CRITICAL();
-    roll_loop(g);
-    write_loop_to_source(g);
-    portEXIT_CRITICAL();
-    ++n;
-  }
-  return n;
+  return roll_mode(track, 0);
+}
+
+u8 SEQ_GENERATOR_TrgRoll(u8 track)
+{
+  return roll_mode(track, 1);
 }
 
 
 s32 SEQ_GENERATOR_LockToggle(u8 track, u8 instrument, u8 step)
 {
-  if( step >= SEQ_GENERATOR_LOOP_LEN ) return -1;
-  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
-  if( g == NULL ) return -1;
-  u8 next = SEQ_GENERATOR_LockGet(g, step) ? 0 : 1;
-  SEQ_GENERATOR_LockSet(g, step, next);
-  return next;
+  return locktoggle_from(pool_index, track, instrument, step);
+}
+
+s32 SEQ_GENERATOR_TrgLockToggle(u8 track, u8 instrument, u8 step)
+{
+  return locktoggle_from(pool_index_trg, track, instrument, step);
 }
 
 
 s32 SEQ_GENERATOR_Anchor(u8 track, u8 instrument)
 {
-  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
-  if( g == NULL ) return -1;
-  // fence vs the Tick's mutate on the same slot, or the anchor can capture a
-  // half-mutated loop (#16)
-  portENTER_CRITICAL();
-  memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
-  g->anchor_valid = 1;
-  portEXIT_CRITICAL();
-  return 0;
+  return anchor_from(pool_index, track, instrument);
+}
+
+s32 SEQ_GENERATOR_TrgAnchor(u8 track, u8 instrument)
+{
+  return anchor_from(pool_index_trg, track, instrument);
 }
 
 
 s32 SEQ_GENERATOR_Snap(u8 track, u8 instrument)
 {
-  seq_generator_t *g = SEQ_GENERATOR_Get(track, instrument);
-  if( g == NULL ) return -1;
-  if( !g->anchor_valid ) return -2;
-  // fence vs the Tick's mutate+write on the same slot (#16)
-  portENTER_CRITICAL();
-  memcpy(g->loop, g->anchor, SEQ_GENERATOR_LOOP_LEN);
-  // Rewrite source so the snap is audible immediately, not on the next wrap.
-  // SNAP works whether or not the slot is currently engaged — both halves
-  // make sense (engaged + snap = pull back to identity during play;
-  // disengaged + snap = restore the loop for inspection / re-engage).
-  write_loop_to_source(g);
-  portEXIT_CRITICAL();
-  return 0;
+  return snap_from(pool_index, track, instrument);
+}
+
+s32 SEQ_GENERATOR_TrgSnap(u8 track, u8 instrument)
+{
+  return snap_from(pool_index_trg, track, instrument);
 }
 
 

@@ -1411,13 +1411,25 @@ typedef enum {
                       //   dial; ENGAGE is the B-row double-tap instead (PitchGen).
   PROC_KIND_GEN_DEPTH,// PitchGen mutation_depth 0..127 (0=frozen, 127=full reroll) (PitchGen).
   PROC_KIND_GEN_CONTOUR, // PitchGen contour_shape 0..3 (Uni/Lo/Hi/Tri reroll bias) (PitchGen).
-  PROC_KIND_GEN_WINDOW,  // PitchGen GP-row window select 0..3 (which 16-step quarter of the
-                      //   64-step loop the GP row shows/edits). UI-only static, no CC (PitchGen).
+  PROC_KIND_GEN_WINDOW,  // PitchGen/TrigGen shared GP-row window select 0..3 (which 16-step
+                      //   quarter of the 64-step loop the GP row shows/edits). UI-only
+                      //   static, no CC — one shared window across both rows (PitchGen/TrigGen).
+  PROC_KIND_TGEN_DENSITY, // G3 TrigGen density (0..127 on-probability, shown as %). Same
+                      //   struct field as PitchGen's range_min, read via the SEPARATE
+                      //   trigger key-space pointer (SEQ_GENERATOR_TrgGet) (TrigGen).
+  PROC_KIND_TGEN_RATE,    // G3 TrigGen mutation_rate — same semantics as PitchGen's Rate,
+                      //   resolved via the trigger key-space (TrigGen).
+  PROC_KIND_TGEN_DEPTH,   // G3 TrigGen mutation_depth — >=127 reroll(density) else flip;
+                      //   resolved via the trigger key-space (TrigGen).
 } proc_pkind_t;
 
-// Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot).
+// Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot). PitchGen and
+// TrigGen need DISTINCT ids (not shared) — action ids are global to RunAction's dispatch,
+// which has no other way to know which accessor family (Get vs TrgGet) a given row's Roll/
+// Anchor/Snap/Bounce push should call.
 enum { PROC_ACT_RESEED = 1, PROC_ACT_FREEZE,
-       PROC_ACT_GEN_ROLL, PROC_ACT_GEN_ANCHOR, PROC_ACT_GEN_SNAP, PROC_ACT_GEN_BOUNCE };
+       PROC_ACT_GEN_ROLL, PROC_ACT_GEN_ANCHOR, PROC_ACT_GEN_SNAP, PROC_ACT_GEN_BOUNCE,
+       PROC_ACT_TGEN_ROLL, PROC_ACT_TGEN_ANCHOR, PROC_ACT_TGEN_SNAP, PROC_ACT_TGEN_BOUNCE };
 
 // How a param's VALUE is rendered (orthogonal to the backing kind). DEFAULT derives
 // from the kind (int / bus / on-off / signed); the rest are per-param display maps so
@@ -1428,6 +1440,7 @@ typedef enum {
   PROC_FMT_SEMI24,      // CC 0..48 shown as (raw-24) signed semitones (Echo FbN)
   PROC_FMT_PLUS1,       // value shown as v+1 (1-based counts)        (LFO Rate = steps/cycle)
   PROC_FMT_PCT,         // value shown as v% directly                 (LFO Phase 0..99)
+  PROC_FMT_PCT127,      // value 0..127 shown as 0..100 percent (v*100/127) (TrigGen Density)
 } proc_fmt_t;
 
 typedef struct {
@@ -1460,6 +1473,7 @@ typedef enum {
   PROC_FACE_NONE = 0,
   PROC_FACE_ROBOLOOP,       // Robotize's LOOP plane: the 16 bar-anchors + reseed/freeze/reroll
   PROC_FACE_PITCHGEN_STEPS, // PitchGen's STEPS plane: a 16-step LOCK window into the 64-step loop
+  PROC_FACE_TRIGGEN_STEPS,  // G3 TrigGen's STEPS plane: same shape, trigger key-space
 } proc_face_t;
 
 typedef struct {
@@ -1613,6 +1627,27 @@ static const proc_param_t proc_params_pitchgen_steps[] = {
   { "Snp",  PROC_KIND_ACTION, PROC_ACT_GEN_SNAP,   0, 0, 0, PROC_FMT_DEFAULT },
   { "Bnc",  PROC_KIND_ACTION, PROC_ACT_GEN_BOUNCE, 0, 0, 0, PROC_FMT_DEFAULT },
 };
+// TrigGen — G3, the trigger Turing machine. The genuine gap named when this arc started:
+// GENERATE's five types (Eucl/CA/Poly/Sub/Lsys) are static one-shot fills; nothing writes
+// triggers LIVE. Same mechanics as PitchGen (lock/rate/depth/anchor/roll/bounce), now
+// writing 0/1 into the track's assigned GATE trigger layer. Lives in a SEPARATE pool
+// key-space from PitchGen (SEQ_GENERATOR_Trg*) so both can run at once on one melodic
+// track — decoupled pitch + rhythm, the actual point of building this. No Contour: a coin
+// flip has no distribution shape, so there's no boolean analogue to expose.
+static const proc_param_t proc_params_triggen_op[] = {
+  { "Dens", PROC_KIND_TGEN_DENSITY, 0, 0, 127, SEQ_GENERATOR_DEFAULT_DENSITY, PROC_FMT_PCT127 },
+  { "Rate", PROC_KIND_TGEN_RATE,    0, 0, 127, SEQ_GENERATOR_DEFAULT_RATE,    PROC_FMT_DEFAULT },
+  { "Dpth", PROC_KIND_TGEN_DEPTH,   0, 0, 127, SEQ_GENERATOR_DEFAULT_DEPTH,   PROC_FMT_DEFAULT },
+  { "Roll", PROC_KIND_ACTION, PROC_ACT_TGEN_ROLL, 0, 0, 0, PROC_FMT_DEFAULT },
+};
+// Plane B (STEPS) — same shape as PitchGen's, same shared Win state (GEN_WINDOW), trigger
+// key-space actions. GP row = LOCK toggle for the window (PROC_FACE_TRIGGEN_STEPS).
+static const proc_param_t proc_params_triggen_steps[] = {
+  { "Win",  PROC_KIND_GEN_WINDOW, 0, 0, 3, 0, PROC_FMT_DEFAULT },
+  { "Anc",  PROC_KIND_ACTION, PROC_ACT_TGEN_ANCHOR, 0, 0, 0, PROC_FMT_DEFAULT },
+  { "Snp",  PROC_KIND_ACTION, PROC_ACT_TGEN_SNAP,   0, 0, 0, PROC_FMT_DEFAULT },
+  { "Bnc",  PROC_KIND_ACTION, PROC_ACT_TGEN_BOUNCE, 0, 0, 0, PROC_FMT_DEFAULT },
+};
 
 static const proc_row_t proc_rows[] = {
   { "Pitch",     PROC_ROW_STACK,    SEQ_CORE_PITCH_SLOT,     proc_params_pitch,     6, 0, 0 },
@@ -1631,6 +1666,9 @@ static const proc_row_t proc_rows[] = {
   { "PitchGen",  PROC_ROW_GENERATOR, 0,                      proc_params_pitchgen_op, 6,
     0, 0, 0,
     proc_params_pitchgen_steps, 4, PROC_FACE_PITCHGEN_STEPS },
+  { "TrigGen",   PROC_ROW_GENERATOR, 0,                      proc_params_triggen_op, 4,
+    0, 0, 0,
+    proc_params_triggen_steps, 4, PROC_FACE_TRIGGEN_STEPS },
 };
 #define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
 
@@ -1712,6 +1750,30 @@ static u8 SEQ_UI_PROC_GenParLayer(u8 track)
 static seq_generator_t *SEQ_UI_PROC_GenGet(u8 track)
 {
   return SEQ_GENERATOR_Get(track, SEQ_UI_PROC_GenInstr(track));
+}
+
+// Is rack row `row` the TrigGen row? (matches on its primary/OPERATE param list.)
+static u8 SEQ_UI_PROC_IsTrigGen(u8 row)
+{
+  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_triggen_op;
+}
+
+// TrigGen target trigger-layer resolution: the track's assigned GATE layer (0-based
+// index), or 0xff if none assigned. Mirrors GenParLayer's Note-layer resolution, but for
+// the trigger side — Gate is the semantically loaded layer (silences/sounds the step),
+// matching PitchGen's choice to target the semantically loaded Note layer rather than an
+// arbitrary par layer.
+static u8 SEQ_UI_PROC_TrgLayer(u8 track)
+{
+  u8 a = seq_cc_trk[track].trg_assignments.gate;
+  return a ? (u8)(a - 1) : 0xff;
+}
+
+// The pool slot for the visible track's TrigGen target (the SEPARATE trigger key-space —
+// same instrument-resolution as PitchGen, independent occupancy), or NULL if never engaged.
+static seq_generator_t *SEQ_UI_PROC_TGenGet(u8 track)
+{
+  return SEQ_GENERATOR_TrgGet(track, SEQ_UI_PROC_GenInstr(track));
 }
 
 // The LFO's GP-row CUSTOM surface: a palette of 16 waveforms (tap to pick). A curated
@@ -1826,6 +1888,28 @@ static void SEQ_UI_PROC_RunAction(u8 track, u8 action)
     SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", (r == 0) ? "  bounced" : "not engaged");
     break;
   }
+  // TrigGen LOOP-plane verbs (G3) — same shape as PitchGen's, trigger key-space.
+  case PROC_ACT_TGEN_ROLL: {
+    u8 n = SEQ_GENERATOR_TrgRoll(track);
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "TrigGen", n ? "   rolled" : "not engaged");
+    break;
+  }
+  case PROC_ACT_TGEN_ANCHOR: {
+    s32 r = SEQ_GENERATOR_TrgAnchor(track, SEQ_UI_PROC_GenInstr(track));
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "TrigGen", (r == 0) ? " anchored" : "not engaged");
+    break;
+  }
+  case PROC_ACT_TGEN_SNAP: {
+    s32 r = SEQ_GENERATOR_TrgSnap(track, SEQ_UI_PROC_GenInstr(track));
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "TrigGen",
+               (r == 0) ? "  snapped" : (r == -2) ? "no anchor" : "not engaged");
+    break;
+  }
+  case PROC_ACT_TGEN_BOUNCE: {
+    s32 r = SEQ_GENERATOR_TrgBounce(track, SEQ_UI_PROC_GenInstr(track));
+    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "TrigGen", (r == 0) ? "  bounced" : "not engaged");
+    break;
+  }
   }
 }
 
@@ -1850,10 +1934,20 @@ static proc_rowstate_t SEQ_UI_PROC_RowState(u8 track, u8 row)
     // exists (ENGAGEd at least once, config persists across DISENGAGE); enabled =
     // currently ENGAGEd (mutating). strength = mutation_rate — an imperfect proxy (rate=0
     // is a legitimate *engaged* frozen state, not silence) but the closest "how alive" cue.
-    seq_generator_t *g = SEQ_GENERATOR_Get(track, SEQ_UI_PROC_GenInstr(track));
-    s.occupied = (g != NULL);
-    s.enabled  = SEQ_GENERATOR_IsEngaged(track, SEQ_UI_PROC_GenInstr(track));
-    s.strength = g ? g->mutation_rate : 0;
+    // PitchGen and TrigGen are BOTH this rowkind but live in separate pool key-spaces
+    // (G3) — disambiguate by row identity, same as every other per-tenant branch here.
+    u8 instr = SEQ_UI_PROC_GenInstr(track);
+    if( SEQ_UI_PROC_IsTrigGen(row) ) {
+      seq_generator_t *g = SEQ_GENERATOR_TrgGet(track, instr);
+      s.occupied = (g != NULL);
+      s.enabled  = SEQ_GENERATOR_TrgIsEngaged(track, instr);
+      s.strength = g ? g->mutation_rate : 0;
+    } else {
+      seq_generator_t *g = SEQ_GENERATOR_Get(track, instr);
+      s.occupied = (g != NULL);
+      s.enabled  = SEQ_GENERATOR_IsEngaged(track, instr);
+      s.strength = g ? g->mutation_rate : 0;
+    }
   } else {
     // Emission row: occupancy count/index in bits 0..5 of occ_cc. The ENABLED bit lives
     // either in the same byte (disable_mask — Echo 0x40 / Groove/LFO 0x80) or, when the
@@ -1941,6 +2035,18 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
   }
   case PROC_KIND_GEN_WINDOW:
     return proc_gen_step_window;
+  case PROC_KIND_TGEN_DENSITY: {
+    seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+    return g ? g->range_min : 0; // density; 0 pre-ENGAGE, dashes not 0 on screen
+  }
+  case PROC_KIND_TGEN_RATE: {
+    seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+    return g ? g->mutation_rate : 0;
+  }
+  case PROC_KIND_TGEN_DEPTH: {
+    seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+    return g ? g->mutation_depth : 0;
+  }
   case PROC_KIND_BUS: {
     u8 b = SEQ_CC_Get(track, p->cc); // bits 0..1 = bus A..D, bit 2 = Self
     return (b & 0x04) ? 4 : (b & 0x03);
@@ -2124,6 +2230,21 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
   case PROC_KIND_GEN_WINDOW:
     proc_gen_step_window = (u8)v; // UI-only: which 16-step quarter the GP row shows/edits
     break;
+  case PROC_KIND_TGEN_DENSITY: {
+    seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+    if( g ) g->range_min = (u8)v; // density; no-op pre-ENGAGE
+    break;
+  }
+  case PROC_KIND_TGEN_RATE: {
+    seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+    if( g ) g->mutation_rate = (u8)v;
+    break;
+  }
+  case PROC_KIND_TGEN_DEPTH: {
+    seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+    if( g ) g->mutation_depth = (u8)v;
+    break;
+  }
   case PROC_KIND_BUS: {
     // ChordMask mask source. 0..3 = bus A..D (clear the Self bit); 4 = Self (static
     // mask — set bit 2, keep the underlying bus for Tension). Switching to Self while
@@ -2239,6 +2360,13 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_KIND_GEN_WINDOW:
     SEQ_LCD_PrintFormattedString("Q%d/4", (int)v + 1); // which quarter of the 64-step loop
     return;
+  case PROC_KIND_TGEN_DENSITY:
+  case PROC_KIND_TGEN_RATE:
+  case PROC_KIND_TGEN_DEPTH:
+    // Dashes pre-ENGAGE, same idiom as PitchGen's OPERATE dials (separate check: TrigGen
+    // resolves through the trigger key-space, not SEQ_UI_PROC_GenGet).
+    if( !SEQ_UI_PROC_TGenGet(track) ) { SEQ_LCD_PrintString("--- "); return; }
+    break;
   default: break; // CC / ECHO_REP / CM_STR / SCALE -> fmt map below (SCALE = numeric index)
   }
   switch( p->fmt ) {
@@ -2246,6 +2374,7 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_FMT_SEMI24: SEQ_UI_PROC_PrintSigned((int)v - 24);             break;
   case PROC_FMT_PLUS1:  SEQ_LCD_PrintFormattedString("%3d ", (int)v + 1); break;
   case PROC_FMT_PCT:    SEQ_LCD_PrintFormattedString("%3d%%", (int)v);    break;
+  case PROC_FMT_PCT127: SEQ_LCD_PrintFormattedString("%3d%%", (int)v * 100 / 127); break;
   default:              SEQ_LCD_PrintFormattedString("%3d ", (int)v);     break;
   }
 }
@@ -2317,7 +2446,8 @@ static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
   if( SEQ_UI_PROC_HasPlane2(slot) ) {
     SEQ_LCD_CursorSet(75, 0);
     const char *plane2_name = (proc_rows[slot].face2 == PROC_FACE_ROBOLOOP) ? "LOOP"
-      : (proc_rows[slot].face2 == PROC_FACE_PITCHGEN_STEPS) ? "STEP" : "CFG";
+      : (proc_rows[slot].face2 == PROC_FACE_PITCHGEN_STEPS) ? "STEP"
+      : (proc_rows[slot].face2 == PROC_FACE_TRIGGEN_STEPS)  ? "STEP" : "CFG";
     SEQ_LCD_PrintFormattedString("%-4s", (ui_proc_plane == 0) ? "OPER" : plane2_name);
   }
 
@@ -2436,6 +2566,33 @@ static s32 SEQ_UI_PROC_page_LCD(u8 high_prio)
     }
   }
 
+  // Right screen line 1: TrigGen (G3) — same shape as PitchGen's, trigger key-space.
+  if( SEQ_UI_PROC_IsTrigGen(slot) ) {
+    SEQ_LCD_CursorSet(40, 1);
+    u8 instr = SEQ_UI_PROC_GenInstr(track);
+    seq_generator_t *g = SEQ_GENERATOR_TrgGet(track, instr);
+    if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_TRIGGEN_STEPS ) {
+      u8 locked = 0;
+      if( g ) {
+        int i;
+        for(i=0; i<16; ++i)
+          if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
+            ++locked;
+      }
+      SEQ_LCD_PrintFormattedString("Steps %2d-%-3d locked:%-2d",
+        proc_gen_step_window*16 + 1, proc_gen_step_window*16 + 16, locked);
+    } else if( g && SEQ_GENERATOR_TrgIsEngaged(track, instr) ) {
+      if( seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum )
+        SEQ_LCD_PrintFormattedString("D%-2d ENGAGED   Up/Dn=STEPS", instr + 1);
+      else
+        SEQ_LCD_PrintString("ENGAGED       Up/Dn=STEPS");
+    } else if( g ) {
+      SEQ_LCD_PrintString("disengaged  dblTap=ENGAGE");
+    } else {
+      SEQ_LCD_PrintString("dbl-tap B-row = ENGAGE");
+    }
+  }
+
   return 0; // no error
 }
 
@@ -2498,6 +2655,12 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
       seq_generator_t *g = SEQ_UI_PROC_GenGet(track);
       if( g )
         SEQ_GENERATOR_LockToggle(track, SEQ_UI_PROC_GenInstr(track), proc_gen_step_window*16 + pc);
+    }
+    // TrigGen STEPS face (G3): same idiom, trigger key-space.
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_TRIGGEN_STEPS && pc < 16 ) {
+      seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
+      if( g )
+        SEQ_GENERATOR_TrgLockToggle(track, SEQ_UI_PROC_GenInstr(track), proc_gen_step_window*16 + pc);
     }
     return 1; // swallow either way
   }
@@ -3954,11 +4117,26 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	  } else if( proc_rows[slot].rowkind == PROC_ROW_GENERATOR ) {
 	    // Generator row: ENGAGE <-> DISENGAGE — a pool-slot alloc/stop, not a CC flip.
 	    // DISENGAGE keeps the slot + loop (config preserved, same spirit as bypass);
-	    // ENGAGE (re-)allocates and seeds via SEQ_GENERATOR_Engage, surfacing its own
-	    // failure reasons (pool full / bad track / no Note layer assigned) like the
-	    // stock PITCHGEN page does.
+	    // ENGAGE (re-)allocates and seeds, surfacing its own failure reasons (pool full /
+	    // bad track / no target layer assigned) like the stock PITCHGEN page does.
+	    // PitchGen and TrigGen are both this rowkind but separate key-spaces (G3).
 	    u8 instr = SEQ_UI_PROC_GenInstr(visible_track);
-	    if( SEQ_GENERATOR_IsEngaged(visible_track, instr) ) {
+	    if( SEQ_UI_PROC_IsTrigGen(slot) ) {
+	      if( SEQ_GENERATOR_TrgIsEngaged(visible_track, instr) ) {
+	        SEQ_GENERATOR_TrgDisengage(visible_track, instr);
+	        SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "TrigGen", "disengaged");
+	      } else {
+	        s32 r = SEQ_GENERATOR_EngageTrigger(visible_track, instr,
+	                  SEQ_UI_PROC_TrgLayer(visible_track), SEQ_GENERATOR_DEFAULT_DENSITY);
+	        switch( r ) {
+	        case 0:  SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "TrigGen", "   ENGAGED"); break;
+	        case -1: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "TrigGen", "pool full"); break;
+	        case -2: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "TrigGen", "bad trk/line"); break;
+	        case -3: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "TrigGen", "need Gate layer"); break;
+	        default: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "TrigGen", "ENGAGE failed");
+	        }
+	      }
+	    } else if( SEQ_GENERATOR_IsEngaged(visible_track, instr) ) {
 	      SEQ_GENERATOR_Disengage(visible_track, instr);
 	      SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, "PitchGen", "disengaged");
 	    } else {
@@ -5854,6 +6032,16 @@ s32 SEQ_UI_LED_Handler(void)
         // Dark throughout pre-ENGAGE (no slot, nothing to lock).
         u8 vt = SEQ_UI_VisibleTrackGet();
         seq_generator_t *g = SEQ_UI_PROC_GenGet(vt);
+        if( g ) {
+          int i;
+          for(i=0; i<16; ++i)
+            if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
+              gp |= (1u << i);
+        }
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_TRIGGEN_STEPS ) {
+        // TrigGen STEPS (G3): same idiom, trigger key-space.
+        u8 vt = SEQ_UI_VisibleTrackGet();
+        seq_generator_t *g = SEQ_UI_PROC_TGenGet(vt);
         if( g ) {
           int i;
           for(i=0; i<16; ++i)
