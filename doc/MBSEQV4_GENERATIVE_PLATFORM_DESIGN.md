@@ -3465,8 +3465,9 @@ those two:
 - **Verdict → G2 continues.** By-ear GO on the flashed firmware across all 7 tenants'
   engage-seeding and right-screen readouts. Left: folding the bespoke CUSTOM GP-row/
   button branches (ChordMask/Groove/LFO still hand-roll theirs) into the `face` hook now
-  that Robotize proved the mechanism; the step-register consolidation candidate
-  (PitchGen/Robotize/TrigGen).
+  that Robotize proved the mechanism. The step-register consolidation candidate
+  (PitchGen/Robotize/TrigGen) was investigated (2026-07-08) and found NOT to be the same
+  primitive — parked as a hybrid idea in §10, not pursued.
 
 ---
 
@@ -3525,6 +3526,46 @@ bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot 
     fallback for everything else. Two display sites, one localized `switch(cc)` branch, low blast
     radius. Turns the self-bus from blind 0–127 automation into legible parameter automation — the
     MOTION heart made performable.
+
+**Register unification — parked, not gating (investigated 2026-07-08; revisit once both
+models have more real-world mileage).** The G2/G3 §9 entries flagged PitchGen/TrigGen's
+step-register and Robotize's bar-anchor register as a possible "same primitive at two
+granularities" — a grounded source read (not assumption) found they are **not** the same
+primitive, and forcing them together would be a premature abstraction:
+- **PitchGen/TrigGen's `loop[]` stores a frozen VALUE** (a pitch or a 0/1) written straight
+  to the par/trg layer — legible, directly editable, and the reason its capture/bounce/undo
+  is simple (the source bytes already *are* the content). LOCK pins an exact step; ANCHOR/
+  SNAP is a named save-point you can hard-restore to.
+- **Robotize's `robotize_bar_anchors[]` stores a PRNG SEED**, not an outcome — the note/vel/
+  len/oct/skip mutation is re-derived live at render time from (seed, CURRENT global
+  probability dials). Sweeping a dial retroactively reinterprets every bar's history without
+  touching the register — a genuinely different, more performable property, but it costs
+  precision: there is no "lock bar 7 exactly as it sounds," because "as it sounds" isn't
+  stored anywhere. No LOCK or ANCHOR/SNAP equivalent exists for Robotize today (Freeze is
+  one-way, no restore-to-identity).
+
+Two opposite bets on what "frozen" means, not two implementations of one idea — picking
+either data shape for both would either strip PitchGen/TrigGen's precision or strip
+Robotize's live reinterpretability. A **hybrid shape that might get both properties instead
+of trading one away** (captured here as an idea, not a plan): make the register always
+seed-based, but let a slot sit in one of three states instead of two —
+1. **wandering** — live, rerolled on schedule, always reinterpreted under current dials
+   (today's Robotize behavior).
+2. **locked** — the *seed* is pinned (LOCK), stops rerolling, but still reinterprets if the
+   dials sweep — "that exact dice roll, under whatever rules apply now." Doesn't exist
+   anywhere in the codebase today, for either tenant.
+3. **frozen** — the *derived value* is pinned (BOUNCE-style), fully detached from the seed
+   and the dials — permanent, hand-editable content. What PitchGen/TrigGen effectively
+   assume is the *only* state today.
+
+**Cost, if ever pursued:** not a mechanical refactor like the formatter/defaults registry —
+giving PitchGen/TrigGen a seed+live-interpretation mode means building a render-time
+derivation path (they currently write straight to the layer) and reworking how capture/
+bounce freezes a wandering slot into permanent content, architecturally closer to
+Robotize's own (heavier) capture story than to what they have now. A real build, touching a
+working, by-ear-GO'd mechanism's internals — not licensed until using both models more
+gives a clearer read on whether the middle "locked-seed" state is something the ear
+actually wants, or a tidy idea that isn't musically load-bearing.
 
 **Tension Workbench — SHIPPED + by-ear GO 2026-06-10 (§9; build narrative → REFERENCE).** The
 GRAVITY field (monotone pull / varied push), per-track GRIP, RESOLVE, SHADE; ext-CC fix shipped
