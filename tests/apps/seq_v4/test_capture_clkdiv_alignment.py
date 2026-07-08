@@ -67,6 +67,7 @@ def _wait_ring_depth(board: Board, target: int, timeout: float = 30.0) -> int:
 
 
 @pytest.mark.hardware
+@pytest.mark.timeout(40)  # 6 bars of ring-fill wait (up to 30s) exceeds the suite's 10s default
 def test_8th_two_bar_loop_while_playing_captures_both_bars(board):
     """REGRESSION: an 8th-note 16-step loop is TWO global bars (n=2). While PLAYING, a k=1
     grab must capture the WHOLE loop — all 16 steps — not just the first bar (the old gate
