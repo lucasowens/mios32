@@ -49,8 +49,12 @@ s32 SEQ_HUMANIZE_Event(u8 track, u8 step, seq_layer_evnt_t *e)
     intensity = 4*24; // +/- 1 octave
   } else {
     mode = tcc->humanize_mode;
-    if( !mode )
-      return 0; // nothing to do
+    // bit 3 (0x08) = PROC-page rack bypass (the row's B-row double-tap). humanize_mode
+    // is a 4-bit field (bits 0..2 = Note/Vel/Length; 3 was the only spare bit), so this
+    // is checked BEFORE the !mode early-out, which alone can't catch "bypassed but
+    // still has Note/Vel/Len bits set" (mode != 0 in that case).
+    if( !mode || (mode & (1 << 3)) )
+      return 0; // nothing to do / bypassed
 
     intensity = tcc->humanize_value;
     if( !intensity )

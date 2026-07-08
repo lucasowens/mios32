@@ -1421,6 +1421,13 @@ typedef enum {
                       //   resolved via the trigger key-space (TrigGen).
   PROC_KIND_TGEN_DEPTH,   // G3 TrigGen mutation_depth — >=127 reroll(density) else flip;
                       //   resolved via the trigger key-space (TrigGen).
+  PROC_KIND_HUM_VALUE, // Humanize intensity (HUMANIZE_VALUE, 0..127 — the row's full headline
+                      //   range, so its disable bit lives on a separate cc; see disable_cc).
+                      //   0->on turn seeds Mode to Note+Vel+Len if no bit is chosen yet, done
+                      //   as one direct write, not via SeedRowDefaults (Humanize).
+  PROC_KIND_HUM_NOTE, // Humanize Mode bit 0 (Note event humanized) (Humanize).
+  PROC_KIND_HUM_VEL,  // Humanize Mode bit 1 (Velocity humanized) (Humanize).
+  PROC_KIND_HUM_LEN,  // Humanize Mode bit 2 (Gatelength humanized) (Humanize).
 } proc_pkind_t;
 
 // Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot). PitchGen and
@@ -1502,6 +1509,12 @@ typedef struct {
   // B-row double-tap read these instead of naming a specific CC (Echo 0x40 / Groove 0x80).
   u8                  occ_cc;
   u8                  disable_mask;
+  // disable_mask normally packs into occ_cc's own spare bits (Echo/Groove/LFO — their
+  // headline dial never uses its CC's full 0..127 range). When it doesn't (Humanize's
+  // Value IS 0..127), disable_cc names the OTHER cc the mask bit lives on instead; 0 =
+  // same byte as occ_cc (every prior tenant). Both RowState and the B-row double-tap
+  // read this before falling back to occ_cc.
+  u8                  disable_cc;
   // enabled bit lives in a SEPARATE CC (Robotize: occupancy = PROBABILITY>0, enable =
   // ACTIVE). 0 = none. disable_mask takes precedence when both set (G2, occupancy split).
   u8                  enable_cc;
@@ -1527,6 +1540,7 @@ static void SEQ_UI_PROC_Status_LFO(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_Robotize(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_PitchGen(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_TrigGen(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_Humanize(u8 track, u8 slot);
 
 // Pitch — transpose (Semi/Oct) + force-to-scale (FTS on/off, and the GLOBAL Scale +
 // Root that FTS snaps to). Scale/Root are global (shared by all tracks + the keyboard,
@@ -1677,6 +1691,24 @@ static const proc_param_t proc_params_triggen_steps[] = {
   { "Snp",  PROC_KIND_ACTION, PROC_ACT_TGEN_SNAP,   0, 0, 0, PROC_FMT_DEFAULT },
   { "Bnc",  PROC_KIND_ACTION, PROC_ACT_TGEN_BOUNCE, 0, 0, 0, PROC_FMT_DEFAULT },
 };
+// Humanize — the 5th emission tenant, EXPOSE-IN-PLACE of the stock seq_humanize.c /
+// seq_ui_fx_humanize.c module. Int is the headline/occupancy dial (HUMANIZE_VALUE,
+// 0..127 — full range, no packing room), 0=off. Note/Vel/Len toggle HUMANIZE_MODE's
+// bits 0..2. Turning Int up from 0 seeds Mode to all three if none is chosen yet
+// (PROC_KIND_HUM_VALUE) so the dial is audible at once. Because Value has no spare bit
+// for a packed disable flag the way Echo/Groove/LFO's headline CCs do, bypass lives on
+// Mode instead — the row's disable_cc points there rather than at occ_cc (the one new
+// field this tenant needed; see proc_row_t). BUT `humanize_mode` is a 4-bit struct
+// bitfield (`seq_cc.h`), not a full byte — bits 0..2 are Note/Vel/Len, so bit 3 (0x08)
+// is the ONLY spare bit available, not bit 7 (an earlier pass used 0x80, which
+// silently truncated away on every write and never actually gated the DSP — fixed by
+// moving to bit 3 here AND teaching `SEQ_HUMANIZE_Event` to check it).
+static const proc_param_t proc_params_humanize[] = {
+  { "Int",  PROC_KIND_HUM_VALUE, SEQ_CC_HUMANIZE_VALUE, 0, 127, 0, PROC_FMT_DEFAULT },
+  { "Note", PROC_KIND_HUM_NOTE,  SEQ_CC_HUMANIZE_MODE,  0,   1, 0, PROC_FMT_DEFAULT },
+  { "Vel",  PROC_KIND_HUM_VEL,   SEQ_CC_HUMANIZE_MODE,  0,   1, 0, PROC_FMT_DEFAULT },
+  { "Len",  PROC_KIND_HUM_LEN,   SEQ_CC_HUMANIZE_MODE,  0,   1, 0, PROC_FMT_DEFAULT },
+};
 
 static const proc_row_t proc_rows[] = {
   { .name = "Pitch",     .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_PITCH_SLOT,
@@ -1714,6 +1746,10 @@ static const proc_row_t proc_rows[] = {
     .params = proc_params_triggen_op,  .n_params = 4,
     .params2 = proc_params_triggen_steps, .n_params2 = 4, .face2 = PROC_FACE_TRIGGEN_STEPS,
     .status = SEQ_UI_PROC_Status_TrigGen },
+  { .name = "Humanize",  .rowkind = PROC_ROW_EMISSION,
+    .params = proc_params_humanize,  .n_params = 4,
+    .occ_cc = SEQ_CC_HUMANIZE_VALUE, .disable_mask = 0x08, .disable_cc = SEQ_CC_HUMANIZE_MODE,
+    .status = SEQ_UI_PROC_Status_Humanize },
 };
 #define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
 
@@ -1969,16 +2005,22 @@ static proc_rowstate_t SEQ_UI_PROC_RowState(u8 track, u8 row)
       s.strength = g ? g->mutation_rate : 0;
     }
   } else {
-    // Emission row: occupancy count/index in bits 0..5 of occ_cc. The ENABLED bit lives
-    // either in the same byte (disable_mask — Echo 0x40 / Groove/LFO 0x80) or, when the
-    // effect splits occupancy from enable, in a separate enable_cc (Robotize: occupancy =
-    // PROBABILITY>0, enable = ACTIVE). disable_mask wins if both are set. strength = count.
+    // Emission row: occupancy count/index in bits 0..5 of occ_cc — UNLESS the row's
+    // disable bit lives on a separate disable_cc (Humanize: Value uses its full 0..127
+    // range, so there's no spare bit to pack into occ_cc itself; only mask to 6 bits
+    // when the bit is actually sharing occ_cc's byte). The ENABLED bit lives either in
+    // that same/disable byte (disable_mask — Echo 0x40 / Groove/LFO 0x80 / Humanize's
+    // MODE 0x08, its field's only spare bit) or, when the effect splits occupancy from
+    // enable entirely, in a
+    // separate enable_cc (Robotize: occupancy = PROBABILITY>0, enable = ACTIVE).
+    // disable_mask wins if both are set. strength = count.
     u8 raw = SEQ_CC_Get(track, r->occ_cc);
-    u8 count = raw & 0x3f;
+    u8 count = (r->disable_mask && !r->disable_cc) ? (raw & 0x3f) : raw;
     s.occupied = (count != 0);
-    if( r->disable_mask )
-      s.enabled = s.occupied && !(raw & r->disable_mask);
-    else if( r->enable_cc )
+    if( r->disable_mask ) {
+      u8 draw = r->disable_cc ? SEQ_CC_Get(track, r->disable_cc) : raw;
+      s.enabled = s.occupied && !(draw & r->disable_mask);
+    } else if( r->enable_cc )
       s.enabled = s.occupied && (SEQ_CC_Get(track, r->enable_cc) != 0);
     else
       s.enabled = s.occupied;
@@ -2071,7 +2113,13 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
     u8 b = SEQ_CC_Get(track, p->cc); // bits 0..1 = bus A..D, bit 2 = Self
     return (b & 0x04) ? 4 : (b & 0x03);
   }
-  default: // CC, CM_STR
+  case PROC_KIND_HUM_NOTE:
+    return (SEQ_CC_Get(track, p->cc) & (1 << 0)) ? 1 : 0;
+  case PROC_KIND_HUM_VEL:
+    return (SEQ_CC_Get(track, p->cc) & (1 << 1)) ? 1 : 0;
+  case PROC_KIND_HUM_LEN:
+    return (SEQ_CC_Get(track, p->cc) & (1 << 2)) ? 1 : 0;
+  default: // CC, CM_STR, HUM_VALUE
     return SEQ_CC_Get(track, p->cc);
   }
 }
@@ -2273,6 +2321,31 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     }
     break;
   }
+  case PROC_KIND_HUM_VALUE: {
+    u8 old = SEQ_CC_Get(track, p->cc);
+    SEQ_CC_Set(track, p->cc, (u8)v);
+    // Engage-seed: intensity alone is silent until at least one Note/Vel/Len bit is on
+    // (SEQ_HUMANIZE_Event's own `if(!mode) return 0` gate). On the 0->on turn, if no
+    // mode bit is chosen yet, turn all three on so dialling Int up is audible at once —
+    // one direct write, not via SeedRowDefaults: Note/Vel/Len share a single backing
+    // byte, and that registry's per-field "untouched" test re-reads the byte fresh each
+    // call, so seeding them one at a time would go stale after the first write.
+    if( old == 0 && v > 0 ) {
+      u8 f = SEQ_CC_Get(track, SEQ_CC_HUMANIZE_MODE);
+      if( !(f & 0x07) )
+        SEQ_CC_Set(track, SEQ_CC_HUMANIZE_MODE, f | 0x07);
+    }
+    break;
+  }
+  case PROC_KIND_HUM_NOTE:
+  case PROC_KIND_HUM_VEL:
+  case PROC_KIND_HUM_LEN: {
+    u8 bit = (p->kind == PROC_KIND_HUM_NOTE) ? 0 : (p->kind == PROC_KIND_HUM_VEL) ? 1 : 2;
+    u8 f = SEQ_CC_Get(track, p->cc);
+    f = v ? (f | (1 << bit)) : (f & ~(1 << bit));
+    SEQ_CC_Set(track, p->cc, f);
+    break;
+  }
   default: // CC, CM_STR
     SEQ_CC_Set(track, p->cc, (u8)v);
     break;
@@ -2355,6 +2428,9 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
     else         SEQ_LCD_PrintFormattedString("%c   ", 'A' + (v & 0x03));
     return;
   case PROC_KIND_FLAG:
+  case PROC_KIND_HUM_NOTE:
+  case PROC_KIND_HUM_VEL:
+  case PROC_KIND_HUM_LEN:
     SEQ_LCD_PrintFormattedString("%-4s", v ? "on" : "off");
     return;
   case PROC_KIND_SNIBBLE:
@@ -2693,6 +2769,19 @@ static void SEQ_UI_PROC_Status_Gen(u8 track, u8 slot, u8 is_trg)
 }
 static void SEQ_UI_PROC_Status_PitchGen(u8 track, u8 slot) { SEQ_UI_PROC_Status_Gen(track, slot, 0); }
 static void SEQ_UI_PROC_Status_TrigGen(u8 track, u8 slot)  { SEQ_UI_PROC_Status_Gen(track, slot, 1); }
+
+// Humanize's .status: which of Note/Vel/Len the intensity actually touches — Int alone
+// says nothing about that (unlike Echo/Groove/LFO, where the headline dial IS the whole
+// story).
+static void SEQ_UI_PROC_Status_Humanize(u8 track, u8 slot)
+{
+  u8 mode = SEQ_CC_Get(track, SEQ_CC_HUMANIZE_MODE);
+  SEQ_LCD_CursorSet(40, 1);
+  SEQ_LCD_PrintFormattedString("Note:%-3s Vel:%-3s Len:%-3s",
+    (mode & (1 << 0)) ? "on" : "off",
+    (mode & (1 << 1)) ? "on" : "off",
+    (mode & (1 << 2)) ? "on" : "off");
+}
 
 // Page buttons. The B-row (rack), GP encoders (operate), and GP-row mask are all
 // global sel_view==PROC intercepts; the GP button ROW is the read-only mask, so
@@ -4213,7 +4302,8 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	    // (Robotize ACTIVE — toggle it). Reads the row's descriptor, not a hardcoded CC.
 	    u8 bypassed;
 	    if( proc_rows[slot].disable_mask ) {
-	      u8 cc = proc_rows[slot].occ_cc, dm = proc_rows[slot].disable_mask;
+	      u8 cc = proc_rows[slot].disable_cc ? proc_rows[slot].disable_cc : proc_rows[slot].occ_cc;
+	      u8 dm = proc_rows[slot].disable_mask;
 	      u8 raw = SEQ_CC_Get(visible_track, cc) ^ dm;
 	      SEQ_CC_Set(visible_track, cc, raw);
 	      bypassed = (raw & dm) ? 1 : 0;
