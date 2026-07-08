@@ -665,6 +665,98 @@ s32 SEQ_LCD_PrintRootValue(u8 root_value)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// prints a signed value as "<sign><digits>" (4 characters max).
+// NOTE: SEQ_LCD's vsprintf has NO '+' flag - "%+3d" renders the literal "3d"
+// and never consumes the argument (see seq_ui.c SEQ_UI_PROC_PrintSigned,
+// which hit this same bug first) - so the sign is emitted by hand.
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_LCD_PrintSigned(s32 value)
+{
+  return SEQ_LCD_PrintFormattedString("%c%-3d", (value < 0) ? '-' : '+', (int)((value < 0) ? -value : value));
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// resolves the CC number a Ctrl-type (self-bus) par layer currently targets
+// -- mirrors SEQ_PAR_AssignedTypeStr's lookup. 0x10..0x5f if assigned,
+// >=0x80 if unassigned/off.
+/////////////////////////////////////////////////////////////////////////////
+static u8 SEQ_LCD_CtrlTargetCC(u8 track, u8 par_layer, u8 instrument)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+
+  if( tcc->event_mode == SEQ_EVENT_MODE_Drum ) {
+#ifdef MBSEQV4P
+    return seq_layer_drum_cc[instrument][par_layer];
+#else
+    return 0xff;
+#endif
+  }
+
+  return SEQ_CC_Get(track, SEQ_CC_LAY_CONST_B1 + par_layer);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// prints a Ctrl (self-bus) par layer's raw 0..127 step value decoded into
+// the target parameter's own units, so a step reads as what it will set the
+// target to instead of a bare number (design doc §10 "self-bus legibility").
+// Mirrors the exact arithmetic SEQ_CC_MIDI_Set + the target's own consumer
+// apply at emission -- deliberately only a small, incomplete set of targets
+// is decoded so far.
+// Returns 1 if it printed something (a decode, or the disabled-step marker),
+// 0 if the target isn't (yet) decoded -- the caller should fall back to its
+// own raw display (it may want a VU bar alongside, which varies by call site).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_LCD_PrintCtrlValue(u8 track, u8 par_layer, u8 instrument, u8 value)
+{
+  if( value >= 0x80 ) {
+    SEQ_LCD_PrintFormattedString("----");
+    return 1;
+  }
+
+  u8 cc_number = SEQ_LCD_CtrlTargetCC(track, par_layer, instrument);
+
+  if( cc_number < 0x80 ) {
+    u8 mapped_cc = cc_number + 0x20; // mirrors SEQ_CC_MIDI_Set: cc+0x20 -> config idx
+
+    switch( mapped_cc ) {
+    case SEQ_CC_TRANSPOSE_SEMI:
+    case SEQ_CC_TRANSPOSE_OCT: {
+      // mirrors seq_core.c's UNMASKED nibble decode (>=8 -> -16). Not the
+      // rack's defensive "&0x0f" read: a self-bus step can genuinely drive
+      // the target outside the sane -8..+7 range, and this preview must not
+      // lie about what emission will actually do with it.
+      int v = value;
+      if( v >= 8 ) v -= 16;
+      SEQ_LCD_PrintSigned(v);
+      return 1;
+    }
+
+    case SEQ_CC_LFO_AMPLITUDE: {
+      // mirrors SEQ_CC_MIDI_Set's x2 (7bit->8bit) + seq_lfo.c's -128 bipolar centre
+      int v = (int)value*2 - 128;
+      SEQ_LCD_PrintSigned(v);
+      return 1;
+    }
+
+    case SEQ_CC_DIRECTION: {
+      static const char dir_names[7][5] = {
+        "Fwd ", "Bwd ", "PPon", "Pend", "RDir", "RStp", "RD+S"
+      };
+      if( value < 7 ) {
+        SEQ_LCD_PrintString((char *)dir_names[value]);
+        return 1;
+      }
+    } break;
+    }
+  }
+
+  return 0; // not decoded -- caller prints its own raw fallback
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 // prints the Scale value (4 characters)
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_LCD_PrintScaleValue(u8 scale_value)
@@ -785,14 +877,18 @@ s32 SEQ_LCD_PrintLayerValue(u8 track, u8 par_layer, u8 par_value)
   case SEQ_PAR_Type_CC:
   case SEQ_PAR_Type_ProgramChange:
   case SEQ_PAR_Type_PitchBend:
-  case SEQ_PAR_Type_Aftertouch:
-  case SEQ_PAR_Type_Ctrl: {
+  case SEQ_PAR_Type_Aftertouch: {
     if( par_value >= 0x80 ) {
       SEQ_LCD_PrintFormattedString("----");
     } else {
       SEQ_LCD_PrintFormattedString("%3d ", par_value);
     }
   } break;
+
+  case SEQ_PAR_Type_Ctrl:
+    if( !SEQ_LCD_PrintCtrlValue(track, par_layer, ui_selected_instrument, par_value) )
+      SEQ_LCD_PrintFormattedString("%3d ", par_value);
+    break;
 
   case SEQ_PAR_Type_Probability:
     SEQ_LCD_PrintProbability(par_value);
@@ -946,8 +1042,7 @@ s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 s
   case SEQ_PAR_Type_CC:
   case SEQ_PAR_Type_ProgramChange:
   case SEQ_PAR_Type_PitchBend:
-  case SEQ_PAR_Type_Aftertouch:
-  case SEQ_PAR_Type_Ctrl: {
+  case SEQ_PAR_Type_Aftertouch: {
     if( !print_without_gate && event_mode == SEQ_EVENT_MODE_CC && !SEQ_TRG_GateGet(track, step, instrument) ) {
       SEQ_LCD_PrintString("----");
     } else {
@@ -958,6 +1053,18 @@ s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 s
       } else {
 	SEQ_LCD_PrintFormattedString("%3d", value);
 	SEQ_LCD_PrintVBar(value >> 4);
+      }
+    }
+  } break;
+
+  case SEQ_PAR_Type_Ctrl: {
+    if( !print_without_gate && event_mode == SEQ_EVENT_MODE_CC && !SEQ_TRG_GateGet(track, step, instrument) ) {
+      SEQ_LCD_PrintString("----");
+    } else {
+      u8 value = SEQ_PAR_Get(track, step, par_layer, instrument); // works better in drum view
+      if( !SEQ_LCD_PrintCtrlValue(track, par_layer, instrument, value) ) {
+        SEQ_LCD_PrintFormattedString("%3d", value);
+        SEQ_LCD_PrintVBar(value >> 4);
       }
     }
   } break;
