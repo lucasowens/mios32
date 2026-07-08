@@ -407,6 +407,10 @@ extern s32 SEQ_UI_PATTERN_RMX_Init(u32 mode);
 extern s32 SEQ_UI_TRKEUCLID_Init(u32 mode);
 extern s32 SEQ_UI_TRKPITCHGEN_Init(u32 mode);
 extern s32 SEQ_UI_GRAVITY_Init(u32 mode);
+// Zone name + bipolar meter for a GRAVITY value — shared with the PROC rack's Tension
+// row .status hook (seq_ui.c) so both surfaces read the same zone thresholds.
+extern const char *SEQ_UI_GRAVITY_ZoneName(s8 g);
+extern void SEQ_UI_GRAVITY_TensionMeter(s8 g, char *buf); // buf must be >= 28 bytes
 extern s32 SEQ_UI_CAPTURE_Init(u32 mode);
 extern s32 SEQ_UI_PROC_Init(u32 mode);
 extern s32 SEQ_UI_CAPTURE_Enter(void); // repurposed SONG button -> latched Capture page

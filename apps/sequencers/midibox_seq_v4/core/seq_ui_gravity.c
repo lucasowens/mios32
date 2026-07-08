@@ -61,7 +61,9 @@ static const u8   shade_ladder[7] = { 15, 12, 16, 13, 17, 14, 18 };
 static const char shade_names[7][4] = { "Lyd", "Ion", "Mix", "Dor", "Aeo", "Phr", "Loc" };
 
 
-static const char *zone_name(s8 g)
+// Public (PROC rack Tension row's .status hook reuses this, seq_ui.c — one zone-threshold
+// source of truth instead of a 2nd copy).
+const char *SEQ_UI_GRAVITY_ZoneName(s8 g)
 {
   if( g == 0 ) return "DETENT";
   if( g < 0 )  return (g >= -24) ? "SCALE" : (g >= -48) ? "CHORD" : "DRONE";
@@ -85,7 +87,8 @@ static const char *shade_label(void)
 #define TENSION_METER_CELLS   27
 #define TENSION_METER_CENTER  13
 #define TENSION_METER_PERSIDE 13
-static void tension_meter(s8 g, char *buf)
+// Public — see SEQ_UI_GRAVITY_ZoneName's comment. buf must be >= TENSION_METER_CELLS+1.
+void SEQ_UI_GRAVITY_TensionMeter(s8 g, char *buf)
 {
   int i;
   for(i = 0; i < TENSION_METER_CELLS; ++i)
@@ -332,8 +335,8 @@ static s32 LCD_Handler(u8 high_prio)
   SEQ_LCD_CursorSet(40, 0);
   {
     char meter[TENSION_METER_CELLS + 1];
-    tension_meter(g, meter);
-    SEQ_LCD_PrintFormattedString("%-6s %c%2d ", zone_name(g),
+    SEQ_UI_GRAVITY_TensionMeter(g, meter);
+    SEQ_LCD_PrintFormattedString("%-6s %c%2d ", SEQ_UI_GRAVITY_ZoneName(g),
                                  (g < 0) ? '-' : '+', (g < 0) ? -(int)g : (int)g);  // 11
     SEQ_LCD_PrintString(meter);                                    // +27 = 38
     SEQ_LCD_PrintSpaces(2);                                        // 40

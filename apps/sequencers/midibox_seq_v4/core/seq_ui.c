@@ -1483,6 +1483,7 @@ typedef enum {
   PROC_FACE_CHORDMASK_SELF, // ChordMask's Self mask: GP1-12 toggle PCs (bus mode == Self only)
   PROC_FACE_GROOVE_PAINT,   // Groove's paintable 16-step shape (custom templates only)
   PROC_FACE_LFO_PALETTE,    // LFO's waveform palette: tap a GP button to pick a shape
+  PROC_FACE_TENSION_ZONES,  // Tension's zone jump: GP9-15 = DRONE..SLIP, GP16 = RESOLVE
 } proc_face_t;
 
 typedef struct {
@@ -1519,6 +1520,7 @@ typedef struct {
 // Forward decls for proc_rows[]'s .status hooks — defined further down, once their
 // dependencies (SEQ_UI_PROC_CurFace, SEQ_UI_PROC_LfoWaveName, ...) exist.
 static void SEQ_UI_PROC_Status_Pitch(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_Tension(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_ChordMask(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_Groove(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_LFO(u8 track, u8 slot);
@@ -1684,7 +1686,8 @@ static const proc_row_t proc_rows[] = {
     .params = proc_params_chordmask, .n_params = 2, .face1 = PROC_FACE_CHORDMASK_SELF,
     .status = SEQ_UI_PROC_Status_ChordMask },
   { .name = "Tension",   .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_TENSION_SLOT,
-    .params = proc_params_tension,   .n_params = 2 },
+    .params = proc_params_tension,   .n_params = 2, .face1 = PROC_FACE_TENSION_ZONES,
+    .status = SEQ_UI_PROC_Status_Tension },
   { .name = "Limit",     .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_LIMIT_SLOT,
     .params = proc_params_limit,     .n_params = 2 },
   { .name = "Echo",      .rowkind = PROC_ROW_EMISSION,
@@ -2524,6 +2527,65 @@ static void SEQ_UI_PROC_Status_Pitch(u8 track, u8 slot)
   SEQ_LCD_PrintFormattedString("Scale: %s", SEQ_SCALE_NameGet(seq_core_global_scale));
 }
 
+// Tension's zone table (PROC_FACE_TENSION_ZONES) — mirrors SEQ_UI_GRAVITY_ZoneName's
+// thresholds (index 0..6 = DRONE..SLIP, DETENT at 3). tension_zone_jump[i] is each zone's
+// rough midpoint, where the matching GP9-15 button lands you; Status_Tension's row1 and
+// the GP-row button handler both read this one table.
+static const char *const tension_zone_abbrev[7] = { "DRN","CHD","SCL","DET","LEN","RUB","SLP" };
+static const s8          tension_zone_jump[7]   = { -56, -36, -12,   0,  12,  36,  56 };
+
+static u8 tension_zone_index(s8 g)
+{
+  if( g == 0 ) return 3;
+  if( g < 0 )  return (g >= -24) ? 2 : (g >= -48) ? 1 : 0;
+  return (g <= 24) ? 4 : (g <= 48) ? 5 : 6;
+}
+
+// Tension's .status: ports the dedicated GRAVITY cockpit page's (seq_ui_gravity.c)
+// visualization onto the rack row, which otherwise shows only the bare Grip/Grav numbers —
+// reusing SEQ_UI_GRAVITY_ZoneName (one zone-threshold source of truth, not a 2nd copy).
+// Row 0, right-justified: the zone name + signed value. Row 1 right screen: 7 cells
+// (GP9-15, 5 cols each) naming each zone, current one bracketed; GP16's cell is the
+// RESOLVE hint (see the PROC_FACE_TENSION_ZONES button handler for the actual gestures —
+// this is display only). Row 1 left screen: Tension only occupies 2 of 8 dial cells
+// (cols 0..9), so the dead space at col 12+ gets the 16-track GRIP overview bar (who
+// else is held by the field) — same thresholds as the original page's bar.
+static void SEQ_UI_PROC_Status_Tension(u8 track, u8 slot)
+{
+  s8 g = seq_core_tension_gravity;
+
+  {
+    char buf[12];
+    sprintf(buf, "%s %c%d", SEQ_UI_GRAVITY_ZoneName(g), (g < 0) ? '-' : '+',
+            (int)((g < 0) ? -(int)g : (int)g));
+    int len = (int)strlen(buf);
+    SEQ_LCD_CursorSet((u16)(80 - len), 0);
+    SEQ_LCD_PrintString(buf);
+  }
+
+  SEQ_LCD_CursorSet(12, 1);
+  SEQ_LCD_PrintString("Grp:");
+  {
+    char bar[17];
+    u8 i;
+    for(i=0; i<16; ++i) {
+      u8 gp = seq_cc_trk[i].tension_grip;
+      bar[i] = gp ? (gp < 43 ? 'o' : (gp < 86 ? 'O' : '#')) : '.';
+    }
+    bar[16] = 0;
+    SEQ_LCD_PrintString(bar);
+  }
+
+  u8 zi = tension_zone_index(g);
+  u8 z;
+  for(z=0; z<7; ++z) {
+    SEQ_LCD_CursorSet((u16)(40 + z*5), 1);
+    SEQ_LCD_PrintFormattedString((z == zi) ? "[%s]" : " %s ", tension_zone_abbrev[z]);
+  }
+  SEQ_LCD_CursorSet(75, 1);
+  SEQ_LCD_PrintString("Rslv");
+}
+
 // ChordMask's .status: the 12-PC target set as note names. In Self mode it's the editable
 // static mask (tap the GP row); otherwise the live chord on the source bus. "M:" =
 // bus-derived, "M*:" = static/self (hand-set).
@@ -2697,6 +2759,18 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
       seq_generator_t *g = SEQ_UI_PROC_TGenGet(track);
       if( g )
         SEQ_GENERATOR_TrgLockToggle(track, SEQ_UI_PROC_GenInstr(track), proc_gen_step_window*16 + pc);
+    }
+    // Tension zone jump: GP9-15 snap GRAVITY straight to that zone's midpoint (a manual
+    // turn, same as the encoder — cancels an in-flight RESOLVE first). GP16 = RESOLVE, the
+    // original GRAVITY page's smooth bar-quantized ramp back to the detent, unchanged.
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_TENSION_ZONES && pc >= 8 ) {
+      if( pc == 15 ) {
+        SEQ_CORE_TensionResolve();
+        SEQ_UI_Msg_Track("RESOLVE -> the One");
+      } else {
+        SEQ_CORE_TensionResolveCancel();
+        SEQ_CORE_TensionGravitySet(tension_zone_jump[pc - 8]);
+      }
     }
     return 1; // swallow either way
   }
@@ -6084,6 +6158,11 @@ s32 SEQ_UI_LED_Handler(void)
             if( SEQ_GENERATOR_LockGet(g, proc_gen_step_window*16 + i) )
               gp |= (1u << i);
         }
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_TENSION_ZONES ) {
+        // Tension zones: light the CURRENT zone's button (GP9-15) — where you'd land if
+        // you tapped it again — plus GP16 (Rslv) as a steady discoverability hint.
+        u8 zi = tension_zone_index(seq_core_tension_gravity);
+        gp = (u16)((1u << (8 + zi)) | (1u << 15));
       }
       ui_gp_leds = gp;
     }
