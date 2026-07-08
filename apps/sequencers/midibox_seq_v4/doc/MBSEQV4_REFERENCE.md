@@ -687,7 +687,25 @@ That axis is kept faithful by one of **two mechanisms**:
     `{occ_cc, disable_mask}` (Echo `ECHO_REPEATS`/0x40, Groove `GROOVE_STYLE`/0x80, LFO
     `LFO_WAVEFORM`/0x80 — waveform 0..25 leaves bit 7 free) OR `{occ_cc, enable_cc}` when the
     effect splits them (**Robotize**: occupancy = `ROBOTIZE_PROBABILITY>0`, enable =
-    `ROBOTIZE_ACTIVE`). `PROC_KIND_ACTION` = a momentary dial whose **encoder-push executes**
+    `ROBOTIZE_ACTIVE`). **Humanize** (5th emission tenant, 11th row) needed a 3rd shape:
+    its headline `HUMANIZE_VALUE` uses the full 0..127 range (no spare bit to pack a
+    disable flag into, unlike Echo/Groove/LFO's headline CCs), so `proc_row_t` grew
+    `disable_cc` — 0 = disable_mask packs into `occ_cc` itself (every prior tenant), else
+    it names the OTHER cc the bit lives on (`HUMANIZE_MODE`'s bit 3, `0x08`). **Caution:
+    `humanize_mode` is a 4-bit struct bitfield** (`seq_cc.h`, packed with 3 other
+    fields), not a full byte — bit 3 is its ONLY spare bit (0..2 = Note/Vel/Len); a
+    first pass used bit 7 (`0x80`), which silently truncated away on every write
+    (never stored) AND was never checked by `SEQ_HUMANIZE_Event` in the first place
+    (the DSP function only tested bits 0..2) — bypass looked wired up but did nothing
+    on real hardware. Both fixed: bit 3 stores correctly, and `SEQ_HUMANIZE_Event`
+    now early-outs on it. **Lesson: a struct field's bit-WIDTH (`:4`) matters as much
+    as which CCs exist — grep alone doesn't surface it, read the declaration.**
+    `RowState` + the B-row double-tap both read `disable_cc`. Humanize's Note/Vel/Len dials toggle
+    `HUMANIZE_MODE` bits 0..2 directly (dedicated `PROC_KIND_HUM_NOTE/VEL/LEN`, one per
+    bit — NOT routed through `SEQ_UI_PROC_SeedRowDefaults`'s per-field "untouched" test,
+    because that re-reads the shared byte fresh on every field and would go stale after
+    the first write; the headline's own `PROC_KIND_HUM_VALUE` seeds all three in one
+    direct write instead). `PROC_KIND_ACTION` = a momentary dial whose **encoder-push executes**
     (Robotize Reseed/Freeze; PitchGen Roll/Anchor/Snap/Bounce). Bespoke GP-row surfaces:
     ChordMask mask / Groove step-shape / LFO waveform-palette (per-slot branches),
     `PROC_FACE_ROBOLOOP` (the LOOP plane's 16 bar-anchors, tap = reroll), and

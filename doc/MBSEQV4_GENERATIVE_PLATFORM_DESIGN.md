@@ -407,10 +407,11 @@ performable** — see §8 + `doc/plans/2026-06-21-system-flatmap.md`.*
 | Make invisible modes visible (#2) | dropped (rig already wires the LEDs) | §8, §9 |
 | Unified UNDO/REDO | **built (Stage 2a+2b)** | §9, §10(a2) |
 | SET durable baseline | queued / design-ahead | §6, §9, §10(a) |
-| Trigger generators (don't fit as twin pool) | queued — needs redesign | §8, §10(b) |
+| Trigger generators (independent key-space in `seq_generator.c`, not a twin pool) | **shipped — G3, by-ear GO 2026-07-07** | §9, §10(b) |
 | Self-bus, config-grain (direction/progression/…) | **shipped — it's TK's 2019 `Ctrl` par-type; by-ear GO 2026-06-26** | §6, §9, §10(c) |
 | Self-bus, note-grain (self-transpose/chord) + dirty gate | queued / design-ahead | §6, §10(c) |
-| Robotize → render-stack migration | queued | §9, §10 |
+| Robotize → render-stack migration (DSP still a monolith; only its rack UI got planed) | queued | §9, §10 |
+| Operating grammar / rack (PROC page; ChordMask/Echo/Groove/LFO/Robotize/PitchGen/TrigGen tenants) | **shipped — G0→G2 face-hook fold, 2026-07-03→2026-07-08** | §9 |
 | Windowing (sampler reads); track slots (RAM captures) | partial / deferred | §5.5 |
 
 ---
@@ -1102,9 +1103,10 @@ the elf is the worst case), but the system breaks at the two seams where the map
   window), and the margin system *structurally* can't cover it (250 ms cap). The RAM escape
   hatch is dead (§A5: both regions ~9 KB). *Verified live workaround: hold FREEZE before a
   recall — frozen groups stop re-dirtying, so the writeback collapses (undocumented today).*
-- **Wall 2 — the next intended capability doesn't fit.** Trigger generators (the instrument
-  is pitch-only today) want an ~11.25 KB twin pool that fits **neither** ~9 KB region. They
-  must fold into the existing 64-slot pool — a redesign, not a detail.
+- **Wall 2 — the next intended capability doesn't fit. RESOLVED as G3 (2026-07-07, §9).**
+  Trigger generators wanted an ~11.25 KB twin pool that fit **neither** ~9 KB region — built
+  as predicted here, folded into the existing 64-slot pool via a second sparse key-space
+  (`pool_index_trg`), not a separate pool. +256 B RAM, not +11.25 KB.
 
 **The emergent refinement queue** (ranked for *performable and fun*; #1–#5 play-readiness,
 #6–#7 capability/reliability, gated behind them):
@@ -1128,7 +1130,9 @@ the elf is the worst case), but the system breaks at the two seams where the map
    **change-detection** (`render_live_sig`): static field → zero renders, sweep → renders only on
    change. by-ear GO + HIL 2/2; real-set all-16 + echo/robotize/humanize = CPU ~27%, no lockup.
    *Exposed the next ceiling: ~8-track emission/port-buffer limit (scheduler drops = 0), parked.*
-6. **Trigger generators — fold into the shared pool** (capability; gated on #1/#3).
+6. **Trigger generators — fold into the shared pool.** **SHIPPED as G3 (2026-07-07, §9)**,
+   out of queue order (built as a rack tenant rather than gated behind #1/#3 — the recall-
+   freeze cure (#1) remains open).
 7. **Atomic snapshot writes + the SET durable baseline** (reliability; reuse the SET layer's
    proven temp+rename for `SnapshotWrite`).
 
@@ -1165,7 +1169,9 @@ recall. **What the MVP makes load-bearing** (and what falls off the critical pat
 - **Demoted / deferred off the MVP path:** the Turing **generators** (examples, optional source);
   the standalone chord-mask/tension as standalone (their function lives in MOTION's render stack);
   **trigger generators + generation-as-its-own-engine** — a *separate domain* for later (§3),
-  explicitly NOT in the first full workflow.
+  explicitly NOT in the first full workflow. *(Built anyway as G3, 2026-07-07, §9 — the rack's
+  operating grammar made it cheap enough to ship as a tenant without waiting on the MVP path;
+  the recall-freeze cure (#1) is still the one gating item.)*
 
 So the reframe reorders the roadmap cleanly: **capture + modulation + return are the MVP; the
 generation engine is the next domain after it plays.**
@@ -3569,6 +3575,64 @@ legibility win for real code cost. Re-scoped against the real catalog with the u
   decoded opportunistically, same POC-scoped low-blast-radius pattern, when the ear/eye asks
   for a specific one next.
 
+**2026-07-08 — Humanize joins the rack: 5th emission tenant, 11th row (SHIPPED, by-ear GO
+— a bypass bug found + fixed after the first flash, confirmed clean on the second).**
+Picked from a user-supplied 16-row roadmap sheet as the one clean, well-precedented gap:
+`seq_humanize.c`/`seq_ui_fx_humanize.c` already existed (Value 0..127 intensity +
+Note/Vel/Length mode bits, its own stock FX page) but had never joined the grammar — same
+EXPOSE-IN-PLACE shape Echo/Groove/LFO went through in G1.5-G1.7. The sheet's other ~7 names
+(Step Gen, Rand Gen, Turing, Duplicate, Loop, Morph, Capture) don't map to existing
+infrastructure the same way and were deliberately left unbuilt pending their own scoping
+pass — see §10.
+- **`proc_row_t` grew a `disable_cc` field — the first genuinely new generalization since
+  G1.5's `{occ_cc, disable_mask}`.** Every prior emission tenant's headline CC has spare
+  bits (Echo's Rpt 0..15, Groove's Styl ≤~28, LFO's Wave 0..25), so the bypass bit packs
+  into the same byte as the count. Humanize's headline (`Int` = `HUMANIZE_VALUE`) is a
+  genuine 0..127 intensity dial with no spare bit, so bypass needed to live on the
+  sibling `HUMANIZE_MODE` cc instead. `disable_cc` (0 = same byte as `occ_cc`, the
+  unchanged default for every existing tenant) tells `RowState` and the B-row
+  double-tap which cc to read/flip the mask on. `RowState`'s count-masking
+  (`raw & 0x3f`) is now conditional on the disable bit actually sharing `occ_cc`'s
+  byte, so Humanize's `Int` reads its true 0..127 value instead of being truncated to
+  63 — a real correctness fix the old code would have silently hit the moment any
+  tenant needed a full-range headline, not just a Humanize-specific patch.
+- **Shipped-then-caught: bypass didn't work at all on hardware (user report), root
+  cause was TWO bugs, both in the first pass's choice of bit 7 for the Mode disable
+  flag.** (1) `humanize_mode` is a **4-bit struct bitfield** (`u8 humanize_mode:4`,
+  `seq_cc.h`, packed tight with `transpose_semi`/`transpose_oct`/`morph_mode`), not a
+  full byte — only bits 0..3 physically exist, so writing bit 7 silently truncated
+  away on every `SEQ_CC_Set`, never actually stored. (2) independent of storage,
+  `SEQ_HUMANIZE_Event` (`seq_humanize.c`) never checked any disable bit at all — it
+  only ever tested bits 0/1/2 for Note/Vel/Length, unlike Groove/LFO's `_Event`/
+  `FastCC` functions, which DO early-out on their bit-7 disable flags. Both were
+  visible in source (the field declaration came up in an earlier grep) but the `:4`
+  width wasn't registered as significant when picking which bit to use — exactly the
+  class of platform-internals claim CLAUDE.md's "verify against source" rule exists
+  for, missed once despite reading the right line. **Fix**: moved the flag to bit 3
+  (`0x08` — the only bit actually free in a 4-bit field; bits 0..2 are Note/Vel/Len)
+  and added the missing early-out to `SEQ_HUMANIZE_Event`. Same flash size after the
+  fix (502520B either way — coincidence, not a wash).
+- **Note/Vel/Len bypass `SEQ_UI_PROC_SeedRowDefaults` on purpose.** That registry's
+  per-field "untouched" test is `SEQ_CC_Get(track, p->cc) == 0`, re-read fresh for each
+  param — correct when every param owns its own CC byte (true of every tenant so far),
+  but Humanize's three mode dials share ONE byte: seeding the first bit would make the
+  byte non-zero and the second/third field's "untouched" check would then read the
+  now-dirty byte as "already touched" and skip. Caught before shipping, not after.
+  Fix: the headline's own `PROC_KIND_HUM_VALUE` seeds all three bits in one direct
+  write (`f | 0x07`) on its own 0→on transition, guarded once on `(f & 0x07) == 0`,
+  bypassing the shared-registry path entirely rather than stretching it to cover a
+  case it wasn't built for.
+- **`.status` readout** names which of Note/Vel/Len the intensity actually touches
+  (`Note:on  Vel:off Len:off`) — unlike Echo/Groove/LFO, where the headline dial alone
+  tells the whole story, Humanize's Int says nothing about *what* it's humanizing.
+- **+392B flash, +0 RAM.** Full HIL suite (241 tests) reran clean twice — once after the
+  `RowState`/double-tap generalization (shared code every tenant depends on), once
+  again after the bypass-bit fix.
+- **Verdict → GO, by-ear on the re-flash.** Int audible at once on the 0→on turn;
+  double-tap bypass now actually silences the effect and preserves Note/Vel/Len/Int on
+  re-enable. No new open thread from this tenant itself — the sheet's other ~7 names
+  stay unscoped (§10).
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3584,7 +3648,8 @@ phase-F.3 cross-track capture + the withdrawn ENGAGE auto-jump; the `0x96`+ ext-
 bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot / windowing-playback
 / render-cache / set-density forks (now §5 / §A2); self-bus legibility first cut — Trn.Semi/Oct
 + LFO Amp signed decode, Direction enum (SHIPPED 2026-07-08, by-eye GO, §9) — the remaining
-~40 targets are opportunistic follow-on, not a standing fork.
+~40 targets are opportunistic follow-on, not a standing fork; **§10(b) trigger generators**
+(SHIPPED as G3, 2026-07-07, §9 — folded below, kept only as a pointer).
 
 **Still gating (genuinely open):**
 - **Max generator loop length** for static allocation — v1 default 64-step + tiling across
@@ -3783,12 +3848,14 @@ the generative freeze/bounce law); the actionable build sketches live here.
   settled-design sketch (now realized): a shallow ring per deliberate gesture; the implementation
   landed it as one-deep, in CCM (main was the scarce region), reusing the existing snapshot stores.*
 
-- **(b) Trigger generators — render-stack-native rhythm/gate Turing generators.** Generators
-  are pitch-only today; this adds rhythm. Mirror the pitch generator (`seq_generator.c`): a
-  per-(track, instrument) gate/trigger loop analogous to `loop[64]`, engaged → writes the
-  trigger-layer source, FREEZE-held, BOUNCE-frozen into editable triggers. Born under the
-  generative law (§9) so it never becomes a second emission-time exception. Spec before build:
-  density/contour, drum-layer interaction, pitch×rhythm coupling.
+- **(b) Trigger generators — SHIPPED as G3, the trigger Turing machine (2026-07-07, §9;
+  by-ear GO — "so far so good").** Extended `seq_generator.c` with an independent key-space
+  (`pool_index_trg`) rather than a twin pool, reusing PitchGen's mechanics (lock/rate/depth/
+  anchor/roll/bounce) to write 0/1 into a trigger layer instead of a note into a par-layer;
+  `range_min` doubles as density, no contour analogue for a boolean. Proves pitch-gen and
+  trigger-gen running **simultaneously on one melodic track** — pitch and rhythm decoupled,
+  the actual point. The register-unification question it surfaced (PitchGen/Robotize's
+  step-register vs bar-anchor register) is tracked separately below, parked not gating.
 
 - **(c) Self-modulation = the "self-bus".** Let a track source the bus's *own* modulations from
   its **own par layers** instead of spending a second (silent) loopback track. **Centerpiece =
@@ -4129,6 +4196,33 @@ fire). Real levers, each gated:
   selecting the terrain the field moves across.
 - **Workflow bundle** — the smallest *playable loop* judgeable by ear (§2.7); the
   unit GO/NO-GO gates sit on.
+- **Operating grammar** — the one control vocabulary (B-row select / GP-encoder bank / LED+LCD
+  readout / descriptor-driven behavior) every processor, generator, and emission effect is
+  operated through, instead of each getting its own bespoke page. Proven on ChordMask (G0),
+  licensed for the rest at G1 (§9 2026-07-03/05).
+- **Rack / tenant** — the rack is the fixed set of processor **rows** (B-row slots) the
+  operating grammar drives; a tenant is one processor/generator/effect wired onto a row
+  (ChordMask, Echo, Groove, LFO, Robotize, PitchGen, TrigGen as of 2026-07-08).
+- **PROC page** — the real page (not an LCD overlay) that hosts the rack; processors keep
+  running regardless of which page has focus — the page is pure navigation onto them (§9
+  2026-07-05 G1).
+- **`proc_row_t` / `proc_param_t`** — the descriptor tables the grammar reads: `proc_row_t`
+  describes one rack row (occupancy/enable rule, its `proc_param_t[]` param list, optional 2nd
+  plane); `proc_param_t` describes one operable dial (label, `PROC_KIND_*` value semantics, CC/
+  range, default, format). Adding a tenant = filling in a table row, not writing a bespoke page.
+- **Rowkind** (`PROC_ROW_STACK` / `PROC_ROW_EMISSION` / `PROC_ROW_GENERATOR`) — what a row's
+  occupancy/enable state is actually backed by: a render-stack slot, an emission-effect's CCs
+  (no stack slot), or a `SEQ_GENERATOR_*` pool-slot allocation (no CC at all). Spans all three
+  shapes state takes in this codebase (§9 2026-07-07 G2 part 2).
+- **Plane / face** — a row's optional 2nd operating surface (`proc_row_t.params2`/`face2`;
+  `face1` for a row's only plane), reached by a uniform Up/Down toggle (a top-right `OPER`/
+  `LOOP`-style cue names the current one). `face` is the descriptor id (`proc_face_t`) that
+  drives a plane's bespoke GP-row/button/readout branches — e.g. `PROC_FACE_ROBOLOOP` (Robotize's
+  16 bar-anchors), `PROC_FACE_PITCHGEN_STEPS`/`PROC_FACE_TRIGGEN_STEPS` (the LOCK window),
+  `PROC_FACE_CHORDMASK_SELF`/`GROOVE_PAINT`/`LFO_PALETTE`/`TENSION_ZONES` (§9 2026-07-06/08 G2).
+- **`PROC_KIND_ACTION`** — a momentary dial kind where turning is a no-op and **encoder-push
+  executes** (Robotize's Reseed/Freeze; PitchGen/TrigGen's Roll/Anchor/Snap/Bounce) — the one
+  rack dial that isn't a value sweep (§9 2026-07-06 G2 part 1).
 
 ---
 ---
