@@ -3495,6 +3495,42 @@ still ad-hoc identity checks (`ui_focused_proc_slot == SEQ_CORE_CHORDMASK_SLOT`,
   exactly the bar for a pure dispatch-mechanism swap. No new open G2 thread named; next
   rack work is whatever the ear asks for from here, not a queued follow-up.
 
+**2026-07-08 — Tension row: the GRAVITY cockpit's visualization ported in, plus a new
+zone-jump gesture (SHIPPED, by-ear + by-eye GO; committed main 5dd30fb0).**
+The first rack work after G2's four follow-ups closed — user-initiated, not a queued item.
+The rack's Tension row (Grip/Grav, two bare numbers) never got any of the dedicated GRAVITY
+cockpit page's (`seq_ui_gravity.c`, §8/§9 2026-06-09) real visualization: the zone name
+(DETENT/SCALE/CHORD/DRONE pulling, LEAN/RUB/SLIP pushing) and the bipolar meter. Ported it
+in, then the user pushed further into a genuinely new gesture, not just a display port.
+- **Reuse, not a 2nd copy.** `zone_name`/`tension_meter` (both file-static in
+  `seq_ui_gravity.c`) exposed as public `SEQ_UI_GRAVITY_ZoneName`/`TensionMeter` — one
+  zone-threshold source of truth for both the dedicated page and the rack row. The
+  dedicated page itself is untouched, still the same page it always was.
+- **First pass** (superseded before commit, kept for the record): zone+meter on row 1's
+  right screen, continuous 27-char bar. User's reaction: like the direction, but move the
+  zone+value to row 0 right-justified, and reshape the meter to align with the 8 physical
+  GP9-16 buttons so you can jump between zones directly — not just watch the number.
+- **PROC_FACE_TENSION_ZONES** (a face on the PRIMARY plane, the same mechanism the
+  ChordMask/Groove/LFO fold just built out) — the rack's first face to carry a real GESTURE
+  via GP-row button press, not just a paint/toggle surface. Row 0 right-justified: zone +
+  signed value. Row 1 (GP9-15, 5 cols each): one cell per zone, current one bracketed
+  `[DRN]`; GP16 = a steady "Rslv" hint. Tap GP9-15 = instant jump to that zone's rough
+  midpoint (DRONE≈-56/CHORD≈-36/SCALE≈-12/DETENT=0/LEAN≈12/RUB≈36/SLIP≈56), cancelling an
+  in-flight RESOLVE first — a manual turn, fast-travelled. Tap GP16 = the original page's
+  own smooth bar-quantized RESOLVE-to-detent ramp, unchanged, reused verbatim
+  (`SEQ_CORE_TensionResolve`). The Grav encoder itself never moved — fine control between
+  zones is exactly as before; the buttons are an ADDITIONAL fast-travel layer, not a
+  replacement (surfaced explicitly mid-build: user asked to confirm the encoder still
+  reaches the in-between values before continuing).
+- **Left screen dead space stays USED**: Tension only fills 2 of 8 dial cells (cols 0-9);
+  the first-pass 16-track GRIP overview bar (col 12+, `.`/`o`/`O`/`#` per track, same
+  thresholds as the original page's) survived the row 1 redesign — it moved out of the way
+  of the new zone cells rather than being cut.
+- **Verdict → GO, both by-ear (RESOLVE/jump gestures) and by-eye** ("looks great" — this is
+  the first rack change this session where the visual layout itself, not just behavior
+  parity, was the thing being judged). +320B flash for the new gesture (the display-only
+  first pass added none net, a pure port). No new open thread named.
+
 ---
 
 ## 10. Open questions (unresolved forks)
