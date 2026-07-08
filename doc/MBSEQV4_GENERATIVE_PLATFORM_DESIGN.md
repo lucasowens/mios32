@@ -3531,6 +3531,44 @@ in, then the user pushed further into a genuinely new gesture, not just a displa
   parity, was the thing being judged). +320B flash for the new gesture (the display-only
   first pass added none net, a pure port). No new open thread named.
 
+**2026-07-08 — Self-bus legibility: first cut, three targets decoded (SHIPPED, by-eye GO).**
+The §10 fork below, picked up the same session. Source-checked before building (CLAUDE.md's
+"verify platform-internals claims" rule earned its keep): the §10 note's example target list
+(ClockDiv → `/16`, Probability, Length-gate) didn't survive contact with `ctrl_labels[]` —
+Probability and gate-Length aren't self-bus-reachable CC targets at all, and ClockDiv turned
+out to have no fraction table on its own dedicated page either (`seq_ui_trkdiv.c` just prints
+`SEQ_CC_Get(...)+1`, a plain number) — so decoding it would have been a near-nonexistent
+legibility win for real code cost. Re-scoped against the real catalog with the user
+(`AskUserQuestion`): **bipolar signed values** (Trn.Semi/Trn.Oct/LFO Amplitude) + **Direction**.
+- **Mechanism.** New `SEQ_LCD_CtrlTargetCC` (`seq_lcd.c`) resolves a Ctrl-type par layer's
+  routed CC exactly like `SEQ_PAR_AssignedTypeStr` already does (`SEQ_CC_Get(track,
+  SEQ_CC_LAY_CONST_B1+par_layer)` normal tracks, `seq_layer_drum_cc[instrument][par_layer]`
+  drum/MBSEQV4P) — one source of truth for "what does this layer point at," reused rather
+  than re-derived. `mapped_cc = cc_number+0x20` mirrors `SEQ_CC_MIDI_Set`'s own mapping.
+  `SEQ_LCD_PrintCtrlValue` switches on `mapped_cc`: Trn.Semi/Oct get the **unmasked** nibble
+  decode (`>=8 → -16`) that `seq_core.c` actually runs at emission — deliberately NOT the
+  rack's defensive `&0x0f` read (`SEQ_UI_PROC_ParamRead`), because a self-bus step can
+  genuinely drive the target outside the sane -8..+7 range and the preview must not lie about
+  what emission will do with it; LFO Amp gets the `×2, -128` bipolar decode
+  (`SEQ_CC_MIDI_Set`'s 7→8-bit scale + `seq_lfo.c`'s centre); Direction gets its 7-name enum.
+  Everything else keeps the original raw `%3d` read, unchanged.
+- **Reuse over duplication, twice.** New `SEQ_LCD_PrintSigned` (`seq_lcd.c`) reuses the
+  already-fixed `%+3d`→literal-`"3d"` vsprintf-flag bug's fix idiom (`SEQ_UI_PROC_PrintSigned`,
+  seq_ui.c, from the G1/Pitch work) rather than re-discovering it — hand-emit the sign char.
+  Left `seq_ui.c`'s copy alone rather than force a single shared function: the rack's version
+  deliberately skips width padding because its cell is pre-blanked every redraw, while the
+  par-layer step cell isn't, so the two have genuinely different padding contracts.
+  `SEQ_LCD_PrintCtrlValue` returns handled/not-handled so each of the two display sites
+  (`SEQ_LCD_PrintLayerValue` compact view, `SEQ_LCD_PrintLayerEvent` detail view) falls back to
+  its OWN original raw rendering byte-for-byte when a target isn't decoded — the detail view's
+  VU bar survives for the ~40 still-undecoded targets, not just the 3 new ones.
+- **Verdict → GO by-eye on hardware** ("looks great"). +16B flash. HIL 241/241 (one
+  unrelated pre-existing flake surfaced and fixed along the way — a hardware-timing test
+  missing a per-test `pytest.mark.timeout` override, not a firmware bug; see
+  `reference-build-and-flash` memory). No new thread queued — the remaining ~40 targets get
+  decoded opportunistically, same POC-scoped low-blast-radius pattern, when the ear/eye asks
+  for a specific one next.
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3544,7 +3582,9 @@ in, then the user pushed further into a genuinely new gesture, not just a displa
 detection, cache invalidation, TRKMODE migration, generator pool, BOUNCE destination, §9);
 phase-F.3 cross-track capture + the withdrawn ENGAGE auto-jump; the `0x96`+ ext-CC persistence
 bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot / windowing-playback
-/ render-cache / set-density forks (now §5 / §A2).
+/ render-cache / set-density forks (now §5 / §A2); self-bus legibility first cut — Trn.Semi/Oct
++ LFO Amp signed decode, Direction enum (SHIPPED 2026-07-08, by-eye GO, §9) — the remaining
+~40 targets are opportunistic follow-on, not a standing fork.
 
 **Still gating (genuinely open):**
 - **Max generator loop length** for static allocation — v1 default 64-step + tiling across
@@ -3560,34 +3600,6 @@ bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot 
   around the recorded track's OWN loop wrap (handles sub-measure/polymeter too). The capture ring is
   already self-contained (own seed, doesn't touch the FREEZE/robotize ring), which lowers (A)'s risk.
   Full kickoff + grounded recon in `doc/plans/2026-06-26-multimeasure-capture.md`.
-- **Self-bus legibility — decode the Ctrl step value to the *target param's own units*
-  (floated 2026-07-03).** Today a `Ctrl` (self-bus) par-layer step shows a raw **0–127** value
-  (`seq_lcd.c:789` compact view + `:950` detail view, both `%3d`). The idea: show the value the
-  step *actually sets its target to* — a Ctrl-on-ClockDiv step reads `/16`, on Trn.Semi `+3`, on
-  Length a gatelength, on Probability `75%`. The *target name* is already resolved
-  (`SEQ_CC_LABELS_Get(port, cc, /*enforce_ctrl*/1)` → "ClockDiv"/"Trn.Semi"/…, shown on the
-  TRKEVNT config page); this extends that to the per-step **value**.
-  - **Mechanism (grounded):** a Ctrl layer holds a CC number from `ctrl_labels[]` (0x10–0x5f);
-    at emission each step calls `SEQ_CC_MIDI_Set(track, cc, value)`, which self-routes to
-    `SEQ_CC_Set(track, cc+0x20, value)` (→ config idx 0x30–0x7f). Display is decoupled from that
-    path.
-  - **Cost reframe — NOT runtime-heavy (the user's "heavy" instinct is aimed at the wrong axis).**
-    Decode runs display-only, on the EDIT page, for the 16 visible steps, on redraw — off the
-    emission path entirely. The real weight is **code surface** (a per-target decode+format
-    dispatch across ~50 self-routable CCs) and **screen real estate** (fitting a decoded value in
-    a 3–4-char step cell).
-  - **Two gotchas.** (1) *The 7-bit step value ≠ the stored value for several targets* —
-    `SEQ_CC_MIDI_Set` applies per-CC transforms (`LFO_AMPLITUDE` ×2, `MIDI_PORT`/`FX_MIDI_PORT`
-    remap high ranges → Bus/AOUT) and some targets pack flags (`TrkFlags`, `ClkDivFl`, `LFOFlags`)
-    that 7 bits can't fully express; the decoder must **mirror those same transforms** or the
-    readout lies. (2) abbreviation into the narrow cell.
-  - **POC-scoped path (recommended):** format only the handful of targets you'd actually *sweep
-    live* — ClockDiv, Trn.Semi/Oct, Length(gate), Probability, Direction, Groove, LFO Amp,
-    Echo Rep/Del — reusing the existing `SEQ_LCD_Print*` helpers where they already exist
-    (`PrintGatelength`, `PrintProbability`, `PrintStepDelay`, `PrintRootValue`); raw `%3d`
-    fallback for everything else. Two display sites, one localized `switch(cc)` branch, low blast
-    radius. Turns the self-bus from blind 0–127 automation into legible parameter automation — the
-    MOTION heart made performable.
 
 **Register unification — parked, not gating (investigated 2026-07-08; revisit once both
 models have more real-world mileage).** The G2/G3 §9 entries flagged PitchGen/TrigGen's
