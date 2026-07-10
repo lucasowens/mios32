@@ -28,6 +28,15 @@
 // auto-loaded, never written by a session save, and not user-navigable.
 #define SEQ_FILE_B_ANCHOR_BANK 0xfe
 
+// The anchor's scratch twin (file MBSEQ_AN.TMP). SEQ_FILE_B_AnchorWriteAtomic
+// builds the whole new anchor here, then renames it over MBSEQ_AN.V4 in one
+// step so a mid-write power loss can never leave a half-new/half-old anchor
+// that REVERT would restore as corruption. Shares the anchor's info slot (see
+// SEQ_FILE_B_InfoPtr) — same record format, identical header — but maps to its
+// own path (SEQ_FILE_B_BuildPath). Also outside 0..NUM_BANKS-1 so no bank loop
+// ever touches it.
+#define SEQ_FILE_B_ANCHOR_TMP_BANK 0xfc
+
 // PHRASES bundle: the snapshot library rides the same bank record format as a
 // second internal sentinel "bank" (file MBSEQ_PH.V4), holding 16 whole-organism
 // phrases laid out as 16 * 4 group-records (phrase N -> patterns 4N..4N+3).
@@ -68,6 +77,8 @@ extern s32 SEQ_FILE_B_NumPatterns(u8 bank);
 
 extern s32 SEQ_FILE_B_Create(char *session, u8 bank);
 extern s32 SEQ_FILE_B_Open(char *session, u8 bank);
+
+extern s32 SEQ_FILE_B_AnchorWriteAtomic(char *session);
 
 extern s32 SEQ_FILE_B_PatternRead(u8 bank, u8 pattern, u8 target_group,  u16 remix_map);
 extern s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track);

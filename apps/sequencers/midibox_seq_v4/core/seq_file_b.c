@@ -203,7 +203,9 @@ static u8 cached_pattern;
 /////////////////////////////////////////////////////////////////////////////
 static seq_file_b_info_t *SEQ_FILE_B_InfoPtr(u8 bank)
 {
-  if( bank == SEQ_FILE_B_ANCHOR_BANK )
+  // the anchor and its atomic-write scratch twin share one info slot: same
+  // record format, identical header — only their on-SD path differs.
+  if( bank == SEQ_FILE_B_ANCHOR_BANK || bank == SEQ_FILE_B_ANCHOR_TMP_BANK )
     return &seq_file_anc_info;
   if( bank == SEQ_FILE_B_PHRASE_BANK )
     return &seq_file_phr_info;
@@ -224,6 +226,11 @@ static void SEQ_FILE_B_BuildPath(char *filepath, char *session, u8 bank)
 {
   if( bank == SEQ_FILE_B_ANCHOR_BANK )
     sprintf(filepath, "%s/%s/MBSEQ_AN.V4", SEQ_FILE_SESSION_PATH, session);
+  else if( bank == SEQ_FILE_B_ANCHOR_TMP_BANK )
+    // the anchor's scratch twin: base "MBSEQ_AN" (8) + a ".TMP" extension, both
+    // within the FatFs _USE_LFN=0 8.3 limit. Only ever Created/written/renamed —
+    // never Opened as a bank — so the ".V4" format suffix is irrelevant here.
+    sprintf(filepath, "%s/%s/MBSEQ_AN.TMP", SEQ_FILE_SESSION_PATH, session);
   else if( bank == SEQ_FILE_B_PHRASE_BANK )
     // base "MBSEQ_PH" is 8 chars — within the FatFs _USE_LFN=0 8.3 limit (the
     // same constraint that forced MBSEQ_ANC -> MBSEQ_AN in FEARLESS).
@@ -483,6 +490,67 @@ s32 SEQ_FILE_B_Open(char *session, u8 bank)
   SEQ_FILE_B_PatternPeekName(cached_bank, cached_pattern, 1, dummy); // non-cached!
 
   return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Atomic CHECKPOINT anchor write (reliability hardening; design §8 queue #7).
+//
+// Every CHECKPOINT overwrites the anchor's four group records in place, and
+// REVERT reads all four back wholesale with no completeness witness (unlike the
+// phrase probe). A mid-write power loss on the in-place path therefore leaves a
+// half-new/half-old anchor that REVERT would restore as a corrupt Frankenstein
+// state — losing the performer's blessed safety net.
+//
+// The fix (the SET layer's temp+rename idiom): build the whole new anchor in a
+// scratch file (MBSEQ_AN.TMP, sharing the anchor info slot), then rename it over
+// MBSEQ_AN.V4 in a single directory operation. The live anchor is never touched
+// until the scratch is fully written and verified: any failure drops the scratch
+// and leaves the previous anchor intact; a power loss in the tiny unlink->rename
+// commit window leaves NO anchor (which REVERT safely refuses) — never a mix.
+//
+// Always re-Creates the scratch at the current firmware's V4 record size, so a
+// re-CHECKPOINT never inherits a too-small pattern_size from a legacy-firmware
+// anchor (the §9 A12 gotcha). The caller (SEQ_PATTERN_SnapshotWrite) holds
+// MUTEX_SDCARD — none of the file primitives take it themselves.
+//
+// The ascending group write order is kept for parity with the phrase path (and
+// so a partially-written scratch, if ever read, degrades the same way). Returns
+// >= 0 on the committed swap; < 0 on any failure (scratch dropped, old anchor
+// untouched).
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_FILE_B_AnchorWriteAtomic(char *session)
+{
+  char tmp_path[MAX_PATH];
+  char anc_path[MAX_PATH];
+  SEQ_FILE_B_BuildPath(tmp_path, session, SEQ_FILE_B_ANCHOR_TMP_BANK);
+  SEQ_FILE_B_BuildPath(anc_path, session, SEQ_FILE_B_ANCHOR_BANK);
+
+  // fresh scratch (CREATE_ALWAYS truncates any debris from a crashed attempt)
+  s32 status = SEQ_FILE_B_Create(session, SEQ_FILE_B_ANCHOR_TMP_BANK);
+
+  if( status >= 0 ) {
+    // build the full anchor in the scratch: four contiguous group records
+    u8 group;
+    for(group=0; group<SEQ_CORE_NUM_GROUPS; ++group) {
+      s32 err = SEQ_FILE_B_PatternWrite(session, SEQ_FILE_B_ANCHOR_TMP_BANK, group, group, 1);
+      if( err < 0 )
+        status = err;
+    }
+  }
+
+  if( status >= 0 )
+    // commit: swap the finished scratch in for the live anchor
+    status = FILE_Rename(tmp_path, anc_path);
+  else
+    // abort: drop the scratch, leave the previous anchor untouched
+    FILE_Remove(tmp_path);
+
+  // the scratch shared the anchor info slot; force the next AnchorPresent/Revert
+  // to re-Open MBSEQ_AN.V4 rather than trust the scratch's cached header/state.
+  seq_file_anc_info.valid = 0;
+
+  return status;
 }
 
 

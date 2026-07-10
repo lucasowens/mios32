@@ -404,17 +404,6 @@ s32 SEQ_PATTERN_AnchorPresent(void)
   return (status >= 0) ? 1 : 0;
 }
 
-// CHECKPOINT: write all four groups' live state into the anchor, lazy-creating
-// the file on first use. Groups are written ascending so a freshly-created
-// file (header only) extends contiguously (no seek-past-EOF gaps). Reads live
-// state only — leaves seq_pattern_dirty untouched (an anchor write is not a
-// working-slot save).
-//
-// Partial-write exposure (accepted POC cost, plan §4): a mid-loop SD failure
-// leaves a partial/mixed anchor — same power-loss class as a working-slot
-// save, at lower frequency. The failure is surfaced as a negative return
-// (cmd_checkpoint -> ok=0); the caller must heed it before trusting a later
-// REVERT. Atomic temp+rename is the fix if this ever bites in practice.
 // Shared write half of CHECKPOINT and phrase-capture: snapshot all four live
 // groups into a sentinel bank, lazy-creating the file on first use. `base_pattern`
 // selects the destination block (anchor = 0; phrase N = 4N). Groups are written
@@ -423,13 +412,42 @@ s32 SEQ_PATTERN_AnchorPresent(void)
 // to the target offset (the written records are well-defined — only never-written
 // gaps hold undefined content, which the occupancy mask keeps us from reading).
 // Reads live state only — leaves seq_pattern_dirty untouched (not a working-slot
-// save). Partial-write exposure (accepted POC cost): a mid-loop SD failure leaves
-// a partial/mixed snapshot; surfaced as a negative return for the caller to heed.
+// save).
+//
+// Atomicity (design §8 queue #7): the CHECKPOINT write (anchor block 0) is atomic
+// — it builds the whole new anchor in a scratch file and renames it over
+// MBSEQ_AN.V4 in one step (SEQ_FILE_B_AnchorWriteAtomic), so a mid-write power
+// loss can never leave a half-new/half-old anchor that REVERT (which reads all
+// four groups wholesale, with no completeness witness) would restore as
+// corruption. The pre-revert STASH (anchor block 4) and the PHRASE path stay
+// in-place — see the branch below for the stash; the phrase file holds all 16
+// phrases (~300 KB, a whole-file swap per capture would be prohibitive) and its
+// dead-capture case is already tolerated by the occupancy probe's dual group-0 +
+// last-group witness (reads as absent, not corrupt). The residual phrase exposure
+// is an OVERWRITE dying mid-write (new group 0 + old tail both pass the witness) —
+// accepted POC cost, surfaced as a negative return; a per-slot barrier is the fix
+// if it ever bites.
 static s32 SEQ_PATTERN_SnapshotWrite(u8 bank, u8 base_pattern)
 {
   s32 status;
 
   MUTEX_SDCARD_TAKE;
+
+  // The CHECKPOINT write (anchor block 0) commits atomically via a scratch +
+  // whole-file rename. The pre-revert STASH (anchor block PREREVERT_BASE, slots
+  // 4..7) must NOT take this path: it writes into the SAME file alongside the
+  // checkpoint (slots 0..3) and has to preserve it, whereas the atomic replace
+  // rewrites the whole file as a fresh 4-slot anchor. That shrink is correct for
+  // a checkpoint — it drops any stale stash, and CHECKPOINT invalidates the
+  // journal that referenced it — but it would corrupt a stash-in-progress. So the
+  // stash (base_pattern != 0) falls through to the in-place path below (its
+  // partial-write exposure is the lower-value "recover a jam you were discarding",
+  // and it never endangers the checkpoint block at a different offset).
+  if( bank == SEQ_FILE_B_ANCHOR_BANK && base_pattern == 0 ) {
+    status = SEQ_FILE_B_AnchorWriteAtomic(seq_file_session_name);
+    MUTEX_SDCARD_GIVE;
+    return status;
+  }
 
   // lazy create: open the session's sentinel bank, create-then-open if absent
   status = SEQ_FILE_B_Open(seq_file_session_name, bank);

@@ -923,6 +923,47 @@ s32 FILE_Remove(char *path)
 
 
 /////////////////////////////////////////////////////////////////////////////
+//! Renames (moves) a file, replacing the destination if it already exists.
+//! FatFs' f_rename refuses when the destination is present, so the destination
+//! is removed first (best-effort — a missing destination is not an error) and
+//! then the source is renamed over it.
+//!
+//! This is the atomic-commit primitive for the write-to-scratch + rename idiom:
+//! build the new file under a temp name, then FILE_Rename it over the live one.
+//! The live file is only touched in this one directory operation, so a power
+//! loss leaves either the old file intact or (in the tiny unlink -> rename
+//! window) no file at all — never a half-written mix of old and new bytes.
+/////////////////////////////////////////////////////////////////////////////
+s32 FILE_Rename(char *src_file, char *dst_file)
+{
+  if( !volume_available ) {
+#if DEBUG_VERBOSE_LEVEL >= 2
+    DEBUG_MSG("[FILE_Rename] ERROR: volume doesn't exist!\n");
+#endif
+    return FILE_ERR_NO_VOLUME;
+  }
+
+#if DEBUG_VERBOSE_LEVEL >= 2
+  DEBUG_MSG("[FILE_Rename] rename %s to %s\n", src_file, dst_file);
+#endif
+
+#ifdef MIOS32_FAMILY_EMULATION
+  // POSIX rename() atomically replaces an existing destination
+  if( rename(src_file, dst_file) != 0 )
+    return FILE_ERR_RENAME;
+#else
+  // f_rename returns FR_EXIST if the destination is present -> remove it first.
+  // Ignore the unlink result: the destination legitimately may not exist yet.
+  f_unlink(dst_file);
+  if( (file_dfs_errno=f_rename(src_file, dst_file)) != FR_OK )
+    return FILE_ERR_RENAME;
+#endif
+
+  return 0;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
 //! Returns 1 if file exists, 0 if it doesn't exist, < 0 on errors
 /////////////////////////////////////////////////////////////////////////////
 s32 FILE_FileExists(char *filepath)

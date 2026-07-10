@@ -1140,8 +1140,18 @@ the elf is the worst case), but the system breaks at the two seams where the map
 6. **Trigger generators — fold into the shared pool.** **SHIPPED as G3 (2026-07-07, §9)**,
    out of queue order (built as a rack tenant rather than gated behind #1/#3 — the recall-
    freeze cure (#1) remains open).
-7. **Atomic snapshot writes + the SET durable baseline** (reliability; reuse the SET layer's
-   proven temp+rename for `SnapshotWrite`).
+7. **Atomic snapshot writes** — **SHIPPED (2026-07-10, §9).** The CHECKPOINT anchor write is
+   now atomic: `SEQ_PATTERN_SnapshotWrite(ANCHOR_BANK, 0)` delegates to a new
+   `SEQ_FILE_B_AnchorWriteAtomic` that builds the whole anchor in a scratch (`MBSEQ_AN.TMP`)
+   then `FILE_Rename`s it over `MBSEQ_AN.V4` in one directory op — so a mid-write power loss
+   can never leave a half-new/half-old anchor that REVERT (no completeness witness) restores as
+   corruption. New `FILE_Rename` primitive (`f_unlink(dst)` + `f_rename`) — the temp+rename the
+   SET baseline will reuse. Scoped to the anchor: the pre-revert stash (block 4) stays in-place
+   (must preserve block 0 in the same file), and the phrase path is already partial-write
+   tolerant (dual-witness occupancy probe) + too large (~300 KB) for a per-capture whole-file
+   swap; the phrase-*overwrite* Frankenstein remains an accepted POC cost. Pin:
+   `test_recheckpoint_replaces_anchor`. **The SET durable baseline itself stays design-settled /
+   build-on-GO** (§10(a)) — a separate feature, not reliability hardening.
 
 Full detail, the three flat-maps, the cross-map risk register, and the fixed-Ableton test-bed
 spec live in `doc/plans/2026-06-21-system-flatmap.md`.
@@ -3801,6 +3811,43 @@ multi-bar grabs while-PLAYING only. **No build, no test pin needed** (behavior a
 241); the fix was doc-only: §10 bullet rewritten from "genuinely open" to "deferred by choice," recon
 preserved in the plan for a possible revival. *Revive only if grabbing a long self-mod loop while the
 transport is STOPPED becomes a workflow the user wants.*
+
+**2026-07-10 — Atomic CHECKPOINT anchor write (§8 queue #7, the last queue item; SHIPPED, reliability
+hardening, not musical).** The one unprotected power-loss exposure in the snapshot layer: every
+CHECKPOINT overwrote the anchor's four group records **in place** (`MBSEQ_AN.V4`), and REVERT reads
+all four back **wholesale with no completeness witness** (unlike the phrase probe's dual group-0 +
+last-group check) — so a mid-write failure left a half-new/half-old anchor that REVERT would restore
+as a corrupt Frankenstein organism, losing the performer's blessed safety net. The doc had carried
+"atomic temp+rename is the fix *if it bites*" since FEARLESS Stage C (2026-06-11); built now as the
+queue's tail.
+- **The fix:** `SEQ_PATTERN_SnapshotWrite(ANCHOR_BANK, 0)` now delegates to a new
+  `SEQ_FILE_B_AnchorWriteAtomic` — build the whole anchor in a scratch (`MBSEQ_AN.TMP`, sharing the
+  anchor info slot; base "MBSEQ_AN" + ".TMP" fits the 8.3 `_USE_LFN=0` limit), then `FILE_Rename` it
+  over `MBSEQ_AN.V4` in one directory op. Failure drops the scratch and leaves the old anchor intact;
+  a power loss in the tiny unlink→rename window leaves NO anchor, which REVERT safely refuses — never
+  a mix. New thin `FILE_Rename` primitive in the shared FILE module (`f_unlink(dst)` because FatFs
+  `f_rename` refuses an existing dst, then `f_rename`; POSIX `rename()` under emulation) — **this is
+  the temp+rename the SET durable baseline (§10(a)) will reuse**, now proven.
+- **Scoped deliberately to the checkpoint (anchor block 0), by ear/by source, not blanket:** (1) the
+  **pre-revert stash** (`SnapshotWrite(ANCHOR_BANK, PREREVERT_BASE=4)`) must stay **in-place** — it
+  writes slots 4..7 into the SAME file and has to preserve the checkpoint in slots 0..3, whereas the
+  atomic replace intentionally rewrites the file as a fresh 4-slot anchor (correct for a checkpoint —
+  it drops any stale stash, and CHECKPOINT invalidates the journal that referenced it — but it would
+  corrupt a stash). Branch is `bank == ANCHOR_BANK && base_pattern == 0`. (2) The **phrase** path
+  stays in-place: its file holds all 16 phrases (~300 KB — a whole-file swap per capture would be
+  prohibitive) and its dead-capture case is already tolerated by the occupancy witness (reads as
+  absent, not corrupt). The residual **phrase-overwrite** Frankenstein (new group 0 + old tail both
+  pass the witness) stays an accepted POC cost — a per-slot barrier is the fix if it bites.
+- **The SET durable baseline itself was NOT built** — it stays design-settled / build-on-GO (§10(a),
+  §9 2026-06-19). #7 bundled "atomic snapshot writes + the SET baseline"; only the reliability half is
+  reliability hardening. The SET baseline is a separate feature (a file-copy layer above the
+  disposable session) gated behind its own GO.
+- **Pin:** `test_recheckpoint_replaces_anchor` (checkpoint A → re-checkpoint B over the live anchor →
+  REVERT lands on B, never stale A, never a dropped file — exercises the remove-old + rename overwrite
+  path). The single-checkpoint round-trip and the checkpoint↔stash interaction are already covered by
+  the existing FEARLESS pins (`test_checkpoint_revert_restores_sculpted_organism`,
+  `test_revert_is_undoable`, `test_double_revert_preserves_jam`), which now run over the atomic path.
+  Firmware builds clean; HIL pending on the user's hardware.
 
 ---
 

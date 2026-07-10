@@ -991,8 +991,20 @@ in three stages; by-ear hard GO 2026-06-13, HIL 135/135.
   + latch reset + PC/bank send + `ManualSynchToMeasure(0xffff)`), and sets every
   group dirty + loaded **last** (the inversion: the next switch writes the
   reverted state into the working slot). Refuses cleanly when no anchor exists.
-  *Accepted POC cost:* a mid-op SD failure can leave a partial anchor (parity with
-  the working-slot writeback's power-loss exposure); atomic temp+rename is the fix.
+  *Atomic write (2026-07-10, §8 #7):* `SEQ_PATTERN_Checkpoint` no longer writes the
+  anchor in place — `SEQ_PATTERN_SnapshotWrite(ANCHOR_BANK, ...)` delegates to
+  `SEQ_FILE_B_AnchorWriteAtomic`, which builds the whole anchor in a scratch
+  (`MBSEQ_AN.TMP`, sharing the anchor info slot) then `FILE_Rename`s it over
+  `MBSEQ_AN.V4` in one directory op. So a mid-write power loss leaves the previous
+  anchor intact (or, in the tiny unlink→rename window, no anchor — which REVERT
+  refuses), never a half-new/half-old anchor REVERT would restore as corruption.
+  `FILE_Rename` = `f_unlink(dst)` (FatFs `f_rename` refuses an existing dst) +
+  `f_rename`. The scratch is always re-Created at the current V4 record size, so a
+  re-CHECKPOINT can't inherit a too-small `pattern_size` from a legacy anchor. The
+  **PHRASE** path stays in-place (its file holds all 16 phrases; the occupancy
+  probe's dual group-0 + last-group witness already reads a dead capture as absent,
+  not corrupt) — the residual exposure is a phrase *overwrite* dying mid-write, an
+  accepted POC cost (a per-slot barrier is the fix if it bites).
 - **REVERT-undoable (Stage 2b 2026-06-24).** REVERT now stashes the live organism
   to a pre-revert block (anchor slots 4..7) before the restore and arms the unified
   journal's ORGANISM scope — so SELECT+CLEAR brings the jam back (see the action-

@@ -18,7 +18,10 @@ The pins:
     cleanly — returns False, no crash, no live change;
   - the anchor is a separate file: a working-slot writeback (the Stage A
     auto-writeback) targets the user bank, never MBSEQ_AN.V4, so a REVERT
-    after a writeback still restores the checkpointed state.
+    after a writeback still restores the checkpointed state;
+  - atomic anchor write (§8 #7): a second CHECKPOINT REPLACES the anchor via a
+    scratch-build + rename, so a re-checkpoint-then-REVERT lands on the second
+    blessed state, never a stale first anchor or a dropped file.
 
 The gen-faithfulness pins need V4-sized bank records, which only freshly
 created sessions have — the `genv4` fixture load-or-creates session GENV4 and
@@ -254,6 +257,44 @@ def test_anchor_survives_working_slot_writeback(genv4):
     assert board.cc_get(0, CC.LENGTH) == LEN_CHECKPOINT, (
         "REVERT should restore the checkpointed state — the working-slot "
         "writeback must not have touched the anchor file"
+    )
+
+    for g in range(4):
+        board.dirty_set(g, False)
+
+
+@pytest.mark.hardware
+def test_recheckpoint_replaces_anchor(genv4):
+    """Atomic anchor write (design §8 #7). A second CHECKPOINT must fully REPLACE
+    the anchor, not leave the first one. The atomic path builds the whole new
+    anchor in a scratch (MBSEQ_AN.TMP) then renames it over MBSEQ_AN.V4 — and
+    FatFs' f_rename refuses an existing destination, so FILE_Rename removes the old
+    anchor first. This pins that overwrite/commit path end to end: bless marker A,
+    re-bless marker B over the live anchor, then REVERT must land on B — never the
+    stale A (rename didn't take) and never a missing anchor (remove without a
+    completed rename). The single-checkpoint round-trip is covered above; this is
+    specifically the replace."""
+    board = genv4
+    board.reset(RESET_DEFAULT)
+    _park(board)
+
+    # First checkpoint blesses marker A.
+    board.cc_set(0, CC.LENGTH, LEN_CHECKPOINT)   # A
+    assert board.checkpoint(), "first checkpoint should commit"
+    assert board.anchor_present(), "anchor should exist after the first checkpoint"
+
+    # Re-checkpoint blesses marker B over the existing anchor (the overwrite path:
+    # scratch build + remove-old + rename).
+    board.cc_set(0, CC.LENGTH, LEN_JAM)          # B
+    assert board.checkpoint(), "second checkpoint should commit (atomic replace)"
+    assert board.anchor_present(), "anchor must still exist after the atomic replace"
+
+    # Move live off B, then REVERT must restore B (the replacement), not A.
+    board.cc_set(0, CC.LENGTH, LEN_CHECKPOINT)
+    assert board.revert(), "revert should commit"
+    assert board.cc_get(0, CC.LENGTH) == LEN_JAM, (
+        "REVERT must restore the SECOND checkpoint — the atomic write must have "
+        "replaced the anchor, not left the first (stale) one or dropped the file"
     )
 
     for g in range(4):
