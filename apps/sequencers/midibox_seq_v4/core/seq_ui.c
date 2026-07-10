@@ -77,7 +77,7 @@ u8 ui_selected_step;
 u8 ui_selected_item;
 u8 ui_selected_bookmark;
 u8 ui_selected_phrase;
-u8 ui_focused_proc_slot = SEQ_CORE_CHORDMASK_SLOT; // focused rack ROW index in PROC view (0..PROC_NUM_ROWS-1; row i==slot i for the 4 stack rows)
+u8 ui_focused_proc_slot = SEQ_CORE_CHORDMASK_SLOT; // focused rack ROW index in PROC view (0..PROC_NUM_ROWS-1; row i==slot i for the 5 stack rows)
 u16 ui_selected_gp_buttons;
 
 // PROC-page Groove row (G1.6): which template lane the GP row paints (0=Dly/1=Len/2=Vel),
@@ -1428,6 +1428,11 @@ typedef enum {
   PROC_KIND_HUM_NOTE, // Humanize Mode bit 0 (Note event humanized) (Humanize).
   PROC_KIND_HUM_VEL,  // Humanize Mode bit 1 (Velocity humanized) (Humanize).
   PROC_KIND_HUM_LEN,  // Humanize Mode bit 2 (Gatelength humanized) (Humanize).
+  PROC_KIND_ARP_MODE, // Arp mode: a plain CC value (0=Off/1..4=Up/Down/UpDown/Random) — this
+                      // kind exists purely so ParamPrintValue can print the name (Arp).
+  PROC_KIND_ARP_BUS,  // Arp chord source: plain CC 0..4 (0=Self/1..4=bus A..D). Distinct from
+                      // ChordMask's PROC_KIND_BUS: Self is 0 here (natural zero default), no
+                      // bit-2 encoding. Read/write generic; kind exists only to print the name.
 } proc_pkind_t;
 
 // Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot). PitchGen and
@@ -1463,11 +1468,11 @@ typedef struct {
                         // — see SEQ_UI_PROC_SeedRowDefaults.
 } proc_param_t;
 
-// The rack is an ordered list of ROWS, not a raw walk of the 4 render-stack slots.
-// A row is backed EITHER by a render-stack slot (Pitch/ChordMask/Tension/Limit —
+// The rack is an ordered list of ROWS, not a raw walk of the render-stack slots.
+// A row is backed EITHER by a render-stack slot (Pitch/ChordMask/Arp/Tension/Limit —
 // PROC_ROW_STACK) OR by an emission-time effect's CCs (Echo — PROC_ROW_EMISSION:
 // the DSP stays at emission per design §5; only the OPERATION joins the grammar,
-// G1.5). ui_focused_proc_slot is now a ROW index. The first four rows are kept in
+// G1.5). ui_focused_proc_slot is now a ROW index. The first five rows are kept in
 // stack-slot order so row i == SEQ_CORE_*_SLOT i and the G1 rack reads identically;
 // emission rows append after. Migrating an effect onto the grammar = adding a row
 // (a proc_param_t[] table + one occupancy predicate in SEQ_UI_PROC_RowState).
@@ -1558,6 +1563,14 @@ static const proc_param_t proc_params_pitch[] = {
 static const proc_param_t proc_params_chordmask[] = {
   { "Str", PROC_KIND_CM_STR, SEQ_CC_CHORDMASK_STRENGTH, 0, 127, 0, PROC_FMT_DEFAULT },
   { "Bus", PROC_KIND_BUS,    SEQ_CC_CHORDMASK_BUS,      0,   4, 0, PROC_FMT_DEFAULT },
+};
+// Arp — deterministic step-indexed chord-tone select. Mode is the headline: 0=Off (dark
+// row/pass-through), 1..4=Up/Down/UpDown/Random. Bus is the chord source: Self (paint the
+// chord on the ChordMask row's GP1-12 face; shares chordmask_mask_h/l) or a live bus
+// A..D. Self is the 0 default (the proven self-source behavior out of the box).
+static const proc_param_t proc_params_arp[] = {
+  { "Mode", PROC_KIND_ARP_MODE, SEQ_CC_ARP_MODE, 0, 4, 0, PROC_FMT_DEFAULT },
+  { "Bus",  PROC_KIND_ARP_BUS,  SEQ_CC_ARP_BUS,  0, 4, 0, PROC_FMT_DEFAULT },
 };
 static const proc_param_t proc_params_tension[] = {
   { "Grip", PROC_KIND_CC,      SEQ_CC_TENSION_GRIP, 0, 127, 0, PROC_FMT_DEFAULT },
@@ -1717,6 +1730,8 @@ static const proc_row_t proc_rows[] = {
   { .name = "ChordMask", .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_CHORDMASK_SLOT,
     .params = proc_params_chordmask, .n_params = 2, .face1 = PROC_FACE_CHORDMASK_SELF,
     .status = SEQ_UI_PROC_Status_ChordMask },
+  { .name = "Arp",       .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_ARP_SLOT,
+    .params = proc_params_arp,       .n_params = 2 },
   { .name = "Tension",   .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_TENSION_SLOT,
     .params = proc_params_tension,   .n_params = 2, .face1 = PROC_FACE_TENSION_ZONES,
     .status = SEQ_UI_PROC_Status_Tension },
@@ -2426,6 +2441,16 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_KIND_BUS:
     if( v >= 4 ) SEQ_LCD_PrintString("Sf  ");            // Self = static hand-set mask
     else         SEQ_LCD_PrintFormattedString("%c   ", 'A' + (v & 0x03));
+    return;
+  case PROC_KIND_ARP_MODE: {
+    static const char *const an[5] = { "Off ", "Up  ", "Dn  ", "U-D ", "Rnd " };
+    u8 m = (u8)v;
+    SEQ_LCD_PrintString(an[(m < 5) ? m : 0]);
+    return;
+  }
+  case PROC_KIND_ARP_BUS:
+    if( v == 0 ) SEQ_LCD_PrintString("Self");            // 0 = shared static mask
+    else         SEQ_LCD_PrintFormattedString("%c   ", 'A' + ((v - 1) & 0x03)); // 1..4 = bus A..D
     return;
   case PROC_KIND_FLAG:
   case PROC_KIND_HUM_NOTE:

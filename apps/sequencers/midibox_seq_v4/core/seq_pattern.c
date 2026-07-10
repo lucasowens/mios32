@@ -997,6 +997,8 @@ static void phrase_morph_apply(void)
         SEQ_CC_CHORDMASK_BUS,
         SEQ_CC_CHORDMASK_DRUM_L, SEQ_CC_CHORDMASK_DRUM_H,
         SEQ_CC_CHORDMASK_MASK_L, SEQ_CC_CHORDMASK_MASK_H,
+        SEQ_CC_ARP_MODE, // discrete mode select — snap, don't lerp through intermediate modes
+        SEQ_CC_ARP_BUS,  // discrete source select — snap (bus index / Self), not a magnitude
       };
       for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
         u8 cc = SEQ_FILE_B_TRK_EXT_CC_FIRST + i;

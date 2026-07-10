@@ -217,6 +217,12 @@
 // bus + drum scope with chord_mask (CHORDMASK_BUS / CHORDMASK_DRUM_*).
 #define SEQ_CC_TENSION_GRIP						0x9A // 0..127 — per-track field grip
 
+// Arp tenant: step-indexed deterministic chord-tone select, sibling to ChordMask.
+// Self mode shares ChordMask's mask (CHORDMASK_MASK_L/H); bus modes read the live
+// held chord off a bus. 0x9f stays free.
+#define SEQ_CC_ARP_MODE							0x9D // 0=Off, 1=Up, 2=Down, 3=UpDown, 4=Random
+#define SEQ_CC_ARP_BUS							0x9E // 0=Self (static mask), 1..4=bus A..D (live chord)
+
 
 /////////////////////////////////////////////////////////////////////////////
 // Global Types
@@ -313,6 +319,8 @@ typedef struct {
   u8		chordmask_mask_l;        // Self static mask, pitch classes 0..7  (bit i = PC i active)
   u8		chordmask_mask_h;        // Self static mask, pitch classes 8..11 (bit i = PC 8+i active)
   u8		tension_grip;            // 0..127 — GRAVITY field grip (0 = not held by the field)
+  u8		arp_mode;                // 0=Off, 1=Up, 2=Down, 3=UpDown, 4=Random
+  u8		arp_bus;                 // chord source: 0=Self (shares chordmask's mask), 1..4=bus A..D (live)
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

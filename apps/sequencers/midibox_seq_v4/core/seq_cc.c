@@ -323,7 +323,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
   // while stopped they run a synchronous full track render (RenderTouched),
   // which must not execute with interrupts masked (#17). Each sync re-derives
   // from tcc, so deferring past the tcc write is equivalent.
-  u8 sync_chordmask = 0, sync_tension = 0, sync_pitch = 0, sync_limit = 0;
+  u8 sync_chordmask = 0, sync_tension = 0, sync_pitch = 0, sync_limit = 0, sync_arp = 0;
 
   // since CCs can be modified from other tasks at different priority we should do this operation atomic
   portENTER_CRITICAL();
@@ -334,6 +334,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       SEQ_CC_LinkUpdate(track);
     sync_pitch = 1; // layer types feed the PITCH render (Note/CC/Scale/Root)
     sync_limit = 1; // ...and the LIMIT render (which layers are Note)
+    sync_arp = 1;   // ...and ARP (same Note-layer scoping)
   } else {
     switch( cc ) {
       case SEQ_CC_MODE:
@@ -342,6 +343,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	sync_tension = 1;   // keep the tension slot consistent too
 	sync_pitch = 1;     // Transpose/Arp playmode arms/fences PITCH
 	sync_limit = 1;     // arp fence applies to LIMIT too
+	sync_arp = 1;       // legacy Arpeggiator playmode fences the ARP tenant too
 	break;
       case SEQ_CC_MODE_FLAGS:
 	tcc->trkmode_flags.ALL = value;
@@ -353,6 +355,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	SEQ_CC_LinkUpdate(track);
 	sync_pitch = 1; // drum fence + CC-mode branch depend on this
 	sync_limit = 1; // drum fence applies to LIMIT too
+	sync_arp = 1;   // drum fence applies to ARP too
 	break;
 
       case SEQ_CC_MIDI_CHANNEL: tcc->midi_chn = value; break;
@@ -508,10 +511,12 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_CHORDMASK_MASK_L:
 	tcc->chordmask_mask_l = value & 0xff; // Self static mask, PCs 0..7
 	sync_chordmask = 1;                   // re-render (RenderTouched via the sync)
+	sync_arp = 1;                         // ARP shares this mask as its pc source
 	break;
       case SEQ_CC_CHORDMASK_MASK_H:
 	tcc->chordmask_mask_h = value & 0x0f; // Self static mask, PCs 8..11
 	sync_chordmask = 1;
+	sync_arp = 1; // ARP shares this mask as its pc source
 	break;
       case SEQ_CC_CHORDMASK_DRUM_L:
 	tcc->chordmask_drum_l = value & 0xff;
@@ -527,6 +532,14 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	tcc->tension_grip = value & 0x7f;
 	sync_tension = 1; // GRIP enables/scales the field slot
 	break;
+      case SEQ_CC_ARP_MODE:
+	tcc->arp_mode = value & 0x07;
+	sync_arp = 1;
+	break;
+      case SEQ_CC_ARP_BUS:
+	tcc->arp_bus = (value > 4) ? 4 : value; // 0=Self, 1..4=bus A..D
+	sync_arp = 1;
+	break;
 
       default:
 	portEXIT_CRITICAL();
@@ -541,6 +554,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
   if( sync_tension )   SEQ_CORE_TensionSlotSync(track);
   if( sync_pitch )     SEQ_CORE_PitchSlotSync(track);
   if( sync_limit )     SEQ_CORE_LimitSlotSync(track);
+  if( sync_arp )       SEQ_CORE_ArpSlotSync(track);
 
   // FEARLESS SWITCHING: live diverged from slot. Loads re-clear at the end of
   // SEQ_PATTERN_Load (the bank read replays CCs through this chokepoint).
@@ -746,6 +760,8 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_CHORDMASK_MASK_L:     return tcc->chordmask_mask_l;
     case SEQ_CC_CHORDMASK_MASK_H:     return tcc->chordmask_mask_h;
     case SEQ_CC_TENSION_GRIP:         return tcc->tension_grip;
+    case SEQ_CC_ARP_MODE:             return tcc->arp_mode;
+    case SEQ_CC_ARP_BUS:              return tcc->arp_bus;
   }
 
   return -2; // invalid CC

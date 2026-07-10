@@ -24,7 +24,7 @@
 
 #define SEQ_CORE_NUM_BPM_PRESETS       16
 
-#define SEQ_CORE_NUM_PROCESSOR_SLOTS   4
+#define SEQ_CORE_NUM_PROCESSOR_SLOTS   5
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -258,6 +258,7 @@ typedef enum {
   SEQ_PROCESSOR_ID_TENSION    = 2, // GRAVITY field (Tension Workbench, §2)
   SEQ_PROCESSOR_ID_PITCH      = 3, // transpose+FTS (Track 2 pitch-chain migration)
   SEQ_PROCESSOR_ID_LIMIT      = 4, // note-limit octave fold (Track 2 Stage B)
+  SEQ_PROCESSOR_ID_ARP        = 5, // deterministic step-indexed chord-tone select
 } seq_processor_id_t;
 
 typedef struct {
@@ -275,8 +276,9 @@ typedef struct {
 // the renderer instead of hard-coding indices.
 #define SEQ_CORE_PITCH_SLOT     0
 #define SEQ_CORE_CHORDMASK_SLOT 1
-#define SEQ_CORE_TENSION_SLOT   2
-#define SEQ_CORE_LIMIT_SLOT     3
+#define SEQ_CORE_ARP_SLOT       2 // sibling to CHORD_MASK: select-one vs snap-toward-any
+#define SEQ_CORE_TENSION_SLOT   3
+#define SEQ_CORE_LIMIT_SLOT     4
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -476,6 +478,11 @@ extern void SEQ_CORE_PitchSlotSync(u8 track);
 // (limit_lower/upper). Armed iff either bound is set; same arp/drum fences as
 // PITCH. Called from SEQ_CC_Set.
 extern void SEQ_CORE_LimitSlotSync(u8 track);
+
+// ARP tenant (POC, self-source only): keep the ARP processor slot mirrored from
+// tcc (arp_mode). Armed iff arp_mode != 0; never armed in legacy Arpeggiator
+// playmode or Drum event mode (same fence as PITCH/LIMIT). Called from SEQ_CC_Set.
+extern void SEQ_CORE_ArpSlotSync(u8 track);
 
 // Set the global GRAVITY dial (clamped −64..+63) and touch the field-bearing
 // tracks so a live cockpit-encoder sweep re-renders smoothly. Called from the

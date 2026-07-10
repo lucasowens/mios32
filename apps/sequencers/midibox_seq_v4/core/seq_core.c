@@ -1126,6 +1126,120 @@ static void chord_mask_render_range(u8 track, const seq_processor_slot_t *p,
   }
 }
 
+// ARP tenant. Sibling to CHORD_MASK: same pc_mask sources (Self = the track's static
+// mask tcc->chordmask_mask_h/l, painted via ChordMask's own GP1-12 face; or the live
+// held chord on a bus — p->bus 0=Self, 1..4=bus A..D, mirroring chord_mask_render_range
+// but with Self as the natural zero default), same chord_mask_snap primitive, but
+// SELECTS exactly one tone per step (Up/Down/UpDown/Random over the mask's active pitch
+// classes) instead of loosely snapping toward any tone in the mask. Deterministic by
+// construction — Random draws grip_hash, not live RNG — so results are reproducible/
+// capturable like every other processor here. Legacy Arpeggiator playmode and Drum
+// event mode are fenced (same reason PITCH/LIMIT fence them: the Note byte means
+// something else there).
+#define GRIP_ZONE_ARP  0x40 // distinct from CHORD_MASK's 0x20 and TENSION's 0..6 zones
+
+#define SEQ_ARP_MODE_OFF     0
+#define SEQ_ARP_MODE_UP      1
+#define SEQ_ARP_MODE_DOWN    2
+#define SEQ_ARP_MODE_UPDOWN  3
+#define SEQ_ARP_MODE_RANDOM  4
+
+// Count of set bits in the low 12 bits of pc_mask (0..12).
+static u8 arp_popcount12(u16 pc_mask)
+{
+  u8 n = 0, pc;
+  for(pc=0; pc<12; ++pc)
+    if( pc_mask & (1u << pc) )
+      ++n;
+  return n;
+}
+
+// The idx-th (0-based) active pitch class in pc_mask, scanning C..B. Caller
+// contract: idx < arp_popcount12(pc_mask) on the same mask.
+static u8 arp_nth_active_pc(u16 pc_mask, u8 idx)
+{
+  u8 pc;
+  for(pc=0; pc<12; ++pc) {
+    if( pc_mask & (1u << pc) ) {
+      if( idx == 0 )
+        return pc;
+      --idx;
+    }
+  }
+  return 0; // unreachable if the contract holds
+}
+
+// Step-indexed pitch-class selection. Deterministic function of (mode, step, n)
+// except RANDOM, which folds in (track, instr) via grip_hash so different
+// tracks/layers sharing a step number don't all pick the same PC. n<=1 always
+// returns 0 (nothing to choose between).
+static u8 arp_step_index(u8 mode, u16 step, u8 n, u8 track, u8 instr)
+{
+  if( n <= 1 )
+    return 0;
+  switch( mode ) {
+    case SEQ_ARP_MODE_DOWN:
+      return (u8)(n - 1 - (step % n));
+    case SEQ_ARP_MODE_UPDOWN: {
+      u16 period = (u16)(2 * (n - 1)); // n>=2 here, so period >= 2
+      u16 phase  = step % period;
+      return (u8)((phase <= (u16)(n - 1)) ? phase : (period - phase));
+    }
+    case SEQ_ARP_MODE_RANDOM:
+      return (u8)(grip_hash(track, instr, step, GRIP_ZONE_ARP) % n);
+    case SEQ_ARP_MODE_UP:
+    default:
+      return (u8)(step % n);
+  }
+}
+
+static void arp_render_range(u8 track, const seq_processor_slot_t *p,
+                             u8 *par_buf, u16 step_lo, u16 step_hi)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  // Legacy Arpeggiator playmode's Note byte is a packed key/octave index, not a
+  // pitch (SEQ_CORE_Transpose's TRKMODE_Arpeggiator branch) — chord_mask_snap
+  // on it would be garbage. Drum's 0-byte-is-not-a-rest idiom is out of scope
+  // for this POC. Belt and braces: SEQ_CORE_ArpSlotSync already keeps these
+  // tracks from arming the slot.
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator || tcc->event_mode == SEQ_EVENT_MODE_Drum )
+    return;
+
+  u8 mode = p->strength; // Mode rides the slot's generic sweep byte (0 = pass-through)
+  if( !mode )
+    return;
+
+  // Chord source: Self (p->bus == 0) reads the track's static mask (shared with
+  // ChordMask); bus 1..4 reads the live held chord off bus A..D (index p->bus-1).
+  u16 pc_mask = (p->bus == 0)
+    ? ((((u16)tcc->chordmask_mask_h << 8) | tcc->chordmask_mask_l) & 0x0fff)
+    : SEQ_MIDI_IN_BusPCSetGet((p->bus - 1) & 0x03);
+  if( !pc_mask )
+    return;
+  u8 n = arp_popcount12(pc_mask);
+
+  u8  num_p_layers = SEQ_PAR_NumLayersGet(track);
+  u16 num_p_steps  = SEQ_PAR_NumStepsGet(track);
+  if( step_hi > num_p_steps ) step_hi = num_p_steps;
+  if( step_lo >= step_hi ) return;
+
+  u8 par_layer;
+  for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
+    if( tcc->lay_const[par_layer] != SEQ_PAR_Type_Note )
+      continue;
+    u8 *base = &par_buf[(u32)par_layer*num_p_steps];
+    u16 step;
+    for(step=step_lo; step<step_hi; ++step) {
+      u8 note = base[step];
+      if( !note )
+        continue; // rest — same skip-0 idiom as chord_mask_render_range
+      u8 idx = arp_step_index(mode, step, n, track, par_layer);
+      u8 pc  = arp_nth_active_pc(pc_mask, idx);
+      base[step] = chord_mask_snap(note, (u16)(1u << pc));
+    }
+  }
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Track 2 — pitch-chain migration (plan 2026-06-10). The emission-time pitch
 // chain (SEQ_CORE_Transpose → force-to-scale; the note limit follows in
@@ -1610,6 +1724,9 @@ static void sweep_window_render(u8 track)
       case SEQ_PROCESSOR_ID_CHORD_MASK:
         chord_mask_render_range(track, p, par_buf, step_lo, step_hi);
         break;
+      case SEQ_PROCESSOR_ID_ARP:
+        arp_render_range(track, p, par_buf, step_lo, step_hi);
+        break;
       case SEQ_PROCESSOR_ID_TENSION:
         tension_render_range(track, p, par_buf, step_lo, step_hi);
         break;
@@ -1683,6 +1800,9 @@ void SEQ_CORE_RenderTrack(u8 track)
       case SEQ_PROCESSOR_ID_CHORD_MASK:
         chord_mask_render_range(track, p, par_buf, 0, num_p_steps);
         break;
+      case SEQ_PROCESSOR_ID_ARP:
+        arp_render_range(track, p, par_buf, 0, num_p_steps);
+        break;
       case SEQ_PROCESSOR_ID_TENSION:
         tension_render_range(track, p, par_buf, 0, num_p_steps);
         break;
@@ -1728,6 +1848,38 @@ void SEQ_CORE_ChordMaskSlotSync(u8 track)
     slot->drum_mask = ((u16)tcc->chordmask_drum_h << 8) | (u16)tcc->chordmask_drum_l;
     SEQ_CORE_RenderTouched(track);
   } else if( slot->id == SEQ_PROCESSOR_ID_CHORD_MASK ) {
+    slot->id        = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled   = 0;
+    slot->strength  = 0;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  }
+}
+
+// ARP tenant: armed iff arp_mode != 0 (an "active on non-neutral state" shape, like
+// PITCH/LIMIT — NOT ChordMask's "arm on playmode change" shape, since Arp must stay
+// fully orthogonal to the legacy playmode enum, never driven by it). Mode rides
+// slot->strength; slot->bus carries the chord source (0=Self, 1..4=bus A..D).
+void SEQ_CORE_ArpSlotSync(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][SEQ_CORE_ARP_SLOT];
+
+  u8 active = (tcc->playmode != SEQ_CORE_TRKMODE_Arpeggiator
+            && tcc->event_mode != SEQ_EVENT_MODE_Drum
+            && tcc->arp_mode != 0);
+
+  if( active ) {
+    slot->id        = SEQ_PROCESSOR_ID_ARP;
+    slot->enabled   = 1;
+    slot->strength  = tcc->arp_mode;
+    slot->bus       = tcc->arp_bus; // 0=Self, 1..4=bus A..D
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  } else if( slot->id == SEQ_PROCESSOR_ID_ARP ) {
     slot->id        = SEQ_PROCESSOR_ID_NONE;
     slot->enabled   = 0;
     slot->strength  = 0;
@@ -4009,6 +4161,20 @@ static u32 render_live_sig(u8 track, u8 *has_live)
         sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_BusPCSetGet(p->bus));
         sig = render_sig_mix(sig, ((u32)p->bus << 8) | (u32)p->strength);
         sig = render_sig_mix(sig, (u32)p->drum_mask);
+        break;
+
+      case SEQ_PROCESSOR_ID_ARP:
+        // Live ONLY in bus mode (p->bus 1..4): the held chord on bus (p->bus-1) — never
+        // dirties. Self mode (p->bus == 0) reads the static mask, which dirties via
+        // SEQ_CORE_ArpSlotSync, so it contributes no live input (same "renders on events
+        // only" bucket as LIMIT — leave `live` unset). mode(strength)/bus change via the
+        // SlotSync (which dirties) — folded for safety.
+        if( p->bus == 0 )
+          break;
+        live = 1;
+        sig = render_sig_mix(sig, 0x05u);
+        sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_BusPCSetGet((p->bus - 1) & 0x03));
+        sig = render_sig_mix(sig, ((u32)p->bus << 8) | (u32)p->strength);
         break;
 
       case SEQ_PROCESSOR_ID_TENSION:
