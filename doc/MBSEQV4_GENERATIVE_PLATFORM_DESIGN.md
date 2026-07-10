@@ -1097,12 +1097,16 @@ is one gated lever (the generator pool, §A5/§10). The genuinely-dead/removable
 but not yet *performable*.** Everything is resident and runs (no everything-on RAM spike;
 the elf is the worst case), but the system breaks at the two seams where the maps overlap:
 
-- **Wall 1 — the recall freeze is the center of the flow hitting its own SPOF.** "Travel
-  with generators → return via phrase recall" freezes the clock **up to ~1.3 s** (generator
-  wander dirties all 4 groups; recall serializes 4 × ~290 ms SD writebacks into the landing
-  window), and the margin system *structurally* can't cover it (250 ms cap). The RAM escape
-  hatch is dead (§A5: both regions ~9 KB). *Verified live workaround: hold FREEZE before a
-  recall — frozen groups stop re-dirtying, so the writeback collapses (undocumented today).*
+- **Wall 1 — the recall freeze — CURED (drift-gated writeback; SHIPPED 2026-06-22, by-ear GO;
+  regression-pinned 2026-07-10, `test_recall_freeze_cure.py`).** *Was:* "travel with generators
+  → return via phrase recall" froze the clock **up to ~1.3 s** (generator wander dirties all 4
+  groups; recall serialized 4 × ~290 ms SD writebacks into the landing window), uncoverable by
+  the margin system (250 ms cap), the RAM escape hatch dead (§A5: both regions ~9 KB). *Cure:*
+  recall's pre-writeback (`SEQ_PATTERN_WritebackAllDrifted`) and the sibling running-switch path
+  (`SEQ_PATTERN_Handler` → `WritebackIfDrifted`) gate on `phrase_drift` (my deliberate edits) not
+  `seq_pattern_dirty` (which ambient wander also sets), so a wander-only group is never saved and
+  the writeback collapses to only genuinely-edited groups. The FREEZE-before-recall workaround is
+  now obsolete.
 - **Wall 2 — the next intended capability doesn't fit. RESOLVED as G3 (2026-07-07, §9).**
   Trigger generators wanted an ~11.25 KB twin pool that fit **neither** ~9 KB region — built
   as predicted here, folded into the existing 64-slot pool via a second sparse key-space
@@ -1111,10 +1115,13 @@ the elf is the worst case), but the system breaks at the two seams where the map
 **The emergent refinement queue** (ranked for *performable and fun*; #1–#5 play-readiness,
 #6–#7 capability/reliability, gated behind them):
 
-1. **DECIDE the recall-landing semantics by ear** — *may un-captured generator wander be
-   abandoned on a recall?* This is a decision, not a build, and it gates which freeze cure
-   is legal: yes → DRIFT-gated writeback (≈1 line; `phrase_drift` already exists, unused by
-   writeback); no → incremental-save (own bundle; re-measure the ~290 ms cost first). **Highest leverage.**
+1. **DECIDE the recall-landing semantics by ear — DECIDED + SHIPPED (2026-06-22, by-ear GO;
+   regression-pinned 2026-07-10).** The question *(may un-captured generator wander be abandoned
+   on a recall?)* was answered **yes** and shipped as the **DRIFT-gated writeback** (the
+   `phrase_drift` gate in `SEQ_PATTERN_WritebackAllDrifted` / `WritebackIfDrifted`, ≈1 line as
+   predicted), killing Wall 1's freeze. The `no → incremental-save` fallback was not needed. Pin:
+   `test_recall_freeze_cure.py` (wander-only recall → 0 writebacks; deliberate edit → exactly 1).
+   *Was carried here as "highest leverage, open" — stale until this 2026-07-10 reconciliation.*
 2. **Make the invisible modes visible** — ~~persistent `sel_view` label; FREEZE on the recall
    row~~. **DROPPED 2026-06-23** — recon found the `lso` rig already wires the FREEZE (METRONOME)
    + sel_view select LEDs, so the premise (invisible) is false on the hardware (§9 2026-06-23).
@@ -1158,8 +1165,9 @@ Smallest complete version: one track of material + one modulation source + captu
 recall. **What the MVP makes load-bearing** (and what falls off the critical path):
 
 - **In the MVP (commit to these, not "deferred-and-assumed"):**
-  1. **The recall-freeze cure (queue #1)** — capture+return *is* the loop; the ~1.3 s freeze
-     breaks return. Gated on the by-ear recall-semantics decision.
+  1. **The recall-freeze cure (queue #1) — SHIPPED 2026-06-22 (by-ear GO), regression-pinned
+     2026-07-10.** capture+return *is* the loop; the DRIFT-gated writeback removed the ~1.3 s
+     freeze that broke return.
   2. **Bounce-off-the-ring → pattern** (the queued next capture slice) — the harvest target.
   3. **Self-bus, note-grain / render-stack half** — the same-track modulation you named central,
      and it captures *losslessly*. (The config-grain CC-routing half is the deeper prize but it's
@@ -1170,8 +1178,9 @@ recall. **What the MVP makes load-bearing** (and what falls off the critical pat
   the standalone chord-mask/tension as standalone (their function lives in MOTION's render stack);
   **trigger generators + generation-as-its-own-engine** — a *separate domain* for later (§3),
   explicitly NOT in the first full workflow. *(Built anyway as G3, 2026-07-07, §9 — the rack's
-  operating grammar made it cheap enough to ship as a tenant without waiting on the MVP path;
-  the recall-freeze cure (#1) is still the one gating item.)*
+  operating grammar made it cheap enough to ship as a tenant without waiting on the MVP path.
+  The recall-freeze cure (#1) — which this called "still the one gating item" — was in fact
+  already SHIPPED 2026-06-22; that citation was stale, reconciled 2026-07-10.)*
 
 So the reframe reorders the roadmap cleanly: **capture + modulation + return are the MVP; the
 generation engine is the next domain after it plays.**
@@ -3719,6 +3728,31 @@ track to *another pattern on the same track*.
 - **Verdict → GO, by ear.** LOOP drifts, HEARD is seamless, GRID resets on the beat; parking
   to another pattern leaves the live jam (and its disk slot) untouched.
 
+**2026-07-10 — Reconciliation: the recall-freeze cure (§8 queue #1 / Wall 1) was already SHIPPED;
+the roadmap's "still gating" citations were stale.** Picked up cold to "build #1, the highest-
+leverage open item"; a source check found it had shipped 2026-06-22 (by-ear GO) and been carried
+as open ever since — the §8 queue, the MVP list, and the Arp/G3/Humanize §9 entries all repeated
+"#1 is still the one gating item" without reconciling against the code. Exactly the drift CLAUDE.md
+warns about (verify platform claims against source, not memory).
+- **What is actually built** (verified in `seq_pattern.c`): the DRIFT-gated writeback, at BOTH
+  live paths — phrase recall (`SEQ_PATTERN_SnapshotRead` → `WritebackAllDrifted`, gated on
+  `phrase_drift`) and the running pattern switch (`SEQ_PATTERN_Handler` → `WritebackIfDrifted`,
+  the "Tier-1 (b)" fix). Only the transport-*stopped* immediate path (`SEQ_PATTERN_Change`) stays
+  ungated — correctly, there is no live clock to freeze. The by-ear decision *(abandon un-captured
+  wander on recall?)* was answered **yes** and the `no → incremental-save` fallback was never
+  needed.
+- **The one real gap, now closed: a regression pin for the cure's own invariant.** Existing tests
+  covered drift-leak hygiene (`test_capture_drift_leak`) and the deliberate-edit writeback on
+  *switch* (`test_fearless_switching`), but nothing pinned *wander-only recall → zero writeback* —
+  a refactor reverting `WritebackAllDrifted` → `WritebackAllDirty` would have passed the whole
+  suite. New `test_recall_freeze_cure.py` states the invariant as **writebacks on recall ==
+  popcount(drift mask)** and instantiates both ends: a generator wandered live (dirty, drift clear)
+  recalls with 0 writebacks and restores the pristine captured loop (wander abandoned); a deliberate
+  CC edit (drift set) writes back exactly once and the live organism returns to the phrase (nothing
+  lost). The running-switch drift-gate is left unpinned (measuring it needs the transport running at
+  the switch instant — timing-sensitive; the recall pin + the fearless deliberate-edit switch pin
+  bracket it).
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -4233,7 +4267,7 @@ fire). Real levers, each gated:
 - **DRIFT** (`phrase_drift`) — the per-group "deliberately edited since the last recall/capture"
   mask, distinct from `seq_pattern_dirty` because it **excludes ambient generator wander** (the
   `seq_generator_in_automutate` gate). The "my edits only" register; drives the drift LED and is
-  the second register the cheap recall-freeze cure would reuse.
+  the register the recall-freeze cure reuses to gate its writeback (SHIPPED 2026-06-22).
 - **Grab** — a **capture** off the source into a pattern: static, exact, durable working
   material. The thing you return to. The first grab is the beginning; grabs in order are the path.
 - **Source** — whatever is live *now* (a generator wandering, a played line, a hand-built loop,
