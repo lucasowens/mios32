@@ -3450,15 +3450,18 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
       //      FILL: tile across the whole canvas, loop at the canvas (grid-locked; seam when
       //            W doesn't divide the canvas). LOOP: loop at the window (drifts free).
       u8  dst_idx = dst_track % SEQ_CORE_NUM_TRACKS_PER_GROUP;
-      u16 W       = cap_par_steps;                       // window length (exact k*spm)
-      u16 canvas  = slottrk_trg_steps[dst_idx];          // dst's own max length (x8-aligned)
-      if( canvas == 0 ) canvas = (W + 7) & ~7;           // empty dst fallback: x8 of the window
-      // CLAMP the canvas to what the CAPTURED layout fits in BOTH buffers. The dst keeps its
-      // own length, but that length x the SOURCE's layer/instr counts can exceed the par/trg
-      // budgets (e.g. an 8-layer note src tiled into a 256-step canvas: 256*8 = 2048 > 1024).
-      // SEQ_*_TrackInit silently NO-OPs on overflow (returns -1, geometry left STALE), which
-      // would re-introduce the very mismatch this rewrite removes — so clamp here, x8-aligned,
-      // and the TrackInits below can never fail. Heavy layouts simply cap to a shorter canvas.
+      u16 W       = cap_par_steps;                       // grab window = k loops (exact k*dst_spm)
+      if( W < 1 ) W = 1;
+      // BUFFER (canvas = num_steps for the TrackInits) = the MAX steps available in the dst track
+      // (its own allocation), x8-aligned (trg bit-packed) and budget-clamped, but never smaller
+      // than one grab. This is the ceiling the FILL modes fill toward. Keep the dst's own
+      // allocation (geometry not resized — design 2026-06-28 avoids the trg-floor "!!!"); grow only
+      // if the grab itself is longer. The dst adopts the SOURCE's layer/instr counts, so
+      // num_steps x those can exceed the par/trg budgets — clamp so SEQ_*_TrackInit can't NO-OP on
+      // overflow (the grab already passed the same guard in CaptureMaxK; this only bites heavy dsts).
+      u16 canvas  = slottrk_trg_steps[dst_idx];
+      if( canvas < W ) canvas = W;                       // must hold at least one grab
+      canvas = (u16)((canvas + 7) & ~7u);                // x8
       {
         u16 par_unit = (u16)cap_par_layers * cap_num_instr;
         if( par_unit && canvas > (u16)(SEQ_PAR_MAX_BYTES / par_unit) )
@@ -3471,7 +3474,26 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
         canvas &= (u16)~7u;                              // trg is bit-packed -> keep x8
         if( canvas < 8 ) canvas = 8;
       }
-      u16 loop_steps = (fit_mode == SEQ_CORE_CAP_FIT_LOOP) ? ((W < canvas) ? W : canvas) : canvas;
+      // DEPOSIT LENGTH (loop_steps -> LENGTH CC). The window is always tiled end-to-end; Fit x Phase
+      // only pick where the loop wraps (this length is NOT x8-constrained — odd loops are valid —
+      // and must never be rounded like the buffer, or non-x8 loops truncate: the "8/8" regression):
+      //   LOOP         -> exactly the grab (W): a short (maybe odd) loop that drifts vs everything.
+      //   FILL + GRID   -> the full canvas (max available steps): the last repeat lands partial, so
+      //                    the loop RESETS at the wrap — a deliberate little glitch.
+      //   FILL + HEARD  -> the largest whole MULTIPLE of the grab that fits (floor(canvas/W)*W):
+      //                    only complete repeats, so the loop is SEAMLESS.
+      // Phase also sets the capture window in SEQ_CORE_CaptureSpan (GRID loop-aligned / HEARD
+      // playhead-ending) — same GRID=locked / HEARD=as-heard spirit, so it does double duty here.
+      u16 loop_steps;
+      if( fit_mode == SEQ_CORE_CAP_FIT_LOOP ) {
+        loop_steps = W;
+      } else if( phase == SEQ_CORE_CAP_PHASE_HEARD ) {
+        loop_steps = (u16)((canvas / W) * W);            // whole multiples only -> seamless
+        if( loop_steps < W ) loop_steps = W;
+      } else {
+        loop_steps = canvas;                             // fill the max -> seam/reset at the wrap
+      }
+      if( loop_steps > canvas ) loop_steps = canvas;
       if( loop_steps < 1 ) loop_steps = 1;
 
       SEQ_CC_Set(dst_track, SEQ_CC_MIDI_EVENT_MODE, slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE]);

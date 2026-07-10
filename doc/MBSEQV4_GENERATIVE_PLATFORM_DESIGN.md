@@ -3680,6 +3680,45 @@ SELECT sitting beside ChordMask in the render stack.
   (bus) sources across steps; Mode→Off is exact pass-through; Self↔bus switch is immediate.
   The standing "self-arp — deferred (hard)" line in §10 c is fully retired.
 
+**2026-07-10 — Capture deposit: silent-park + the Fit×Phase length model (SHIPPED, by-ear
+GO).** Two bugs + a by-ear length redesign, all surfaced by capturing a live-generating
+track to *another pattern on the same track*.
+- **Silent-park (`seq_ui_capture.c` `Commit`).** After a grab the page auto-loaded the
+  just-written slot back into the LIVE dst track "so it plays immediately" — *regardless of
+  which pattern slot it landed in*. When the dst pattern ≠ the group's currently-loaded slot
+  (park a freeze into A2 while playing A1) this (a) replaced the live generation with the
+  frozen line on the spot AND (b) left the group dirty+drifted while `seq_pattern[]` still
+  pointed at A1, so the next switch's FEARLESS writeback stamped the freeze back over A1 on
+  disk ("capture to A2 rendered A1 too"). Fix: the auto-audition fires ONLY when the deposit
+  landed on the dst group's currently-loaded slot (freeze-in-place / looper stamp onto a
+  live-playing track); any other slot silent-parks — honoring the page's own "never switches
+  what's playing" contract.
+- **Length vs allocation, untangled (`seq_core.c` `CaptureSpanToSlotTrack`).** The CANVAS
+  model (2026-06-28) sized the deposit from `slottrk_trg_steps` = the track's *allocated*
+  `num_steps` (128), not its musical LENGTH loop (14/16) — and `SEQ_CC_LENGTH` only sets
+  `tcc->length`, never repartitions, so the two are fully independent (the UI shows both as
+  `LENGTH/num_steps`, e.g. `14/128`). FILL therefore ballooned a 16-step loop to 128. Two
+  wrong intermediate cuts taught the shape: taking `LENGTH+1` but folding it into the
+  x8-aligned `canvas` truncated non-x8 loops (12→8, the "8/8"); making FILL = the source's
+  single-loop length truncated a *k-loop* grab (2 bars of a 14-step track = 28 → 14). The
+  buffer (num_steps, x8, for TrackInit) and the loop length (LENGTH, arbitrary, tiled) are
+  now separate quantities.
+- **The Fit×Phase deposit-length model (by-ear redesign).** The window is always tiled
+  end-to-end; Fit×Phase pick where it wraps. **LOOP** = exactly the grab `W` (short/odd,
+  drifts). **FILL+GRID** = the track's max available steps (`num_steps`, the "/128" the UI
+  shows) — partial last repeat, so the loop RESETS at the wrap (deliberate glitch).
+  **FILL+HEARD** = the largest whole ×`W` that fits (`floor(canvas/W)*W`) — complete repeats
+  only, SEAMLESS. Phase does double duty (it also sets the capture window in `CaptureSpan`:
+  GRID loop-aligned / HEARD playhead-ending) — same GRID=locked / HEARD=as-heard spirit.
+  Self-verifying by eye off the `LENGTH/num_steps` readout: 28/128 (LOOP), 112/128 (HEARD),
+  128/128 (GRID).
+- **Grab depth reminder (not a bug).** A non-whole-measure track (14 ≠ the 16-step global
+  bar) grabs via the Approach-A tape at depth = complete loops played since transport start;
+  the "Grab: Nb" readout + thermometer self-clamp to it. "2 bars gave 14" can also mean the
+  dial capped at 1b — let it play a couple loops first.
+- **Verdict → GO, by ear.** LOOP drifts, HEARD is seamless, GRID resets on the beat; parking
+  to another pattern leaves the live jam (and its disk slot) untouched.
+
 ---
 
 ## 10. Open questions (unresolved forks)

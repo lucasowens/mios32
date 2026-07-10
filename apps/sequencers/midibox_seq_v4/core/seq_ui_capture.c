@@ -124,13 +124,24 @@ static void Commit(void)
   }
 
   if( r >= 0 ) {
-    // LIVE: always load the just-written slot track into the LIVE dst track so
-    // the capture plays immediately — same track or a different one (bar-aligned;
-    // the source + other live tracks keep going). The looper move: perform on one
-    // track, stamp it onto another, carry on. (Provisional "always audible" per
-    // by-ear — it overwrites the live dst track with the deposit regardless of
-    // which pattern slot it was stored in.)
-    SEQ_CORE_LoadTrackFromSlot(dst, dst_bank, dst_pattern, (u8)(dst % SEQ_CORE_NUM_TRACKS_PER_GROUP));
+    // LIVE audition — ONLY when the deposit landed on the dst group's currently-
+    // loaded slot (freeze-in-place, or a looper stamp onto a track that IS live-
+    // playing the target pattern). Then loading the slot into the live dst track
+    // plays the capture immediately, bar-aligned, source + other live tracks
+    // keeping going. The looper move: perform on one track, stamp it, carry on.
+    //
+    // Depositing into a NON-current slot must NOT auto-load: this page's contract
+    // is "never switches what's playing". Loading a different pattern's freeze
+    // into the live track both silences the source's live generation AND dirties
+    // the current group (TrackRead → SEQ_CC_Set → DirtySetTrack), while
+    // seq_pattern[group] still points at the slot you're actually playing — so the
+    // next switch's FEARLESS writeback stamps the deposit back over THAT slot (the
+    // "capture to A2 renders A1 too" bug). Silent-park instead: the slot is on
+    // disk, the jam is untouched, you hear it when you switch to it.
+    seq_pattern_t cur = seq_pattern[dst_group];
+    u8 landed_on_current = (cur.bank == dst_bank) && ((u8)cur.pattern == dst_pattern);
+    if( landed_on_current )
+      SEQ_CORE_LoadTrackFromSlot(dst, dst_bank, dst_pattern, (u8)(dst % SEQ_CORE_NUM_TRACKS_PER_GROUP));
   }
   CaptureCommitMsg(r, cap_grab, dst, letter, num);
 }
