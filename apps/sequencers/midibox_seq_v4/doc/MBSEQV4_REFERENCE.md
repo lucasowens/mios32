@@ -396,9 +396,14 @@ Transpose → force-to-scale → note-limit live in the render stack (design doc
 Track 2; plan `doc/plans/2026-06-10-pitch-chain-migration.md`). HIL 108/108.
 - **Slot homes** (= stack order, the musical chain): `SEQ_CORE_PITCH_SLOT 0`
   (`SEQ_PROCESSOR_ID_PITCH`=3, transpose+FTS fused — snap-after-transpose keeps
-  planing in-scale), `CHORDMASK_SLOT 1`, `TENSION_SLOT 2`, `LIMIT_SLOT 3`
-  (`SEQ_PROCESSOR_ID_LIMIT`=4, the final octave-fold). FTS upstream of TENSION
-  retired the Track-1 "FTS off on gripped tracks" POC rule.
+  planing in-scale), `CHORDMASK_SLOT 1`, `ARP_SLOT 2` (`SEQ_PROCESSOR_ID_ARP`=5,
+  added 2026-07-09 — see the Arp subsection below), `TENSION_SLOT 3`, `LIMIT_SLOT 4`
+  (`SEQ_PROCESSOR_ID_LIMIT`=4, the final octave-fold; **the enum ID and the array
+  slot index are independent numberings** — LIMIT's ID stayed 4 while its slot moved
+  3→4). `SEQ_CORE_NUM_PROCESSOR_SLOTS` = 5. FTS upstream of TENSION retired the
+  Track-1 "FTS off on gripped tracks" POC rule. **Slot order is load-bearing: Arp/
+  ChordMask must precede LIMIT** (LIMIT's octave-fold is the last Fx — anything after
+  it can push a note back out of range and silently defeat it).
 - **Renderers:** `pitch_render_range` (Normal/Transpose/ChordMask playmodes; global
   transpose = notes only; CC+PB value shift in CC event mode — PC/AT deliberately
   excluded, the legacy shift wrote a don't-care byte; transposer-no-key → mirror
@@ -433,6 +438,45 @@ Track 2; plan `doc/plans/2026-06-10-pitch-chain-migration.md`). HIL 108/108.
   transposer pins — a held transposer keeps the last released key by design);
   standalone `Board()` scripts run on the USER session, not AUTOTEST (pytest's
   conftest swaps and restores it).
+
+### Arp tenant — deterministic step-indexed chord-tone select ([seq_core.c](../core/seq_core.c), shipped 2026-07-09)
+
+A render-stack SLOT (not an emission tenant), sibling to ChordMask. **Not** the legacy
+`SEQ_CORE_TRKMODE_Arpeggiator` playmode — that stays a fenced emission-time thing (`t->arp_pos`
+runtime cursor, uncapturable); this is a from-scratch born-as-processor transform (design doc §9
+2026-07-09/10). Self-source shipped 2026-07-09, bus-source 2026-07-10. Anchors are symbol names
+(line numbers drift):
+- **Render:** `arp_render_range` (right after `chord_mask_render_range`). pc_mask source depends on
+  `p->bus`: **0 = Self** → ChordMask's shared static mask (`tcc->chordmask_mask_h/l`); **1..4 = bus
+  A..D** → live held chord via `SEQ_MIDI_IN_BusPCSetGet((p->bus-1) & 0x03)`. Picks one PC per step
+  via `arp_step_index(mode, step, n, track, instr)`, extracts it with `arp_nth_active_pc` /
+  `arp_popcount12`, snaps via the shared `chord_mask_snap`. Modes: `SEQ_ARP_MODE_UP` = `step%N`,
+  `DOWN` = `N-1-step%N`, `UPDOWN` = triangle over `2(N-1)`, `RANDOM` = `grip_hash(...,GRIP_ZONE_ARP
+  0x40)%N` (deterministic, NOT live RNG — so capture/bounce reproduce it). Skips rest (0) bytes,
+  Note-type par layers only.
+- **Sync:** `SEQ_CORE_ArpSlotSync` — "active iff non-neutral" shape (like PITCH/LIMIT, NOT
+  ChordMask's arm-on-playmode shape), so it stays orthogonal to the legacy playmode enum. Armed iff
+  `tcc->arp_mode != 0` and not fenced. Mode rides `slot->strength`; `slot->bus = tcc->arp_bus`
+  (0=Self, 1..4=bus). `sync_arp` in `SEQ_CC_Set` fires on: lay_const/MODE/EVENT_MODE writes, the
+  shared `CHORDMASK_MASK_L/H` (Arp reads that storage), `ARP_MODE`, and `ARP_BUS`.
+- **Two fences** (same reason as PITCH/LIMIT, checked in both `arp_render_range` and the SlotSync):
+  legacy `TRKMODE_Arpeggiator` (Note byte is a packed key/octave index, not a pitch) and Drum event
+  mode.
+- **`render_live_sig` case (tag `0x05`):** live ONLY in bus mode (`p->bus != 0`) — mixes in
+  `SEQ_MIDI_IN_BusPCSetGet((p->bus-1)&0x03)` so a held-chord change re-renders that tick. Self mode
+  (`p->bus == 0`) reads the static mask (dirties via SlotSync) → contributes no live input, same
+  event-only bucket as LIMIT (`break` without setting `live`).
+- **Persistence:** two CCs `SEQ_CC_ARP_MODE 0x9D` / `SEQ_CC_ARP_BUS 0x9E` (fields `tcc->arp_mode`/
+  `arp_bus`), inside the shipped `0x80..0x9f` ext-CC block → old patterns load unchanged (`0x9f`
+  still free). Both in `seq_pattern.c` morph `ext_snap_ccs[]` (discrete selectors = snap, don't lerp).
+- **UI:** rack row `Arp` between ChordMask and Tension (`proc_rows[]`), dials `Mode`
+  (`PROC_KIND_ARP_MODE`, prints Off/Up/Dn/U-D/Rnd) + `Bus` (`PROC_KIND_ARP_BUS`, prints
+  Self/A/B/C/D). **`PROC_KIND_ARP_BUS` is distinct from ChordMask's `PROC_KIND_BUS`: Self=0 here
+  (not bit-2=4)** — makes the zero-default self-source with no engage-seed / no bus-A ambiguity, at
+  the cost of a `Self A B C D` dial order vs ChordMask's `A B C D Sf`. Read/write generic (plain
+  0..4 CC); the kind exists only to print the name. `PROC_NUM_ROWS` auto-counts.
+- **Cost:** +96 B RAM (5th slot × 16 tracks × 6 B), ~208 B flash, builds/links clean.
+- **Deferred:** multi-octave spread (single-octave PC cycle today) — the only remaining Arp thread.
 
 ### Render change-detection — sweep/quiet by live-input signature ([seq_core.c](../core/seq_core.c), shipped 2026-06-26)
 

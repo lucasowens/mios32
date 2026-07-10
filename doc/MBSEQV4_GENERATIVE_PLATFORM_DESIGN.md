@@ -3633,6 +3633,53 @@ pass — see §10.
   re-enable. No new open thread from this tenant itself — the sheet's other ~7 names
   stay unscoped (§10).
 
+**2026-07-09 — Arp joins the rack: a deterministic arpeggiator born as a render-stack
+processor, NOT a port of the legacy playmode (SHIPPED, by-ear GO). 5th stack SLOT.**
+The box's built-in "Arpeggiator" is a track *playmode*: live-keyboard-driven, stateful
+(`t->arp_pos` cycles per emission against a bus notestack), emission-time — one of the
+three `legacy_pitch` fences precisely because it's invisible to `OutputActive` and
+can't be captured/bounced (§9 2026-06-10). It is left untouched. Instead this is a
+**new** transform that keeps the arpeggiator's musical *idea* (walk the chord tones)
+but re-expresses it the born-as-processor way (§3): a step-indexed deterministic
+SELECT sitting beside ChordMask in the render stack.
+- **Sibling to ChordMask, not a variant of the playmode.** ChordMask *snaps* a note
+  toward any tone in a 12-bit PC-set; Arp *selects* exactly one tone per step
+  (`chord_tones[f(mode,step) % N]`) and snaps to it — same `chord_mask_snap` primitive,
+  same `chordmask_mask_h/l` self-mask source (paint the chord once on ChordMask's row;
+  no new storage, no new paint face), opposite operation. This is why it's a **stack
+  SLOT** (PITCH→CHORDMASK→**ARP**→TENSION→LIMIT), not an emission tenant like the
+  Echo/Groove/LFO/Robotize/Humanize rows — it rewrites the buffer before emission, so
+  capture/bounce are faithful *for free*, which is exactly the thing the legacy playmode
+  can't do.
+- **Determinism dissolves the "hard" in "self-arp (deferred, hard)" (§10 c).** That
+  entry assumed a per-track mini-notestack + reset hooks to reproduce the runtime
+  cursor. The deterministic-by-construction principle (hash/step-index, not live state —
+  the same move PitchGen/TrigGen made) removes the cursor entirely: Up = `step%N`,
+  Down/UpDown are arithmetic, Random draws `grip_hash` (reproducible, not RNG). No
+  notestack, no reset lifecycle — the "hard" was an artifact of porting rather than
+  rebuilding.
+- **Scope, minimal by design.** A `Mode` dial (0=Off/pass-through, Up/Down/UpDown/Random)
+  riding the slot's generic sweep byte; a `Bus` dial (chord source) added the next day
+  (2026-07-10 GO — self-source shipped first, bus followed once proven). Two persisted CCs
+  (`ARP_MODE 0x9d`, `ARP_BUS 0x9e`, inside the already-shipped `0x80..0x9f` block — old
+  patterns load unchanged; `0x9f` still free). +96 B RAM (5th slot × 16 tracks) + ~208 B
+  flash, builds/links clean.
+- **Bus-source (SHIPPED 2026-07-10, by-ear GO).** `Bus` = `Self` (0) reads the shared
+  static mask; `A`..`D` (1..4) read the live held chord off a bus via
+  `SEQ_MIDI_IN_BusPCSetGet` — same source ChordMask uses, so a loopback/external chord
+  drives the arp. In bus mode Arp joins the `render_live_sig` force-dirty set (a held-chord
+  change re-renders that tick); Self mode stays event-only. **Encoding call: Arp gets its
+  OWN `PROC_KIND_ARP_BUS` with Self=0** (not ChordMask's Self-at-4 bit-2 scheme) — so the
+  zero-default IS self-source (no engage-seed, no bus-A/untouched ambiguity), at the cost of
+  a `Self A B C D` dial order vs ChordMask's `A B C D Sf`. Deliberate: default-cleanliness
+  over dial-order symmetry.
+- **Deferred:** multi-octave spread (single-octave PC cycle today) — the only remaining
+  Arp thread. See the REFERENCE doc for build facts + `SEQ_CORE_ArpSlotSync`/
+  `arp_render_range` anchors.
+- **Verdict → GO, by ear (both cuts).** Arpeggiates painted-chord (self) and live-held
+  (bus) sources across steps; Mode→Off is exact pass-through; Self↔bus switch is immediate.
+  The standing "self-arp — deferred (hard)" line in §10 c is fully retired.
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3914,8 +3961,12 @@ the generative freeze/bounce law); the actionable build sketches live here.
     from a Chord par layer via a `chord_layer_to_pcset()` mirror of `SEQ_CHORD_NoteGet`, vs
     `SEQ_MIDI_IN_BusPCSetGet(bus)`). Carrier: `transpose_self_layer`/`chordmask_self_layer` in
     `seq_cc_trk_t` (`0xFF`=off), SlotSync sets `slot->bus = 0xFF` self-sentinel; bounces editable.
-  - **Self-arp — deferred (hard).** Emission-time + stateful (`t->arp_pos`); needs a per-track
-    mini-notestack + reset hooks. Phase 2.
+  - **Self-arp — SHIPPED 2026-07-09/10 as the deterministic Arp render-stack tenant (§9), reframed
+    not ported.** The "hard" here assumed porting the legacy playmode's runtime cursor
+    (`t->arp_pos` + a per-track mini-notestack + reset hooks). Determinism dissolved that: a
+    step-indexed SELECT over a PC-mask, no cursor, born bounce-bakeable. Both sources now
+    shipped (self PC-mask 2026-07-09; live bus chord 2026-07-10). Only remainder: multi-octave
+    spread.
   - **Capture/freeze (CONFIRMED by ear 2026-06-26 — two paths, opposite behavior; §9).** The
     note-grain complement BOUNCEs to static notes (render-stack). The **config-grain (Ctrl) half is
     not bounce-bakeable** — it modulates playback behavior over time (a timeline, not buffer
@@ -3929,7 +3980,8 @@ the generative freeze/bounce law); the actionable build sketches live here.
   - **Build order (revised 2026-06-26):** the self-routing CC layer is DONE (it's `Ctrl`;
     direction + progression proven by ear). Remaining, in order: (1) the **dirty gate** if the
     auto-writeback churn ever bothers play (parked — not yet needed); (2) the note-grain
-    **self-transpose / self-chord-mask** (render-stack, born bounce-bakeable); (3) self-arp later.
+    **self-transpose / self-chord-mask** (render-stack, born bounce-bakeable); (3) self-arp
+    **DONE** (deterministic Arp tenant, both self + bus sources shipped, §9 2026-07-09/10).
 
 - **(d)** The third beneficiary of the generative law is the existing **robotize →
   render-stack migration** (see the Bounce north-star entry above) — migrating it makes FREEZE
