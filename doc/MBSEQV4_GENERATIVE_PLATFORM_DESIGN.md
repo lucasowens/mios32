@@ -3753,6 +3753,55 @@ warns about (verify platform claims against source, not memory).
   the switch instant — timing-sensitive; the recall pin + the fearless deliberate-edit switch pin
   bracket it).
 
+**2026-07-10 — Robotize → render-stack: DEFERRED BY CHOICE after a recon-grounded talk-through
+(not a build; §10 bullet updated).** Picked "the big one" (bounce faithfulness) as the next item,
+did the source recon (`SEQ_ROBOTIZE_Event`, the anchor/seed loop machinery, the render-slot
+dispatch), then the user reframed: *now that the system has taken shape, should we move it — it can
+create its own loops?* Talked it through and decided **not to migrate now**. The reasoning:
+- **The faithfulness gap that motivated it (2026-06-12) is already largely covered.** CAPTURE-the-
+  tape grabs the post-robotize *heard* stream (robotize applies at emission; the tape records the
+  emitted stream), and the self-bus freeze finding (2026-06-26) already names the **tape as the
+  faithful freeze for randomness** — deterministic bounce is the wrong tool for random content. So
+  "bounce freezes the pre-robotize line" is no longer the live pain it was when the north-star was
+  written; harvesting a robotized line is a solved path.
+- **Robotize is not a stateless render slot — it is a generative LOOP engine.** Palette of 16
+  per-bar anchor SEEDS, loop machinery (`loop_cycles`/`loop_start`/`loop_rotate`/`palette_length`),
+  and sculpting verbs Reseed/RerollBar/**Freeze** (its Freeze is *already* a capture-the-last-K-heard-
+  bars-as-a-loop). The five render slots are stateless per-step transforms; a robotize slot would be
+  a bespoke *stateful* slot carrying per-bar phase/anchor state + honoring PRNG-consumption order,
+  not a sibling-to-Pitch add. This also brushes the parked register-unification fork (robotize's
+  anchor is a *seed*, live-reinterpretable — a different "frozen" bet than the value-storing slots).
+- **Feasibility (verified, for if it is ever revived):** only the **note / oct / vel / len / skip**
+  half can render into the mirror — emission reads note/vel/len via `SEQ_PAR_Get` → OutputActive
+  (`seq_layer.c:394/404/433`), so writing them there would take. The **SUSTAIN / ECHO / NOFX /
+  DUPLICATE** flags add extra events (echo/duplicate), hold runtime note-length state (sustain), or
+  gate other emission tenants (nofx) — none fit a per-step mirror; they would stay a thin
+  emission-time residual. So a migration = *lift the pitch/dynamics/length wander into a stateful
+  generative-loop slot; leave the flags behind*, not a clean whole-unit move.
+- **The one thing that would revive it:** wanting robotize as a permanent **live** layer you keep
+  sculpting (reseed/reroll/freeze) and bounce **as-heard repeatedly** — the "live AND bounce-
+  faithful" property only the render stack gives a stateful loop, distinct from the tape's one-shot
+  concrete grab. The user's call for now: *good with it where it is.* Recon is preserved in this
+  entry so a revival starts from the split above, not from scratch.
+
+**2026-07-10 — §10 CAPTURE open-question reconciled: the "locked to one measure" framing was stale
+(same class as the recall-freeze mis-citation).** Picked the §10 "CAPTURE is locked to one-global-
+measure tracks (self-bus ↔ CAPTURE tension)" bullet as the next build, then the source read
+contradicted it: `SEQ_CORE_CaptureSpanTape` (while PLAYING) already grabs **any** length note-for-
+note (`n_meas >= 1`, `seq_core.c:2906`; SHIPPED 2026-06-26, foreign-clkdiv-hardened 2026-06-28) — the
+"grab a long self-modulating loop" case the bullet named is served on the live path. The §10 text
+(*"both freeze paths refuse a source whose length ≠ global measure"*) predated the A1 win and was
+never reconciled; the REFERENCE doc (§3, lines ~165–180) was **accurate** throughout — the CLAUDE.md
+ownership split (REFERENCE owns codebase facts) held. The one genuine remaining gap is the **STOPPED**
+re-sim path (`SEQ_CORE_CaptureSpanReSim`, `n_meas != 1 → -8 "play to grab"`), which is **DEFERRED BY
+CHOICE**, not open: the A2 kernel was attempted 2026-06-28 and reverted on two walls (the per-global-
+measure ring needs re-framing around the track's own loop wrap for non-aligned multi-bar loops; plus
+an undiagnosed post-real-play multi-bar drive hang) — the *build-less-listen-sooner* call was to keep
+multi-bar grabs while-PLAYING only. **No build, no test pin needed** (behavior already shipped + HIL
+241); the fix was doc-only: §10 bullet rewritten from "genuinely open" to "deferred by choice," recon
+preserved in the plan for a possible revival. *Revive only if grabbing a long self-mod loop while the
+transport is STOPPED becomes a workflow the user wants.*
+
 ---
 
 ## 10. Open questions (unresolved forks)
@@ -3774,17 +3823,27 @@ bug (CLOSED 2026-06-10 — V3 ext-tag widened to 0x80–0x9F); the sampler-slot 
 **Still gating (genuinely open):**
 - **Max generator loop length** for static allocation — v1 default 64-step + tiling across
   longer tracks; revisit if a piece wants longer (≈3×/generator, §A5).
-- **CAPTURE is locked to one-global-measure tracks (the self-bus ↔ CAPTURE tension).**
-  Surfaced 2026-06-26 by the self-bus: both freeze paths refuse a source whose length ≠ the global
-  "Steps per Measure" with `-8 "not 1 measure"` (`SEQ_CORE_CaptureSpanReSim`/`Tape`,
-  `seq_core.c:2219`/`:2385`), because the capture ring is framed per **global** measure
-  (`SEQ_CORE_CaptureRingTick`, indexed `robotize_measure_ctr % RING_BARS`). But self-modulating
-  direction/progression is most interesting on a *longer* base loop — so the two features pull
-  against each other. Two fixes scoped: **(B, pragmatic)** relax to integer multiples
-  (`spm % gspm == 0`), land `FrameBack` on a loop-start frame; **(A, general)** re-frame the ring
-  around the recorded track's OWN loop wrap (handles sub-measure/polymeter too). The capture ring is
-  already self-contained (own seed, doesn't touch the FREEZE/robotize ring), which lowers (A)'s risk.
-  Full kickoff + grounded recon in `doc/plans/2026-06-26-multimeasure-capture.md`.
+
+**STOPPED multi-bar CAPTURE — DEFERRED BY CHOICE (reconciled 2026-07-10, §9; NOT a gating open
+question).** *Was carried here as "CAPTURE is locked to one-global-measure tracks (the self-bus ↔
+CAPTURE tension)" — that framing is stale: it predated the A1 win and cited "both freeze paths
+refuse."* The true state (REFERENCE §3 ~165–180 has had it right throughout):
+- **While PLAYING → ANY length already works.** `SEQ_CORE_CaptureSpanTape` grabs a sub-measure /
+  odd / multi-bar / self-modulating loop **note-for-note** (`n_meas >= 1`, `seq_core.c:2906`; SHIPPED
+  2026-06-26, foreign-clkdiv-hardened 2026-06-28, HIL 241). The tension the old bullet named — *grab
+  a long self-modulating loop* — is served on the live path.
+- **Only WHILE STOPPED is it one-global-measure.** `SEQ_CORE_CaptureSpanReSim` gates
+  `SEQ_CORE_CaptureLoopMeasures(src) != 1 → -8 "play to grab"`. The stopped multi-bar kernel (A2) was
+  attempted 2026-06-28 and **reverted** on two walls: (1) the ring stores one frame per GLOBAL
+  measure, so a non-aligned multi-bar loop has no frame on its loop start → the grab comes out
+  **rotated** — the real fix is re-framing the ring around the track's OWN loop wrap (Approach A
+  general, ring depth in loops), not a phase tweak; (2) an undiagnosed post-real-play multi-bar drive
+  **hang** (>10 s timeout, only with real emission/scheduler history). The call: *build less, listen
+  sooner — multi-bar grabs stay while-PLAYING only.*
+- **Revive only if** grabbing a long self-mod loop **while STOPPED** (transport parked, freeze
+  without hitting play) becomes a workflow the user wants. Reopening = commit to the ring re-frame
+  (wall 1) + debug the hang (wall 2) — a real multi-session project. Recon + two-wall postmortem:
+  `doc/plans/2026-06-26-multimeasure-capture.md`.
 
 **Register unification — parked, not gating (investigated 2026-07-08; revisit once both
 models have more real-world mileage).** The G2/G3 §9 entries flagged PitchGen/TrigGen's
@@ -3884,10 +3943,20 @@ bounce captures the mirror, `ResetGenerativeForBounce` disables them on the copy
 for generators** (the engaged loop is written to source → mirror → captured; FEARLESS
 Stage B's `SEQ_GENERATOR_TrackClear` on the captured section turns the generator off on
 the copy). The north-star is *total* only once the remaining deliberately-emission-time
-effects join the stack: **robotize (the big one), humanize, groove, echo, LFO** — each
-invisible to `OutputActive` today, so each captures un-processed (the §3 born-as-
-processors rule names them).
-- **Robotize → render-stack processor (deferred to its own session, 2026-06-12).**
+effects join the stack: **robotize (the big one — but DEFERRED BY CHOICE 2026-07-10, §9: the tape
+already freezes it as-heard), humanize, groove, echo, LFO** — each invisible to `OutputActive`
+today, so each captures un-processed (the §3 born-as-processors rule names them). *Totality here is
+the aspiration; practical freeze-faithfulness for the random/emission effects is already served by
+CAPTURE-the-tape, which is why robotize's migration is not currently licensed.*
+- **Robotize → render-stack processor — DEFERRED BY CHOICE (2026-07-10, §9; recon complete, not
+  just unscheduled).** After the source recon + a design talk-through: the migration does not earn
+  its cost now — CAPTURE-the-tape already harvests the post-robotize *heard* line faithfully (the
+  tape is the named freeze path for randomness), and robotize is a generative LOOP engine (per-bar
+  anchor seeds + loop machinery + a Freeze that already captures the last K heard bars), NOT a
+  stateless render slot — so a migration is a bespoke *stateful* slot, and only its
+  note/oct/vel/len/skip half could move (the SUSTAIN/ECHO/NOFX/DUPLICATE flags stay an emission
+  residual). Revive only if robotize should be a permanent *live* layer bounced as-heard repeatedly.
+  Full reasoning + the feasibility split in §9 (2026-07-10). *Original 2026-06-12 motivation:*
   Surfaced by ear during FEARLESS Stage B: bouncing a robotized track freezes the
   *pre*-robotize line — designed behavior per §3:191-193 / the §8-step-5 deferred list
   ("random/generative effects stay reset; re-applying would diverge"), but that rested
