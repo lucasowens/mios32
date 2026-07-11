@@ -2233,6 +2233,7 @@ there and add one line to the chronology index at the end of this section.
 - **2026-07-11 (cont.) — RT-timing tail closed: #54 prefetch cap + #55 O(1) tape off-match + #2 Fwd/Rew lost-update** (adversarial-review software tail done; jitter-ladder rung 1)
 - **2026-07-11 (cont. 2) — Isomorphic keyboard integration push** (EDIT-RECORDING punch-in + fold→scale-degree stride + layout/velocity gestures; SHIPPED by-ear GO, HIL regression pending)
 - **2026-07-11 (cont. 3) — Voicing tenant: internal chord mode joins the rack** (Sprd/Inv/Strm on the Chord1/2/3 expansion, 6th emission tenant; SHIPPED by-ear GO; act 2 = GRAVITY chord-substitution APPROVED, unbuilt)
+- **2026-07-11 (cont. 4) — Act 2: chord-space GRAVITY** (TENSION substitutes the chord BYTE along the band ladder — quality collapse/tension, never re-roots; SHIPPED by-ear GO, HIL 254/254 = new baseline)
 
 
 ---

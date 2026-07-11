@@ -260,6 +260,7 @@ SESSION_NAME_MAX_LEN = 12
 # CC indices (mirror of seq_cc.h). Only the ones the tests actually touch are
 # listed — add more as needed. Values >= 0x80 use the 14-bit wire encoding.
 class CC:
+    LAY_CONST_A1 = 0x00  # par layer A type (seq_par_layer_type_t: 1=Note 2=Chord1 14=Chord2 18=Chord3)
     LFO_AMPLITUDE = 0x31
     MODE = 0x40
     MODE_FLAGS = 0x41

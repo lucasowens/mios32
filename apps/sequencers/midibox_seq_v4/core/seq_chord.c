@@ -226,14 +226,51 @@ static const seq_chord_entry_t seq_chord3_table[] = {
 };
 
 
+// Per-entry pitch-class masks (bit k = PC k relative to the table root),
+// precomputed at init so the GRAVITY chord-substitution's render-time table
+// scan is a mask compare, not a key walk (seq_core.c tension_chord_snap).
+// Octave information collapses out by construction (keys taken mod 12).
+static u16 seq_chord_pc_mask[2][32];
+static u16 seq_chord3_pc_mask[sizeof(seq_chord3_table)/sizeof(seq_chord_entry_t)];
+
+static u16 chord_entry_pc_mask(const seq_chord_entry_t *e)
+{
+  u16 mask = 0;
+  int k;
+  for(k=0; k<6; ++k)
+    if( e->keys[k] >= 0 )
+      mask |= (u16)(1u << (e->keys[k] % 12));
+  return mask;
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Initialisation
 /////////////////////////////////////////////////////////////////////////////
 s32 SEQ_CHORD_Init(u32 mode)
 {
-  // here we could also generate the chord table in RAM...
+  int set, i;
+  for(set=0; set<2; ++set)
+    for(i=0; i<32; ++i)
+      seq_chord_pc_mask[set][i] = chord_entry_pc_mask(&seq_chord_table[set][i]);
+  for(i=0; i<(int)(sizeof(seq_chord3_pc_mask)/sizeof(seq_chord3_pc_mask[0])); ++i)
+    seq_chord3_pc_mask[i] = chord_entry_pc_mask(&seq_chord3_table[i]);
 
   return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Pitch-class mask of a chord entry (bit k = PC k relative to the table
+// root). 0 for empty/undefined entries and out-of-range indices.
+/////////////////////////////////////////////////////////////////////////////
+u16 SEQ_CHORD_PCMaskGet(u8 chord_set, u8 chord_ix)
+{
+  if( chord_set == 2 )
+    return (chord_ix < sizeof(seq_chord3_pc_mask)/sizeof(seq_chord3_pc_mask[0]))
+      ? seq_chord3_pc_mask[chord_ix] : 0;
+  if( chord_set < 2 && chord_ix < 32 )
+    return seq_chord_pc_mask[chord_set][chord_ix];
+  return 0;
 }
 
 

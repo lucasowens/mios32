@@ -28,6 +28,7 @@
 #include "seq_cc.h"
 #include "seq_layer.h"
 #include "seq_scale.h"
+#include "seq_chord.h"
 #include "seq_groove.h"
 #include "seq_humanize.h"
 #include "seq_robotize.h"
@@ -1597,6 +1598,123 @@ u16 SEQ_CORE_TensionBandMask(s8 gravity, u8 bus, u8 *zone)
   return band;
 }
 
+// Act 2 — chord-space GRAVITY (2026-07-11): the internal chord mode joins the
+// field by CHORD-BYTE SUBSTITUTION. A Chord1/2/3 par byte is a table index, so
+// the render-stack move is byte→byte: swap the step's chord for the table entry
+// whose pitch-class set best satisfies the band — pull substitutes toward the
+// stable skeleton (Maj → R.+5th → Root as the ladder deepens), push toward
+// tense color (Maj → sus/add under LEAN, chromatic-neighbor chords under RUB).
+// The output mirror then holds the HEARD chord byte: EDIT shows the substituted
+// name, capture/bounce re-expand it faithfully, and the act-1 voicing dials
+// apply to the substituted chord downstream at emission.
+//
+// Table entries are ROOT-RELATIVE (root supplied by the transposer at
+// emission), so the band is rotated into table space by the track's effective
+// transpose PC first. Consequence: substitution changes chord QUALITY, never
+// re-roots — off the field root, a deep pull can only collapse as far as the
+// table allows, so the pull ladder RELAXES through the nested wider bands
+// (L0→L1→leL2→leL3) until candidates exist (monotone-safe: bands nest).
+
+// Effective transpose pitch-class for a chord track — the mod-12 shadow of
+// SEQ_CORE_Transpose's chord path: transpose_semi (sign-extended nibble) plus
+// the live transposer note when the playmode consults it. Octaves are
+// PC-neutral and drop out. A silent transposer (no key, no hold) contributes
+// 0 — the notes are muted at emission anyway; the mirror stays deterministic.
+static u8 tension_chord_transpose_pc(seq_cc_trk_t *tcc)
+{
+  int tr = tcc->transpose_semi;
+  if( tr >= 8 )
+    tr -= 16;
+  if( tcc->playmode == SEQ_CORE_TRKMODE_Transpose || seq_core_global_transpose_enabled ) {
+    int tr_note = SEQ_MIDI_IN_TransposerNoteGet(tcc->busasg.bus, tcc->trkmode_flags.HOLD,
+                                                tcc->trkmode_flags.FIRST_NOTE);
+    if( tr_note >= 0 )
+      tr += tr_note - 0x3c;
+  }
+  return (u8)(((tr % 12) + 12) % 12);
+}
+
+// Substitute one chord byte against the band ladder. `bands` = table-space
+// (root-relative) target masks: pull passes the zone band followed by each
+// wider nested band (relax until candidates exist); push passes its zone band
+// only. Deterministic: fixed scan order, index tie-breaks. Never emits byte 0
+// (the rest idiom) and leaves empty/undefined entries alone.
+static u8 tension_chord_snap(u8 chord_byte, u8 chord_set, const u16 *bands,
+                             u8 n_bands, u8 is_pull)
+{
+  u8 orig_ix, oct_bits;
+  if( chord_set == 2 ) { orig_ix = chord_byte;        oct_bits = 0; }
+  else                 { orig_ix = chord_byte & 0x1f; oct_bits = chord_byte & 0xe0; }
+
+  u16 orig_mask = SEQ_CHORD_PCMaskGet(chord_set, orig_ix);
+  if( !orig_mask )
+    return chord_byte; // empty/undefined entry — not ours to touch
+
+  u8 n = (u8)SEQ_CHORD_NumGet(chord_set);
+  u8 ix, bi;
+
+  if( is_pull ) {
+    for(bi=0; bi<n_bands; ++bi) {
+      u16 band = bands[bi];
+      if( !band )
+        continue;
+      if( !(orig_mask & ~band) )
+        return chord_byte; // already inside this band → stay (d=0 pass-through)
+      // Candidates: entries fully inside the band. Nearest = max common PCs
+      // with the original (minimal movement), then closest PC count, then
+      // lowest index.
+      s16 best_ix = -1;
+      int best_common = -1, best_dn = 99;
+      for(ix=0; ix<n; ++ix) {
+        u16 m = SEQ_CHORD_PCMaskGet(chord_set, ix);
+        if( !m || (m & ~band) )
+          continue;
+        int common = __builtin_popcount((u32)(m & orig_mask));
+        int dn = __builtin_popcount((u32)m) - __builtin_popcount((u32)orig_mask);
+        if( dn < 0 ) dn = -dn;
+        if( common > best_common || (common == best_common && dn < best_dn) ) {
+          best_common = common;
+          best_dn = dn;
+          best_ix = (s16)ix;
+        }
+      }
+      if( best_ix >= 0 ) {
+        u8 out = (chord_set == 2) ? (u8)best_ix : (u8)(oct_bits | (u8)best_ix);
+        return out ? out : chord_byte;
+      }
+      // nothing fits this band → relax to the next wider one
+    }
+    return chord_byte;
+  }
+
+  // Push: substitute toward MAX tense-band coverage, but only on a STRICT
+  // improvement — an already-maximally-tense chord stays put (the note snap's
+  // d=0 stability, chord-grain). Tie-break: max common PCs with the original
+  // (continuity), then lowest index.
+  u16 band = bands[0];
+  int orig_score = __builtin_popcount((u32)(orig_mask & band));
+  s16 best_ix = -1;
+  int best_score = orig_score, best_common = -1;
+  for(ix=0; ix<n; ++ix) {
+    u16 m = SEQ_CHORD_PCMaskGet(chord_set, ix);
+    if( !m )
+      continue;
+    int score = __builtin_popcount((u32)(m & band));
+    if( score <= orig_score )
+      continue; // must strictly raise the tension coverage
+    int common = __builtin_popcount((u32)(m & orig_mask));
+    if( score > best_score || (score == best_score && common > best_common) ) {
+      best_score = score;
+      best_common = common;
+      best_ix = (s16)ix;
+    }
+  }
+  if( best_ix < 0 )
+    return chord_byte;
+  u8 out = (chord_set == 2) ? (u8)best_ix : (u8)(oct_bits | (u8)best_ix);
+  return out ? out : chord_byte;
+}
+
 // TENSION processor (§2.3). Parallels chord_mask_render_range, but swaps the
 // live SEQ_RANDOM gate for the deterministic grip hash and feeds chord_mask_snap
 // the GRAVITY band instead of the raw chord PC-set. p->strength carries the
@@ -1669,6 +1787,46 @@ static void tension_render_range(u8 track, const seq_processor_slot_t *p,
           continue;
         if( grip_hash(track, par_layer, step, hash_zone) < thr )
           base[step] = chord_mask_snap(note, band);
+      }
+    }
+
+    // Act 2 — chord-layer pass: substitute chord BYTES along the band ladder
+    // (see the tension_chord_snap section header). Same grip gate as the note
+    // pass (whole chord grips as a unit; par_layer is the hash's instr axis).
+    // Arp playmode fenced for parity with the other render processors (A8) —
+    // its emission reinterprets note bytes, keep the field off that path.
+    if( tcc->link_par_layer_chord >= 0
+        && tcc->playmode != SEQ_CORE_TRKMODE_Arpeggiator ) {
+      u8 tpc = tension_chord_transpose_pc(tcc);
+      // Pull: zone band + the wider nested bands as a relax ladder (bands are
+      // per-render constants — hoisted out of the step loop). Push: zone band.
+      u16 bands[3];
+      u8 n_bands = 0;
+      bands[n_bands++] = tension_rot12_dn(band, tpc);
+      if( gravity < 0 ) {
+        u8 z_ignore;
+        if( zone == 1 ) // DRONE → relax through CHORD then SCALE
+          bands[n_bands++] = tension_rot12_dn(SEQ_CORE_TensionBandMask(-40, p->bus, &z_ignore), tpc);
+        if( zone <= 2 ) // DRONE/CHORD → relax through SCALE
+          bands[n_bands++] = tension_rot12_dn(SEQ_CORE_TensionBandMask(-10, p->bus, &z_ignore), tpc);
+      }
+      for(par_layer=0; par_layer<num_p_layers; ++par_layer) {
+        seq_par_layer_type_t lt = (seq_par_layer_type_t)tcc->lay_const[par_layer];
+        u8 chord_set;
+        if( lt == SEQ_PAR_Type_Chord1 )      chord_set = 0;
+        else if( lt == SEQ_PAR_Type_Chord2 ) chord_set = 1;
+        else if( lt == SEQ_PAR_Type_Chord3 ) chord_set = 2;
+        else
+          continue;
+        u8 *base = &par_buf[(u32)par_layer*num_p_steps];
+        u16 step;
+        for(step=step_lo; step<step_hi; ++step) {
+          u8 b = base[step];
+          if( !b )
+            continue; // rest idiom on chord layers
+          if( grip_hash(track, par_layer, step, hash_zone) < thr )
+            base[step] = tension_chord_snap(b, chord_set, bands, n_bands, gravity < 0);
+        }
       }
     }
   }
@@ -4258,6 +4416,18 @@ static u32 render_live_sig(u8 track, u8 *has_live)
         sig = render_sig_mix(sig, ((u32)seq_core_global_scale << 16)
                                 | ((u32)seq_core_global_scale_root_selection << 8)
                                 | (u32)seq_core_keyb_scale_root);
+        // Act 2: the chord-layer substitution also reads the track's OWN
+        // transposer context (band rotated into table space by the effective
+        // transpose PC) — a live input the chord-context terms above don't
+        // cover (busasg.bus ≠ chordmask bus). Chord-layer tracks only.
+        if( tcc->link_par_layer_chord >= 0 ) {
+          sig = render_sig_mix(sig, (u32)SEQ_MIDI_IN_TransposerNoteGet(
+                                          tcc->busasg.bus, tcc->trkmode_flags.HOLD,
+                                          tcc->trkmode_flags.FIRST_NOTE));
+          sig = render_sig_mix(sig, ((u32)tcc->playmode << 8) | (u32)tcc->transpose_semi);
+          sig = render_sig_mix(sig, ((u32)seq_core_global_transpose_enabled << 8)
+                                  | (u32)tcc->busasg.bus);
+        }
         break;
 
       case SEQ_PROCESSOR_ID_PITCH:

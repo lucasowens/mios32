@@ -417,6 +417,28 @@ crossed) mark the zone boundaries. The zone name + signed value sit alongside.
 - A pushed groove **bounces faithfully** — capture a gripped track and the heard
   (pushed) pitches are in the notes, no special handling.
 
+### Chord tracks — quality substitution (2026-07-11)
+
+On a track with a **Chord1/2/3 parameter layer** (the internal chord mode), the field
+doesn't move individual notes — it **swaps the whole chord** for a table entry that
+better satisfies the band. Grip the track and sweep:
+
+- **Pull** collapses chord *quality* toward the stable skeleton: a Maj triad stays put
+  in the SCALE zone (already diatonic), becomes **root+fifth** in the CHORD zone, and
+  lands on the bare **Root** at full DRONE. Off-scale colors (augmented, altered) fold
+  into the diatonic ladder immediately.
+- **Push** substitutes toward tense color: LEAN turns a plain triad into sus/add/6th
+  flavors, RUB reaches for the chords with chromatic-neighbor tones (7b9, dim…). A
+  chord that is already maximally tense for the zone stays put.
+- The **root never changes** — chord entries are rooted by the transposer, so the
+  field bends *quality*, and your played bass note keeps steering the harmony. (Deep
+  DRONE away from the field root collapses as far as the table allows.)
+
+The substituted chord's **name shows on the EDIT page** (the mirror holds what
+sounds), captures re-expand it faithfully, and the [Chord Voicing](#chord-voicing-sprd--inv--strm)
+dials shape whatever chord the field chose — sweep GRAVITY and Sprd together for
+harmony and register moving on one gesture.
+
 ---
 
 ## The Pitch Chain (transpose · force-to-scale · note limit)
@@ -774,6 +796,9 @@ dial to its detent.
 - **Per-step modulation, today:** the dials are ordinary track CCs (`0x9F/0xA0/0xA1`), so
   a self-bus **Ctrl layer** can paint spread or inversion per step (raw values — no unit
   decode yet).
+- **GRAVITY composes upstream:** on a gripped chord track the Tension field substitutes
+  the chord itself (see the Tension section's *quality substitution*); the voicing dials
+  then shape whatever chord the field chose.
 
 ### Caveats (POC)
 

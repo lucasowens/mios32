@@ -2086,3 +2086,45 @@ push expressiveness.
   isolated re-runs, and the voicing paths are gated behind chord layer types this
   Note-track test never enters. Every test green in at least one full run this session;
   flake trail on OPEN_ITEMS.
+
+**2026-07-11 (cont. 4) — Act 2: chord-space GRAVITY — the internal chord mode joins the field (SHIPPED, by-ear GO, HIL 254/254)**
+- **The original ask lands: TENSION now substitutes the chord BYTE along the band
+  ladder** (new chord-layer pass in `tension_render_range` + `tension_chord_snap`).
+  Pull collapses chord QUALITY toward the stable skeleton (stock set 0: Maj.I stays in
+  SCALE, → R.+5th in CHORD, → Root in DRONE); push substitutes toward tense color
+  (LEAN: Maj.I → Maj.6) and only on a STRICT band-coverage improvement, so an
+  already-tense chord stays put (the note snap's d=0 stability at chord grain). Same
+  grip hash/threshold as the note pass — the whole chord grips as a unit, monotone
+  pull preserved (pull zone-key 0; bands nest).
+- **Root-relative table space is the key structural fact:** chord entries are rooted
+  by the transposer at emission, so the absolute band is rotated into table space by
+  the track's effective transpose PC (`tension_chord_transpose_pc` — the mod-12 shadow
+  of `SEQ_CORE_Transpose`: semi nibble + live transposer note; octaves drop out).
+  Consequence: substitution changes QUALITY, never re-roots. When a narrow band has no
+  fitting entry, the pull RELAXES through the wider nested bands (L0→leL2→leL3, extra
+  `TensionBandMask` calls hoisted per render) instead of giving up — collapse goes as
+  far as the table allows. Accepted degrades: deep DRONE off the field root stops at
+  the nearest quality; SLIP falls back to max-overlap (true planing is inexpressible
+  root-relatively).
+- **Faithfulness by construction, one level up from notes:** the substituted byte
+  lands in the OUTPUT mirror — EDIT shows the substituted chord NAME, capture/bounce
+  re-expand it identically, and the act-1 Voicing dials apply to whatever chord the
+  field chose (render substitution → emission voicing compose with zero coupling).
+  Byte 0 stays the rest idiom (never touched, never emitted — the oct-bits-000 + ix-0
+  collision is guarded). Arp playmode fenced for parity (A8). Empty/undefined entries
+  pass through.
+- **Infrastructure:** per-entry pitch-class masks precomputed at init
+  (`SEQ_CHORD_PCMaskGet`, seq_chord.c — render scan = mask compares, ~32×2+34 u16);
+  `render_live_sig`'s TENSION case gains the track's OWN transposer context
+  (busasg.bus ≠ chord-context bus) for chord-layer tracks, so a live transposer move
+  re-renders gripped chord tracks.
+- **Validation: zero-warning build; 4 new HIL pins** (`test_tension_chord.py`:
+  detent byte-identity, DRONE collapse + rest guard, the quality ladder with exact
+  per-step gripped/ungripped expectations, partial-grip determinism) — expected bytes
+  cross-verified against an offline python simulation of the exact algorithm + tables
+  before first hardware run; **all 4 passed first try. Full suite 254/254 = the new
+  baseline** (one clean run — the 07-11 as-heard flake did not recur; the conftest
+  bus-stack clear held). **By-ear GO 2026-07-11 ("works! GO").**
+- Files: `seq_chord.c/.h` (PC-mask precompute + getter), `seq_core.c` (snap +
+  transpose-PC helpers, chord pass, live-sig term), `tests/apps/seq_v4/
+  test_tension_chord.py` (new), `tests/harness/sysex.py` (CC.LAY_CONST_A1).

@@ -34,6 +34,7 @@ extern s32 SEQ_CHORD_Init(u32 mode);
 extern s32 SEQ_CHORD_NumGet(u8 chord_set);
 extern char *SEQ_CHORD_NameGet(u8 chord_set, u8 chord_ix);
 extern s32 SEQ_CHORD_NoteGet(u8 key_num, u8 chord_set, u8 chord);
+extern u16 SEQ_CHORD_PCMaskGet(u8 chord_set, u8 chord_ix);
 
 
 /////////////////////////////////////////////////////////////////////////////
