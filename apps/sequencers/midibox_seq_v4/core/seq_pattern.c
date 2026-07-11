@@ -1017,6 +1017,7 @@ static void phrase_morph_apply(void)
         SEQ_CC_CHORDMASK_MASK_L, SEQ_CC_CHORDMASK_MASK_H,
         SEQ_CC_ARP_MODE, // discrete mode select — snap, don't lerp through intermediate modes
         SEQ_CC_ARP_BUS,  // discrete source select — snap (bus index / Self), not a magnitude
+        SEQ_CC_VOICE_SPREAD, // packed byte (spread magnitude + bit-7 bypass) — a lerp corrupts the flag
       };
       for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
         u8 cc = SEQ_FILE_B_TRK_EXT_CC_FIRST + i;

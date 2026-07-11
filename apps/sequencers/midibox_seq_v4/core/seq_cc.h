@@ -219,9 +219,19 @@
 
 // Arp tenant: step-indexed deterministic chord-tone select, sibling to ChordMask.
 // Self mode shares ChordMask's mask (CHORDMASK_MASK_L/H); bus modes read the live
-// held chord off a bus. 0x9f stays free.
+// held chord off a bus.
 #define SEQ_CC_ARP_MODE							0x9D // 0=Off, 1=Up, 2=Down, 3=UpDown, 4=Random
 #define SEQ_CC_ARP_BUS							0x9E // 0=Self (static mask), 1..4=bus A..D (live chord)
+
+// Chord-voicing tenant (Voicing POC): parametric voicing of the internal chord-layer
+// expansion (Chord1/2/3 par layers only) — a pure function of (chord byte, dials),
+// evaluated in SEQ_LAYER_GetEvents. All-neutral = byte-identical stock expansion.
+// SPREAD sits at 0x9f (the last free ext-block slot -> persists with the pattern);
+// INV/STRUM live above the 0x80..0x9f ext block and DO NOT persist yet (POC gap —
+// persisting them needs the ext-block V5 bump).
+#define SEQ_CC_VOICE_SPREAD						0x9F // bits 0..3 = spread 0..12 (octave-lift clicks); bit 7 = voicing bypass (rack disable)
+#define SEQ_CC_VOICE_INV						0xA0 // inversion, 4-bit two's complement -8..+7 (transpose_semi idiom); + lifts low voice, - drops high
+#define SEQ_CC_VOICE_STRUM						0xA1 // 0..127 biased at 64 (=off); >64 = strum up (low voice first), <64 = down; |v-64| = ticks/voice
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -321,6 +331,9 @@ typedef struct {
   u8		tension_grip;            // 0..127 — GRAVITY field grip (0 = not held by the field)
   u8		arp_mode;                // 0=Off, 1=Up, 2=Down, 3=UpDown, 4=Random
   u8		arp_bus;                 // chord source: 0=Self (shares chordmask's mask), 1..4=bus A..D (live)
+  u8		voice_spread;            // chord-voicing spread: bits 0..3 = 0..12 octave-lift clicks; bit 7 = voicing bypass
+  u8		voice_inv;               // chord-voicing inversion: 4-bit two's complement -8..+7
+  u8		voice_strum;             // chord-voicing strum: 0..127 biased at 64 (=off); |v-64| = ticks per voice rank
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

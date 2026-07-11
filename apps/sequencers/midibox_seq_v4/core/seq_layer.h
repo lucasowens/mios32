@@ -27,6 +27,11 @@ typedef struct {
   mios32_midi_package_t midi_package;
   s16                   len;
   u8                    layer_tag;
+  // Chord-voicing STRUM rank (direction-resolved pitch order of the voice within
+  // its chord, 0 = first to sound). ONLY set by the chord-layer expansion; every
+  // other producer leaves it undefined — consumers must gate on the layer type
+  // (SEQ_PAR_Type_Chord1/2/3) before reading it. Fits the struct's padding byte.
+  u8                    strum;
 } seq_layer_evnt_t;
 
 

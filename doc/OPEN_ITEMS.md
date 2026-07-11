@@ -38,6 +38,22 @@ Fix plans live in [plans/2026-07-02-held-findings-35-46.md](plans/2026-07-02-hel
 
 ## 4. Cleanup queue (code surfaces / repo)
 
+- **ext-CC block V5 bump — persist `voice_inv` (0xA0) / `voice_strum` (0xA1)** — licensed by
+  the Voicing GO (2026-07-11, LOG cont. 3). Follow the V2→V3 precedent in `seq_file_b.c/.h`:
+  freeze the V3/V4 count (32), widen `SEQ_FILE_B_TRK_EXT_CC_LAST` to a new boundary with
+  headroom, new tag 0x05. **Cautions:** the writer silently skips ext blocks that don't fit
+  old-sized pattern slots (check capacity math); the phrase-morph Loop A iterates the live
+  count — `voice_inv` is a two's-complement nibble (discontinuity at raw 8) → SNAP list,
+  `voice_strum` is 64-biased linear → lerp is fine. Until then Inv/Strm reset to neutral on
+  power-cycle only (they survive pattern switches in RAM).
+- **`seq_midexp` MIDI export ignores the Voicing strum stagger** — export renders unstrummed
+  onsets (spread/inv ARE rendered — they're in the expansion). Decide: teach export the
+  per-voice offset, or document as accepted (the tape/capture path already hears strum).
+- **Flake trail: `test_as_heard_slot_track_threads_phase`** — failed once in a full-suite
+  run 2026-07-11 (rotation match off by ~2 steps + one foreign head byte = capture-vs-
+  playhead phase race), passed the same day's other full run + 3/3 isolated re-runs on
+  identical firmware. If it reds again, suspect the test's phase-sampling window, not the
+  capture engine.
 - **Retire `seq_ui_trkpitchgen.c` ("Pitch Gen (POC)" menu page)** — superseded by the PROC
   PitchGen row. Coupled: harness `Page.PITCHGEN` + `tests/capture_now.py`; needs an HIL run.
   (Queued since 2026-06-22, design doc §7 reclaim ledger.)

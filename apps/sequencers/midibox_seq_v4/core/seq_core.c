@@ -5870,6 +5870,22 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 	      }
 	    }
 
+	    // chord-voicing STRUM (fork): per-voice tick stagger for chord-layer
+	    // notes. e->strum carries the voice's direction-resolved pitch rank
+	    // (set by the chord expansion); the Strm dial's magnitude is ticks per
+	    // rank. ONLY chord par layers ever set e->strum — every other producer
+	    // leaves it undefined — so gate on the layer type before reading it
+	    // (drum tracks use lay_const differently; gate event_mode first).
+	    u32 strum_ofs = 0;
+	    if( tcc->voice_strum != 64 && !(tcc->voice_spread & 0x80)
+		&& p->type == NoteOn && tcc->event_mode != SEQ_EVENT_MODE_Drum ) {
+	      seq_par_layer_type_t lt = (seq_par_layer_type_t)tcc->lay_const[e->layer_tag & 0x0f];
+	      if( lt == SEQ_PAR_Type_Chord1 || lt == SEQ_PAR_Type_Chord2 || lt == SEQ_PAR_Type_Chord3 ) {
+		u8 mag = (tcc->voice_strum > 64) ? (tcc->voice_strum - 64) : (64 - tcc->voice_strum);
+		strum_ofs = (u32)e->strum * mag;
+	      }
+	    }
+
 	    if( p->type != NoteOn ) {
 	      // e.g. CC, PitchBend, ProgramChange
 	      if( loopback_port )
@@ -5904,7 +5920,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 		  // forward to MIDI IN handler immediately
 		  SEQ_MIDI_IN_BusReceive(tcc->midi_port & 0x0f, *p, 1);
 		} else {
-		  u32 scheduled_tick = bpm_tick + t->bpm_tick_delay;
+		  u32 scheduled_tick = bpm_tick + t->bpm_tick_delay + strum_ofs;
 
 		  // glide: if same note already played, play the new one a tick later for 
 		  // proper handling of "fingered portamento" function on some synths
@@ -5918,7 +5934,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 		  if( !no_fx && !robotize_flags.NOFX ) {
 		    u8 local_gatelength = 95; // echo only with reduced gatelength to avoid killed notes
 
-		    SEQ_CORE_Echo(track, instrument, t, tcc, *p, bpm_tick + t->bpm_tick_delay, local_gatelength, robotize_flags);
+		    SEQ_CORE_Echo(track, instrument, t, tcc, *p, bpm_tick + t->bpm_tick_delay + strum_ofs, local_gatelength, robotize_flags);
 		  }
 		}
 
@@ -5983,7 +5999,7 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
       	      
 		      int i;
 		      for(i=triggers-1; i>=0; --i)
-			SEQ_CORE_ScheduleEvent(track, t, tcc, *p, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + i*gatelength, half_gatelength, 0, robotize_flags);
+			SEQ_CORE_ScheduleEvent(track, t, tcc, *p, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + strum_ofs + i*gatelength, half_gatelength, 0, robotize_flags);
 		    } else {
 		      // force gatelength depending on number of triggers
 		      if( triggers < 6 ) {
@@ -6008,14 +6024,14 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 		      if( roll_mode & 0x40 ) { // upwards
 			int i;
 			for(i=triggers-1; i>=0; --i) {
-			  SEQ_CORE_ScheduleEvent(track, t, tcc, p_multi, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + i*gatelength, half_gatelength ,0, robotize_flags);
+			  SEQ_CORE_ScheduleEvent(track, t, tcc, p_multi, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + strum_ofs + i*gatelength, half_gatelength ,0, robotize_flags);
 			  u16 velocity = roll_attenuation * p_multi.velocity;
 			  p_multi.velocity = velocity >> 8;
 			}
 		      } else { // downwards
 			int i;
 			for(i=0; i<triggers; ++i) {
-			  SEQ_CORE_ScheduleEvent(track, t, tcc, p_multi, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + i*gatelength, half_gatelength, 0, robotize_flags);
+			  SEQ_CORE_ScheduleEvent(track, t, tcc, p_multi, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + strum_ofs + i*gatelength, half_gatelength, 0, robotize_flags);
 			  if( roll_mode ) {
 			    u16 velocity = roll_attenuation * p_multi.velocity;
 			    p_multi.velocity = velocity >> 8;
@@ -6028,13 +6044,13 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 		      gatelength = 1;
 		    else // scale length (0..95) over next clock counter to consider the selected clock divider
 		      gatelength = (gatelength * t->step_length) / 96;
-		    SEQ_CORE_ScheduleEvent(track, t, tcc, *p, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay, gatelength, 0, robotize_flags);
+		    SEQ_CORE_ScheduleEvent(track, t, tcc, *p, SEQ_MIDI_OUT_OnOffEvent, bpm_tick + t->bpm_tick_delay + strum_ofs, gatelength, 0, robotize_flags);
 		  }
 
 		  // apply Post-FX
 		  if( !no_fx && !robotize_flags.NOFX) {
 		    if( ( (tcc->echo_repeats & 0x3f) && ( !(tcc->echo_repeats & 0x40) || robotize_flags.ECHO ) && gatelength ) )
-		      SEQ_CORE_Echo(track, instrument, t, tcc, *p, bpm_tick + t->bpm_tick_delay, gatelength, robotize_flags);
+		      SEQ_CORE_Echo(track, instrument, t, tcc, *p, bpm_tick + t->bpm_tick_delay + strum_ofs, gatelength, robotize_flags);
 		  }
 		}
 	      }

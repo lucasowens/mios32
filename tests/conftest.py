@@ -55,6 +55,32 @@ def _ensure_autotest_fixtures(b: Board) -> None:
         pass  # firmware predates the trg-write verb; leave fixtures as-is
 
 
+# The MIDI page (Transposer subpage) — its GP16 item is "R.Stacks", the only
+# harness-reachable reset for the transposer/arp bus notestacks.
+_PAGE_MIDI = 49
+
+
+def _clear_bus_notestacks(b: Board) -> None:
+    """Clear the transposer/arp bus notestacks at suite start (best-effort).
+
+    A live jam before the run leaves held notes in the RAM stacks — they survive
+    session switches, and external note-offs can't reach loopback- or DIN-filtered
+    buses from the harness port. The tension pins that rely on the empty-stack
+    root fallback then collapse to the jam's root instead of C (3 reds,
+    2026-07-11; diagnose with board.tension_band_get(-64, bus=n) per bus). The
+    MIDI page's R.Stacks item (GP16, Transposer subpage) is the in-band reset."""
+    from harness.sysex import Button
+
+    try:
+        b.page_set(_PAGE_MIDI)
+        gp16 = Button.GP(16)
+        b.button(gp16, True)
+        b.button(gp16, False)
+        b.reset()  # back to the neutral EDIT page
+    except (TimeoutError, RuntimeError):
+        pass  # firmware predates the page/button verbs; leave stacks as-is
+
+
 @pytest.fixture(scope="session")
 def _board_session():
     """Open the SEQ V4 board once per session; optionally switch to TEST_SESSION_NAME."""
@@ -83,6 +109,10 @@ def _board_session():
             # On AUTOTEST now — self-heal any fixture a prior hands-on session
             # clobbered to Drum (else broad "0 notes" failures across the suite).
             _ensure_autotest_fixtures(b)
+
+    # Jam residue in the bus notestacks shifts the tension pins' root — clear
+    # them regardless of session (RAM state, survives session switches).
+    _clear_bus_notestacks(b)
 
     try:
         yield b

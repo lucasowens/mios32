@@ -98,6 +98,9 @@ static const u8 seq_layer_preset_table_static[][2] = {
   { SEQ_CC_LFO_CC_PPQN,    6 }, // 96 ppqn
   { SEQ_CC_LIMIT_LOWER,    0 },
   { SEQ_CC_LIMIT_UPPER,    0 },
+  { SEQ_CC_VOICE_SPREAD,   0 },
+  { SEQ_CC_VOICE_INV,      0 },
+  { SEQ_CC_VOICE_STRUM,    64 }, // bipolar center detent = no strum
   { 0xff,                  0xff } // end marker
 };
 
@@ -788,22 +791,76 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	      chord_value = e_proto.midi_package.note; // chord value has been morphed!
 	    }
 
+	    // collect the table expansion (up to 6 voices; contiguous, -1 terminates).
+	    // muted layers keep the stock behavior: every key slot becomes note 0
+	    // (played as a disabled note — velocity forced to 0 at emission).
+	    u8 chord_set = (*layer_type_ptr == SEQ_PAR_Type_Chord2) ? 1 : (((*layer_type_ptr == SEQ_PAR_Type_Chord3) ? 2 : 0));
+	    u8 chord_muted = (!insert_empty_notes && (layer_muted & (1 << par_layer)));
+	    s32 notes[6];
+	    u8 nvoices = 0;
 	    for(i=0; i<6; ++i) {
-	      if( num_events >= 16 )
-		break;
-
-	      u8 chord_set = (*layer_type_ptr == SEQ_PAR_Type_Chord2) ? 1 : (((*layer_type_ptr == SEQ_PAR_Type_Chord3) ? 2 : 0));
 	      s32 note = SEQ_CHORD_NoteGet(i, chord_set, chord_value);
-
-	      if( !insert_empty_notes && (layer_muted & (1 << par_layer)) )
+	      if( chord_muted )
 		note = 0;
-
 	      if( note < 0 )
+		break;
+	      notes[nvoices++] = note;
+	    }
+
+	    // chord VOICING (fork) — inversion + spread as a pure function of the
+	    // dials: same (byte, dials) always yields the same voices, so capture/
+	    // bounce reproduce it by re-expansion (deterministic SHAPING, preserved
+	    // by SEQ_CC_ResetGenerativeForBounce). All-neutral or bypassed (spread
+	    // bit 7) = byte-identical stock expansion. Muted layers skip (all-0 notes).
+	    u8 voicing_off = (tcc->voice_spread & 0x80) || chord_muted || nvoices < 2;
+	    if( !voicing_off ) {
+	      u8 spread = tcc->voice_spread & 0x0f;
+	      s8 inv = (tcc->voice_inv < 8) ? (s8)tcc->voice_inv : (s8)tcc->voice_inv - 16;
+	      if( spread || inv ) {
+		int k, j;
+		// inversion: each + click lifts the lowest-sounding voice an octave
+		// (classic inversion walk); each - click drops the highest.
+		for(k = (inv > 0) ? inv : -inv; k > 0; --k) {
+		  u8 vi = 0;
+		  for(j=1; j<nvoices; ++j)
+		    if( (inv > 0) ? (notes[j] < notes[vi]) : (notes[j] > notes[vi]) )
+		      vi = j;
+		  notes[vi] += (inv > 0) ? 12 : -12;
+		}
+		// spread: k-th click lifts voice 1 + ((k-1) % (n-1)) an octave —
+		// bottom voice anchored, uppers cycle wider (monotone widening).
+		for(k=0; k<spread; ++k)
+		  notes[1 + (k % (nvoices - 1))] += 12;
+		// fold back into MIDI range (octave-preserving, like the table's own trim)
+		for(j=0; j<nvoices; ++j)
+		  notes[j] = SEQ_CORE_TrimNote(notes[j], 0, 127);
+	      }
+	    }
+
+	    // STRUM ranks: each voice's direction-resolved pitch order (0 = sounds
+	    // first). Up-strum = ascending pitch, down-strum = descending. The rank
+	    // rides the event; the tick stagger itself is applied at emission
+	    // (SEQ_CORE_Tick) where the schedule tick exists.
+	    u8 ranks[6] = { 0, 0, 0, 0, 0, 0 };
+	    if( !voicing_off && tcc->voice_strum != 64 ) {
+	      int a, b;
+	      for(a=0; a<nvoices; ++a) {
+		u8 rk = 0;
+		for(b=0; b<nvoices; ++b)
+		  if( notes[b] < notes[a] || (notes[b] == notes[a] && b < a) )
+		    ++rk;
+		ranks[a] = (tcc->voice_strum > 64) ? rk : (u8)(nvoices - 1 - rk);
+	      }
+	    }
+
+	    for(i=0; i<nvoices; ++i) {
+	      if( num_events >= 16 )
 		break;
 
 	      seq_layer_evnt_t *e = &layer_events[num_events];
 	      *e = e_proto;
-	      e->midi_package.note = note;
+	      e->midi_package.note = (u8)notes[i];
+	      e->strum = ranks[i];
 	      ++num_events;
 	    }
 	  }

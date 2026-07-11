@@ -12,7 +12,7 @@ This is the **UX-design companion** to `MBSEQV4_HARDWARE_GLOSSARY.md`:
 Use the **bold glossary terms** here. Lines marked **[fork]** are repurposed away from
 stock MBSEQ. Everything below was verified against source (symbol names, not line numbers —
 line numbers drift in this fork). Last verified: 2026-07-11 (PROC rack pass — LIVE button,
-the 12-row rack + planes/faces, Capture Phase encoder, waypoint direction modes).
+the 13-row rack + planes/faces, Capture Phase encoder, waypoint direction modes, Voicing row).
 
 ---
 
@@ -271,7 +271,7 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
 
 **The three rows in PROC mode:**
 - **B-row** = the rack: one key per row, in order
-  **Pitch · ChordMask · Arp · Tension · Limit · Echo · Groove · LFO · Robotize · PitchGen · TrigGen · Humanize**.
+  **Pitch · ChordMask · Arp · Tension · Limit · Echo · Groove · LFO · Robotize · PitchGen · TrigGen · Humanize · Voicing**.
   Tap = focus (always lands on the row's primary plane). **Double-tap (<350 ms) = the row's
   on/off gesture**: emission rows flip their native bypass bit (config preserved); generator
   rows ENGAGE⇄DISENGAGE (loop preserved); ChordMask adds/removes its playmode; param rows
@@ -314,7 +314,7 @@ unless the page or sel-view overrides.)
 | **CAPTURE** (Song) | dst pattern (letter\|num) | dst track | datawheel=GRAB; GP1-enc=FILL⇄LOOP |
 | **PHRASE** | morph coarse bar (when armed) | 16 snapshot waypoints | datawheel=morph ride |
 | **INS sel-view** (drum/kbd on) | *(page's own)* | drum pads / keyboard (green=in-scale, amber=root) | INSTR re-tap toggles play⇄select; RECORD arms rec-vs-preview; GP1-enc=Jump; ‹/›+datawheel=scroll; SELECT+key1/16=octave |
-| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (12 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane (§5a) |
+| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (13 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane (§5a) |
 | **GRAVITY** *(legacy — Tension row covers it)* | item hints; GP8=RESOLVE, GP16=→FX_SCALE | track-select | GP1-enc=GRAVITY, GP2=SHADE, GP3=GRIP, GP4=track |
 | **ROBOLOOP** *(legacy — Robotize LOOP plane covers it)* | GP6=reseed, GP7=freeze, GP8=freeze-q; **SELECT+GP1–16 reroll measure anchor** | track-select | GP1-enc=track, GP2=palette len, GP3=loop start, GP4=cycles, GP5=rotate |
 | **TRKEUCLID** (stock, menu "GENERATE") | Euclidean trigger preview | track-select | per trigger-layer params; one-shot destructive fills — the LIVING generators are the rack's PitchGen/TrigGen rows |

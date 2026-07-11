@@ -743,6 +743,46 @@ the path, in step order — handy for a quick try.)*
 
 ---
 
+## Chord Voicing (Sprd · Inv · Strm)
+
+The **Voicing** rack row (LIVE → PROC, 13th B-row key) re-voices the **internal chord
+mode** — tracks whose steps hold a chord from the built-in tables (a **Chord1/2/3
+parameter layer**, e.g. a track created in Chord event mode). The step keeps storing
+*which* chord; the dials shape *how it sits*. On a plain Note track the row does
+nothing — the right screen says `no Chord layer on trk` so a dead dial never puzzles you.
+
+### The dials
+
+| Dial | Range | What it does |
+| --- | --- | --- |
+| **Sprd** | 0–12 | Opens the voicing upward: each click lifts one upper voice an octave (cycling through them, bottom voice anchored). Click 1 on a plain triad = the classic open triad (root–5th–10th). High values reach pipe-organ territory. |
+| **Inv** | −8…+7 | Classic inversion walk: each **+** click lifts the lowest-sounding voice an octave, each **−** click drops the highest. 0 = the table's own voicing. |
+| **Strm** | −63…+63 | Bipolar strum, **center detent = off**. Clockwise strums **up** (lowest voice first), counter-clockwise strums **down**; the value is **ticks per voice** (24 ≈ a 16th at 96 ppqn), so small values humanize and large values become deliberate broken chords. Echo repeats and rolls follow the strummed onsets. |
+
+Everything at neutral = byte-identical stock playback. **Double-tap the B-row key** to
+bypass the whole row (config kept), like every emission tenant. Encoder-push snaps a
+dial to its detent.
+
+### How it composes
+
+- **Deterministic, capture-safe.** Spread and Inv are a pure function of the chord byte,
+  so CAPTURE/bounce reproduce the sound by re-expansion — the voicing CCs are *preserved*
+  on bounce (like Groove), not neutralized.
+- **Transpose / force-to-scale still apply** after voicing; octave moves are
+  scale-neutral, so FTS never fights the spread.
+- **Phrase morph** lerps Strm smoothly and snaps Sprd (it carries the bypass flag).
+- **Per-step modulation, today:** the dials are ordinary track CCs (`0x9F/0xA0/0xA1`), so
+  a self-bus **Ctrl layer** can paint spread or inversion per step (raw values — no unit
+  decode yet).
+
+### Caveats (POC)
+
+- **Sprd saves/recalls with the pattern; Inv and Strm are RAM-only for now** (they sit
+  above the persisted ext-CC block; the V5 block bump is queued on OPEN_ITEMS).
+- MIDI export ignores the strum stagger.
+
+---
+
 ## The Play Surface (drum pads · isomorphic keyboard)
 
 With **OPT → "Instrument-Sel buttons PLAY the track"** enabled (or a clean **re-tap of
@@ -824,12 +864,17 @@ CCs added by the fork:
 | 0x94 | `robotize_loop_start` |
 | 0x95 | `robotize_loop_rotate` |
 | 0x9a | `tension_grip` (GRAVITY field, per track) |
+| 0x9f | `voice_spread` (chord voicing; bits 0..3 = spread, bit 7 = row bypass) |
+| 0xa0 | `voice_inv` (chord voicing inversion; RAM-only until the V5 ext bump) |
+| 0xa1 | `voice_strum` (chord voicing strum, 64-biased bipolar; RAM-only until the V5 ext bump) |
 
 The robotize five live in the ext block (above 0x7f) and follow the upstream V4.088
 robotize CC range (0x80..0x90). The **v3 ext block** (2026-06-10) widened the persisted
 range to 0x80..0x9f, so chord-mask (0x96–0x99) and GRIP (0x9a) now save/recall; old v2
 patterns still load (the v2 byte-count is frozen, read path dispatches on tag).
+`voice_spread` (2026-07-11) took the block's last free slot, 0x9f; `voice_inv`/
+`voice_strum` sit above it and need the V5 bump to persist.
 
 ---
 
-*Last update: 2026-07-10*
+*Last update: 2026-07-11*

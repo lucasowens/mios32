@@ -2010,3 +2010,79 @@ push expressiveness.
   iterations (v1 → fold compaction rev → learn-gesture rev). HIL 250-suite = the
   regression gate, still pending; **no new pin** — the harness has no verb for B-row key
   presses or a held-GP learn gesture (same gap as the waypoint pin, deferred with it).
+
+**2026-07-11 (cont. 3) — Voicing tenant: the internal chord mode joins the rack (SHIPPED, by-ear GO)**
+- **Origin ask: "apply Tension to the internal chord mode."** Investigation confirmed the
+  fence is structural: a Chord1/2/3 par byte is a table INDEX (pitch exists only after
+  `SEQ_CHORD_NoteGet` expansion at emission), so every render-stack pitch processor —
+  TENSION included — passes chord tracks through untouched (the Track-2 fence, LOG
+  2026-06-10). Two routes assessed: (A) snap the expanded voices at emission — rejected,
+  re-creates the emission-effect/bake problem §3 exists to prevent; **(B) chord-space
+  gravity = substitute the chord BYTE along the band ladder in the render stack —
+  APPROVED as direction ("act 2"), not yet built.** The Hapax-style voicing modifiers
+  were pulled forward as the smaller playable loop (build less, listen sooner): they make
+  chord mode worth living in before the substitution act lands on top.
+- **Voicing = 6th emission tenant, 13th rack row (Sprd · Inv · Strm), chord layers only.**
+  Spread/Inv are a **pure function of the chord byte** evaluated inside the
+  `SEQ_LAYER_GetEvents` expansion: Sprd 0–12 lifts upper voices an octave per click
+  (bottom anchored, cycling — monotone widening); Inv ±8 walks classic inversions
+  (+ lifts the lowest voice, − drops the highest); both fold back via `SEQ_CORE_TrimNote`.
+  All-neutral or bypassed = byte-identical stock expansion. **Classified deterministic
+  SHAPING in `SEQ_CC_ResetGenerativeForBounce` (PRESERVED, the Groove precedent):** a
+  captured chord track still holds chord BYTES, so the voicing CCs must survive for the
+  copy to re-expand to what was heard. This also un-conflates the stock tables' baked
+  voicing entries (Maj.I/II/III, drp3/5) — identity stays in the byte, voicing is a dial.
+- **Strum is the honest exception (timing, not pitch):** the expansion stamps each voice's
+  direction-resolved pitch rank into a new `seq_layer_evnt_t.strum` byte (fits the
+  struct's padding — no RAM growth); emission adds `rank × |Strm|` ticks to the scheduled
+  tick (echo trains and rolls follow the strummed onset). Bipolar dial, 64-biased CC:
+  CW = up-strum (low voice first), CCW = down; magnitudes reach broken-chord territory
+  deliberately (63 ticks/voice). **Durable gotcha: `e->strum` is UNDEFINED for every
+  producer except the chord expansion — consumers must gate on the layer type
+  (Chord1/2/3) before reading it** (drum tracks gate on event_mode first; their
+  lay_const bytes aren't par-layer types).
+- **CC allocation: SPREAD took 0x9F — the LAST free slot in the persisted ext block**
+  (bits 0..3 value, bit 7 = the row's bypass, Echo-idiom packing; added to the
+  phrase-morph SNAP list — a lerp corrupts the flag bit). Safe against old files: the
+  bank writer has always clamped unmapped ext CCs to 0. **INV (0xA0) / STRUM (0xA1) are
+  RAM-only** — persisting them needs the ext-block V5 tag bump (V2→V3 freeze precedent),
+  **licensed by this GO, queued on OPEN_ITEMS** (watch the pattern-slot capacity check:
+  the writer silently skips ext blocks that don't fit old-sized slots).
+- **Rack integration firsts:** occupancy = ANY dial off-neutral — the first row where no
+  single headline CC can proxy occupancy (custom `SEQ_UI_PROC_RowState` arm, the
+  IsTrigGen identity-compare idiom). Double-tap bypass = SPREAD bit 7 and **gates all
+  three dials in the DSP** (the Humanize shipped-broken-bypass lesson, applied at build
+  time). `.status` hook says "no Chord layer on trk" when the tenant is a no-op — the
+  dials alone can't explain silence on a Note track.
+- **Free side-effect:** the params are ordinary track CCs, so the self-bus Ctrl layer can
+  already target 0x9F/0xA0/0xA1 raw — per-step spread/inversion painting works today
+  (legibility decode not added; joins the ~40 raw targets).
+- Closes (differently-homed) two "ideas surfaced, unbuilt" from the play-surface entry
+  above: strum + voicing/inversion dial — they landed on the chord-layer expansion, not
+  the live keyboard.
+- Files: `seq_cc.h/.c` (CCs 0x9F/0xA0/0xA1 + fields + init/preset defaults),
+  `seq_layer.h/.c` (event strum byte; voicing in the chord case; preset table),
+  `seq_core.c` (strum offset at the 7 NoteOn schedule sites), `seq_pattern.c` (snap
+  list), `seq_ui.c` (row + 2 kinds + custom RowState arm + status hook).
+- **Validation: zero-warning build; by-ear GO 2026-07-11 ("hard GO").** MIDI export
+  (`seq_midexp`) ignores strum — noted on OPEN_ITEMS. No HIL pin (no harness verb
+  renders chord-layer expansions); the 250-suite run = the regression gate.
+- **HIL incident during the gate (environment, NOT a regression — worth keeping):**
+  the post-GO run came back 247/250, all three reds in the tension family with
+  collapses landing on G instead of C. Root cause: the by-ear jam left held notes in
+  the **bus notestacks** (RAM; survives session switches) and TENSION's L0 root =
+  `BusLowestNoteGet` — the pull ladder re-rooted onto the residue. Proven with the
+  pure-function band query (`tension_band_get` per bus: bus 0 = {G}, bus 2 = {E})
+  plus a clean-bus replication of the failing collapse (all steps → C on bus 1, same
+  firmware). External note-offs can't clear filtered buses from the harness port,
+  and `track_config` can't route to a Bus port (7-bit SysEx mangles 0xF0). In-band
+  reset = MIDI page GP16 "R.Stacks"; **conftest now drives it at suite start**
+  (`_clear_bus_notestacks`) so jam residue can't red a run again. Full memory:
+  `reference-hil-bus-notestack-residue`.
+- **Final HIL state: green.** Run 2 (stacks cleared): 249/250 — tension trio green, one
+  NEW red `test_as_heard_slot_track_threads_phase` (rotation off by a couple of steps +
+  one foreign head byte = a capture-while-playing phase race). Classified pre-existing
+  FLAKE, not a regression: it passed full run 1 on the same firmware, passed 3/3
+  isolated re-runs, and the voicing paths are gated behind chord layer types this
+  Note-track test never enters. Every test green in at least one full run this session;
+  flake trail on OPEN_ITEMS.

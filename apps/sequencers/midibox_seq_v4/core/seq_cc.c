@@ -78,6 +78,7 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->chordmask_mask_l   = 0;
     tcc->chordmask_mask_h   = 0;
     tcc->tension_grip       = 0;
+    tcc->voice_strum        = 64; // bipolar, 64 = center detent = no strum (spread/inv 0 via memset)
 
     {
       u8 i;
@@ -141,6 +142,9 @@ s32 SEQ_CC_Init(u32 mode)
 //   - lay_const slots holding Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl
 //   - par_assignment_drum slots holding Velocity/Length
 //   - groove (style + value) — deterministic shaping, re-applied identically
+//   - chord voicing (spread/inv/strum) — deterministic shaping of the chord-layer
+//     expansion; the captured buffer still holds chord BYTES, so the voicing CCs
+//     must survive for the copy to re-expand to what was heard
 //
 // When you add a new SEQ_CC_*, classify it: GENERATION → reset here; deterministic
 // SHAPING → preserve (a frozen copy must still sound like what was heard).
@@ -553,6 +557,20 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	sync_arp = 1;
 	break;
 
+      // Chord-voicing tenant — emission-side pure function, no slot sync needed
+      // (the expansion re-reads tcc every step; changes are heard on the next step).
+      case SEQ_CC_VOICE_SPREAD:
+	tcc->voice_spread = value & 0x8f; // bits 0..3 = spread, bit 7 = bypass
+	if( (tcc->voice_spread & 0x0f) > 12 )
+	  tcc->voice_spread = (tcc->voice_spread & 0x80) | 12;
+	break;
+      case SEQ_CC_VOICE_INV:
+	tcc->voice_inv = value & 0x0f; // two's-complement nibble -8..+7
+	break;
+      case SEQ_CC_VOICE_STRUM:
+	tcc->voice_strum = value & 0x7f; // 64 = center detent (off)
+	break;
+
       default:
 	portEXIT_CRITICAL();
         return -2; // invalid CC
@@ -774,6 +792,9 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_TENSION_GRIP:         return tcc->tension_grip;
     case SEQ_CC_ARP_MODE:             return tcc->arp_mode;
     case SEQ_CC_ARP_BUS:              return tcc->arp_bus;
+    case SEQ_CC_VOICE_SPREAD:         return tcc->voice_spread;
+    case SEQ_CC_VOICE_INV:            return tcc->voice_inv;
+    case SEQ_CC_VOICE_STRUM:          return tcc->voice_strum;
   }
 
   return -2; // invalid CC

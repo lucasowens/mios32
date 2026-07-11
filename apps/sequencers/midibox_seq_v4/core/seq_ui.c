@@ -1433,6 +1433,10 @@ typedef enum {
   PROC_KIND_ARP_BUS,  // Arp chord source: plain CC 0..4 (0=Self/1..4=bus A..D). Distinct from
                       // ChordMask's PROC_KIND_BUS: Self is 0 here (natural zero default), no
                       // bit-2 encoding. Read/write generic; kind exists only to print the name.
+  PROC_KIND_VOICE_SPREAD, // Voicing spread: value in bits 0..3, 0x80 = the row's bypass bit.
+                      //   Masked RMW so a spread edit preserves bypass (Echo idiom) (Voicing).
+  PROC_KIND_VOICE_STRUM, // Voicing strum: BIPOLAR CC, logical (raw-64) -63..+63 around a 64
+                      //   raw centre. 0 = detent = no strum; sign = direction (Voicing).
 } proc_pkind_t;
 
 // Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot). PitchGen and
@@ -1546,6 +1550,7 @@ static void SEQ_UI_PROC_Status_Robotize(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_PitchGen(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_TrigGen(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_Humanize(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_Voicing(u8 track, u8 slot);
 
 // Pitch — transpose (Semi/Oct) + force-to-scale (FTS on/off, and the GLOBAL Scale +
 // Root that FTS snaps to). Scale/Root are global (shared by all tracks + the keyboard,
@@ -1722,6 +1727,21 @@ static const proc_param_t proc_params_humanize[] = {
   { "Vel",  PROC_KIND_HUM_VEL,   SEQ_CC_HUMANIZE_MODE,  0,   1, 0, PROC_FMT_DEFAULT },
   { "Len",  PROC_KIND_HUM_LEN,   SEQ_CC_HUMANIZE_MODE,  0,   1, 0, PROC_FMT_DEFAULT },
 };
+// Voicing — the 6th emission tenant (POC): parametric voicing of the INTERNAL
+// chord-layer expansion (Chord1/2/3 par layers; no-op on plain Note tracks — the
+// .status hook says so on-screen). All three dials are a pure function of the
+// chord byte, so capture/bounce reproduce them by re-expansion (deterministic
+// SHAPING — preserved by the bounce reset, like Groove). Sprd opens the voicing
+// upward an octave-click at a time (bottom voice anchored); Inv walks classic
+// inversions (+ lifts the lowest voice, - drops the highest); Strm is bipolar
+// timing — ticks per voice, up-strum CW / down-strum CCW around the detent.
+// Occupancy is ANY dial off-neutral (custom RowState arm — no single headline CC
+// can proxy it); bypass = bit 7 of SPREAD, gating all three in the DSP.
+static const proc_param_t proc_params_voicing[] = {
+  { "Sprd", PROC_KIND_VOICE_SPREAD, SEQ_CC_VOICE_SPREAD,   0, 12, 0, PROC_FMT_DEFAULT },
+  { "Inv",  PROC_KIND_SNIBBLE,      SEQ_CC_VOICE_INV,     -8,  7, 0, PROC_FMT_DEFAULT },
+  { "Strm", PROC_KIND_VOICE_STRUM,  SEQ_CC_VOICE_STRUM,  -63, 63, 0, PROC_FMT_DEFAULT },
+};
 
 static const proc_row_t proc_rows[] = {
   { .name = "Pitch",     .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_PITCH_SLOT,
@@ -1765,6 +1785,10 @@ static const proc_row_t proc_rows[] = {
     .params = proc_params_humanize,  .n_params = 4,
     .occ_cc = SEQ_CC_HUMANIZE_VALUE, .disable_mask = 0x08, .disable_cc = SEQ_CC_HUMANIZE_MODE,
     .status = SEQ_UI_PROC_Status_Humanize },
+  { .name = "Voicing",   .rowkind = PROC_ROW_EMISSION,
+    .params = proc_params_voicing,   .n_params = 3,
+    .occ_cc = SEQ_CC_VOICE_SPREAD, .disable_mask = 0x80, // double-tap bypass; occupancy is a custom RowState arm
+    .status = SEQ_UI_PROC_Status_Voicing },
 };
 #define PROC_NUM_ROWS ((u8)(sizeof(proc_rows)/sizeof(proc_rows[0])))
 
@@ -1826,6 +1850,11 @@ static seq_generator_t *SEQ_UI_PROC_GenGet(u8 track)
 static u8 SEQ_UI_PROC_IsTrigGen(u8 row)
 {
   return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_triggen_op;
+}
+
+static u8 SEQ_UI_PROC_IsVoicing(u8 row)
+{
+  return row < PROC_NUM_ROWS && proc_rows[row].params == proc_params_voicing;
 }
 
 // TrigGen target trigger-layer resolution: the track's assigned GATE layer (0-based
@@ -2021,6 +2050,16 @@ static proc_rowstate_t SEQ_UI_PROC_RowState(u8 track, u8 row)
       s.enabled  = SEQ_GENERATOR_IsEngaged(track, instr);
       s.strength = g ? g->mutation_rate : 0;
     }
+  } else if( SEQ_UI_PROC_IsVoicing(row) ) {
+    // Voicing: no single headline CC can proxy occupancy — the row is live when ANY
+    // dial sits off-neutral (spread>0, inv!=0, strum!=center detent). Bypass = SPREAD
+    // bit 7 (the row's disable_mask), which also gates all three dials in the DSP.
+    u8 sprd = SEQ_CC_Get(track, SEQ_CC_VOICE_SPREAD);
+    u8 inv  = SEQ_CC_Get(track, SEQ_CC_VOICE_INV) & 0x0f;
+    u8 strm = SEQ_CC_Get(track, SEQ_CC_VOICE_STRUM);
+    s.occupied = ((sprd & 0x0f) != 0) || (inv != 0) || (strm != 64);
+    s.enabled  = s.occupied && !(sprd & 0x80);
+    s.strength = sprd & 0x0f;
   } else {
     // Emission row: occupancy count/index in bits 0..5 of occ_cc — UNLESS the row's
     // disable bit lives on a separate disable_cc (Humanize: Value uses its full 0..127
@@ -2136,6 +2175,10 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
     return (SEQ_CC_Get(track, p->cc) & (1 << 1)) ? 1 : 0;
   case PROC_KIND_HUM_LEN:
     return (SEQ_CC_Get(track, p->cc) & (1 << 2)) ? 1 : 0;
+  case PROC_KIND_VOICE_SPREAD:
+    return SEQ_CC_Get(track, p->cc) & 0x0f; // spread magnitude; strip the 0x80 bypass bit
+  case PROC_KIND_VOICE_STRUM:
+    return (s32)SEQ_CC_Get(track, p->cc) - 64; // bipolar: raw 0..127 -> logical -64..+63
   default: // CC, CM_STR, HUM_VALUE
     return SEQ_CC_Get(track, p->cc);
   }
@@ -2363,6 +2406,14 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     SEQ_CC_Set(track, p->cc, f);
     break;
   }
+  case PROC_KIND_VOICE_SPREAD: {
+    u8 raw = SEQ_CC_Get(track, p->cc);
+    SEQ_CC_Set(track, p->cc, (raw & 0x80) | ((u8)v & 0x0f)); // preserve the bypass bit
+    break;
+  }
+  case PROC_KIND_VOICE_STRUM:
+    SEQ_CC_Set(track, p->cc, (u8)(v + 64)); // bipolar: logical -63..+63 -> raw 1..127, 64 = detent
+    break;
   default: // CC, CM_STR
     SEQ_CC_Set(track, p->cc, (u8)v);
     break;
@@ -2463,6 +2514,7 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_KIND_SNIBBLE:
   case PROC_KIND_GRAVITY:
   case PROC_KIND_SDEG:
+  case PROC_KIND_VOICE_STRUM:
     SEQ_UI_PROC_PrintSigned(v);
     return;
   case PROC_KIND_ECHO_DLY:
@@ -2808,6 +2860,22 @@ static void SEQ_UI_PROC_Status_Humanize(u8 track, u8 slot)
     (mode & (1 << 0)) ? "on" : "off",
     (mode & (1 << 1)) ? "on" : "off",
     (mode & (1 << 2)) ? "on" : "off");
+}
+
+// Voicing's .status: the tenant only acts on Chord par layers — a plain Note track
+// makes every dial a silent no-op, which the dial cells alone can't explain. Say so.
+// On a chord track, name the strum direction (the Strm cell only shows the signed
+// magnitude).
+static void SEQ_UI_PROC_Status_Voicing(u8 track, u8 slot)
+{
+  SEQ_LCD_CursorSet(40, 1);
+  if( seq_cc_trk[track].link_par_layer_chord < 0 ) {
+    SEQ_LCD_PrintString("no Chord layer on trk (see TrkEvnt)");
+    return;
+  }
+  u8 strum = SEQ_CC_Get(track, SEQ_CC_VOICE_STRUM);
+  SEQ_LCD_PrintFormattedString("Chord voicing  Strum:%-4s",
+    (strum == 64) ? "off" : (strum > 64) ? "up" : "down");
 }
 
 // Page buttons. The B-row (rack), GP encoders (operate), and GP-row mask are all
