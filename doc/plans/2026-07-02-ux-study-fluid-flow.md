@@ -743,7 +743,7 @@ louder decides the first commit.
 > **morph / scenes / modulation** over the whole rack ride the existing `SEQ_MORPH_*` engine
 > (Elektron scenes as continuous morph). Raises the value of the consistency bet. Design toward it;
 > keep the param model addressable, don't build it into G0. **G0 build plan written:**
-> `doc/plans/2026-07-03-g0-processor-grammar-chordmask.md`.
+> `doc/plans/archive/2026-07-03-g0-processor-grammar-chordmask.md`.
 >
 > *Theme → spine (2026-07-03):* the "new processors bolted onto old pages" pattern was the tell
 > that the instrument has **no operating grammar**. That observation is now promoted to **§3.5 —

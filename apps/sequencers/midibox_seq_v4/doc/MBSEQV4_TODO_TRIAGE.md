@@ -1,5 +1,10 @@
 # MBSEQ V4 — Open TODO Triage
 
+> **What's-open now lives on [`doc/OPEN_ITEMS.md`](../../../../doc/OPEN_ITEMS.md)**
+> (2026-07-11 docs consolidation) — that board summarizes the live tiers here plus the
+> review tail and hardening backlog. This file stays as the full mainline-TODO catalog;
+> update both when a tiered item ships.
+
 Priority list for the 66 open TODOs/FIXMEs/XXX markers catalogued in
 [MBSEQV4_REFERENCE.md § 6](MBSEQV4_REFERENCE.md#6-open-todos--fixmes--xxx-66-items).
 

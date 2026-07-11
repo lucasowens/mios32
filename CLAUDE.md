@@ -5,17 +5,25 @@ musical instrument. One-man project, no timelines, iterative.
 
 ## Where the design lives
 
+Cold-start reading path (reorganized 2026-07-11): design doc **§3 status dashboard** →
+**§9 decisions-in-force** (+ chronology index) → **§10 standing forks** → **OPEN_ITEMS**.
+
 - **`doc/MBSEQV4_GENERATIVE_PLATFORM_DESIGN.md`** —
   the durable design home (at repo-root `doc/`, NOT under the app dir).
   **Part I** is the committed spine; **Part II** is design-ahead reference that is
   *provisional and not committed* (build only after the §8 first-build GO/NO-GO
-  proves the core by ear). Read §9 (decisions) and §10 (open questions) first when
-  picking up cold.
+  proves the core by ear). §9 = decisions **in force** (curated); §10 = genuinely-open
+  forks only.
+- `doc/MBSEQV4_DECISIONS_LOG.md` — the dated session chronology (append-only). New
+  session decision blocks go HERE, plus one line in §9's chronology index.
+- `doc/OPEN_ITEMS.md` — the ONE board for open defects / hardening / housekeeping
+  (design forks stay in §10; roadmap stays in §8).
 - `apps/sequencers/midibox_seq_v4/doc/MBSEQV4_REFERENCE.md` — derived facts about
   the existing codebase (bus model, versions, TODOs). Owns codebase facts; the
   design doc owns the model.
 - `apps/sequencers/midibox_seq_v4/doc/MBSEQV4_MANUAL_FORK.md` — user manual for
-  shipped fork features.
+  shipped fork features. `MBSEQV4_CONTROL_SURFACE_MAP.md` — the panel/gesture
+  grammar (check it before adding any new gesture).
 
 ## Working discipline (from the design doc §2)
 
@@ -38,8 +46,9 @@ musical instrument. One-man project, no timelines, iterative.
 ## Plan storage convention
 
 Multi-session design plans live in `doc/plans/YYYY-MM-DD-<slug>.md`, git-tracked.
-One-shot session plans stay in `~/.claude/plans/`. Plans are scaffolding — archive or
-delete them once executed into the design doc / code. The design doc is the durable
+One-shot session plans stay in `~/.claude/plans/`. Plans are scaffolding — move them
+to `doc/plans/archive/` (or delete) once executed into the design doc / code; only
+live plans stay at the top level. The design doc + decisions log are the durable
 home; plans are the workflow that gets there.
 
 ## Before trusting any budget or platform claim

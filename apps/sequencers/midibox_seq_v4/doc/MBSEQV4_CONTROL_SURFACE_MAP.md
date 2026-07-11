@@ -11,7 +11,8 @@ This is the **UX-design companion** to `MBSEQV4_HARDWARE_GLOSSARY.md`:
 
 Use the **bold glossary terms** here. Lines marked **[fork]** are repurposed away from
 stock MBSEQ. Everything below was verified against source (symbol names, not line numbers —
-line numbers drift in this fork). Last verified: 2026-07-02.
+line numbers drift in this fork). Last verified: 2026-07-11 (PROC rack pass — LIVE button,
+the 12-row rack + planes/faces, Capture Phase encoder, waypoint direction modes).
 
 ---
 
@@ -52,7 +53,7 @@ These pick a *dimension* for the B-row; they do **not** navigate pages.
 | **FREEZE** | Metr. | `BUTTON_METRONOME` | metronome click | **[fork]** generator-mutation master switch — `seq_core_state.FREEZE`; lit = FROZEN. Stock metronome gone. |
 | **LOOP** | Loop | `BUTTON_LOOP` | fx-loop toggle | (unchanged) |
 | **RECORD** | Rec. | `BUTTON_RECORD` | record arm | also arms the **drum-pad / keyboard** surface to record vs. preview (§4) |
-| **LIVE** | Live | `BUTTON_LIVE` | jam/live page | (unchanged) |
+| **LIVE** | Live | `BUTTON_LIVE` | jam/live page | **[fork]** toggles the **PROC rack page** (§5a) — tap in to sculpt, tap out returns where you came from. Its LED = "in PROC mode". (The displaced Live-Forwarding toggle is gone; `FWD_MIDI` is pinned on.) |
 
 ### 1.4 Transport (bottom-left)
 
@@ -75,7 +76,7 @@ These pick a *dimension* for the B-row; they do **not** navigate pages.
 
 | Control | Panel | Firmware symbol | Stock role | Fork role |
 |---|---|---|---|---|
-| **`<` / `>`** | `<` / `>` | `BUTTON_Up` / `BUTTON_Down` | value ∓1 (datawheel nudge) | (unchanged) — NOT item-cycling |
+| **`<` / `>`** | `<` / `>` | `BUTTON_Up` / `BUTTON_Down` | value ∓1 (datawheel nudge) | mostly unchanged — NOT item-cycling. **[fork]** on the **PROC page** either key flips the focused row's **plane** (OPERATE⇄LOOP/STEPS, §5a); in **INS sel-view** they scroll the keyboard ±1 semitone (§4). |
 | **LEFT / RIGHT** | — | `BUTTON_Left` / `BUTTON_Right` | cursor L/R | **DEAD** — unwired (`0 0`). Free firmware functions, no physical key. |
 | **EXIT** | Exit | `BUTTON_EXIT` | leave page / up a level | (unchanged) |
 | **MENU** | Menu | `BUTTON_MENU` | MENU+GP → page shortcuts | (unchanged) |
@@ -189,6 +190,10 @@ Every non-trivial combo. "✓" = shipped/committed.
 | **UTILITY held + B-row + GP-n** | **[fork]** retroactive GRAB last *n* loops → dst track | `SEQ_UI_Button_Utility` (GP dispatch in `SEQ_UI_Button_GP`) | ✓ |
 | **B-row held + GP** (TRACKS) | **[fork]** PULL a stored track onto the held live track (GP1–8 letter, GP9–16 commit) | `SEQ_UI_Button_DirectTrack` | ✓ |
 | **CAPTURE (Song) tap** | **[fork]** open/close unified Capture page | `SEQ_UI_Button_Song` → PAGE_CAPTURE | ✓ |
+| **LIVE tap** | **[fork]** toggle the PROC rack page (§5a); LED = in-PROC | `SEQ_UI_Button_Live` → PAGE_PROC | ✓ |
+| **PROC: B-row tap / double-tap** | **[fork]** focus a rack row / row on-off (bypass, ENGAGE⇄DISENGAGE, ChordMask add-remove) | `SEQ_UI_SEL_VIEW_PROC` B-row dispatch | ✓ |
+| **PROC: `<` `>` (or Up/Down)** | **[fork]** flip the focused row's plane (Robotize OPERATE⇄LOOP, PitchGen/TrigGen OPERATE⇄STEPS) | `SEQ_UI_PROC_page_Button` | ✓ |
+| **PROC: GP-encoder push** | **[fork]** snap dial to its pass-through detent; ACTION dials execute (Reseed/Freeze/Roll/Anchor/Snap/Bounce) | `PROC_KIND_ACTION` / default-snap | ✓ |
 | **PHRASE → B-row waypoint** tap | **[fork]** RECALL phrase (whole-organism snapshot) | B-row dispatch (PHRASE sel-view) | ✓ |
 | **PHRASE → B-row waypoint** hold ≥1s | **[fork]** CAPTURE live organism into waypoint | same | ✓ |
 | **SELECT + B-row waypoint** | **[fork]** arm POSTURE-MORPH toward that phrase | same; ride on **datawheel** / GP-bar | ✓ |
@@ -197,7 +202,9 @@ Every non-trivial combo. "✓" = shipped/committed.
 
 - **datawheel** = GRAB dial (`Save` → `1b…Kb`); **`<`/`>`** nudge ∓1.
 - **B-row** = destination track. **GP row** = destination pattern (GP1–8 letter, GP9–16 number = commit).
-- **GP1 encoder** = `Fit: FILL ⇄ LOOP`.
+- **GP1 encoder** = `Fit: FILL ⇄ LOOP` (loop at the canvas vs. at the grab).
+- **GP2 encoder** = `Ph: GRID ⇄ HEARD` — where a PLAYING grab's window ends (loop-aligned vs.
+  the playhead, "keep the last N bars exactly as heard"). STOPPED re-sim is always GRID.
 
 ---
 
@@ -237,6 +244,44 @@ Melodic layouts (`INSSEL_KBD_LAYOUT`, base = middle C `0x3c`):
 
 ---
 
+## 5a. The Processor Rack (PROC page — LIVE button) **[fork]**
+
+The operating grammar's home (G0–G3 arc, §9/LOG). **LIVE toggles the page**; while on it,
+`seq_ui_sel_view = PROC` claims all three rows. Leaving by any route (EXIT, LIVE re-tap,
+any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on the way out.
+
+**The three rows in PROC mode:**
+- **B-row** = the rack: one key per row, in order
+  **Pitch · ChordMask · Arp · Tension · Limit · Echo · Groove · LFO · Robotize · PitchGen · TrigGen · Humanize**.
+  Tap = focus (always lands on the row's primary plane). **Double-tap (<350 ms) = the row's
+  on/off gesture**: emission rows flip their native bypass bit (config preserved); generator
+  rows ENGAGE⇄DISENGAGE (loop preserved); ChordMask adds/removes its playmode; param rows
+  (Pitch/Tension/Limit) reset to pass-through.
+  LEDs: **green = occupied** (winks when bypassed / at true pass-through), **red = focused**
+  (reads amber on the focused occupied row).
+- **GP encoders** = the focused row's dials on the current **plane** (labels on the LCD).
+  **Push = snap to the pass-through detent**; ACTION dials execute instead
+  (Robotize Rsd/Frz; PitchGen/TrigGen Roll/Anc/Snp/Bnc).
+- **GP row** = the plane's **face** (bespoke surface, where the row declares one):
+  ChordMask **Self mask** (GP1–12 = pitch classes, Self bus mode only) · Groove **paint**
+  (16-step shape of the selected lane, custom templates) · LFO **waveform palette** (tap to
+  pick) · Tension **zone jump** (GP9–15 = DRONE…SLIP, GP16 = RESOLVE) · Robotize LOOP plane
+  **bar anchors** (tap = reroll) · PitchGen/TrigGen STEPS plane **LOCK toggles** (16-step
+  window into the 64-step loop, Win dial picks the quarter).
+- **`<` / `>` (or Up/Down)** = plane flip on two-plane rows (Robotize OPERATE⇄LOOP,
+  PitchGen/TrigGen OPERATE⇄STEPS).
+
+**Grammar invariants** (why the rack stays predictable): every headline dial's 0 = true
+pass-through (dark row); a 0→on turn engage-seeds the row so it is audible at once; bypass
+never destroys config; the EDIT page edits SOURCE, the rack operates the processor.
+
+> **Duplicated legacy surfaces (cleanup pending, see `doc/OPEN_ITEMS.md`):** the GRAVITY
+> page (= Tension row + zone face), the ROBOLOOP page (= Robotize LOOP plane), the
+> "Pitch Gen (POC)" menu page (= PitchGen row), and the FX_* menu pages (deep-edit of the
+> same CCs the rack operates). The rack is the canonical operating surface.
+
+---
+
 ## 5. Page-context cheat-sheet (GP row / B-row)
 
 What the two rows mean on the pages that matter live. (B-row defaults to track-select
@@ -250,9 +295,11 @@ unless the page or sel-view overrides.)
 | **CAPTURE** (Song) | dst pattern (letter\|num) | dst track | datawheel=GRAB; GP1-enc=FILL⇄LOOP |
 | **PHRASE** | morph coarse bar (when armed) | 16 snapshot waypoints | datawheel=morph ride |
 | **INS sel-view** (drum/kbd on) | *(page's own)* | drum pads / keyboard (green=in-scale, amber=root) | INSTR re-tap toggles play⇄select; RECORD arms rec-vs-preview; GP1-enc=Jump; ‹/›+datawheel=scroll; SELECT+key1/16=octave |
-| **GRAVITY** | item hints; GP8=RESOLVE, GP16=→FX_SCALE | track-select | GP1-enc=GRAVITY, GP2=SHADE, GP3=GRIP, GP4=track |
-| **ROBOLOOP** | GP6=reseed, GP7=freeze, GP8=freeze-q; **SELECT+GP1–16 reroll measure anchor** | track-select | GP1-enc=track, GP2=palette len, GP3=loop start, GP4=cycles, GP5=rotate |
-| **TRKEUCLID** (stock) | Euclidean trigger preview | track-select | per trigger-layer params |
+| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (12 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane (§5a) |
+| **GRAVITY** *(legacy — Tension row covers it)* | item hints; GP8=RESOLVE, GP16=→FX_SCALE | track-select | GP1-enc=GRAVITY, GP2=SHADE, GP3=GRIP, GP4=track |
+| **ROBOLOOP** *(legacy — Robotize LOOP plane covers it)* | GP6=reseed, GP7=freeze, GP8=freeze-q; **SELECT+GP1–16 reroll measure anchor** | track-select | GP1-enc=track, GP2=palette len, GP3=loop start, GP4=cycles, GP5=rotate |
+| **TRKEUCLID** (stock, menu "GENERATE") | Euclidean trigger preview | track-select | per trigger-layer params; one-shot destructive fills — the LIVING generators are the rack's PitchGen/TrigGen rows |
+| **TRKDIR** | — | track-select | **[fork]** dir modes 7/8/9 = **WpHop / WpFill / WpHopSaw**: traversal bounces through pins painted on a **Waypoint par layer** (value = visit order, 0 = off-path; no layer → gated steps). |
 
 ---
 
@@ -261,9 +308,10 @@ unless the page or sel-view overrides.)
 The forward-looking layer — where new gestures can land, and what's already saturated.
 
 ### Unclaimed / underused inputs
-- **GP-encoder pushes (×16)** — default FAST, **no LED**. Only Capture GP1 (FILL⇄LOOP)
-  uses one so far. A whole row of latent momentary buttons, repurposable per page.
-- **`<` / `>`** are only value-nudge — a free pair of contextual buttons on most pages.
+- **GP-encoder pushes (×16)** — default FAST, **no LED**. Now spoken for on PROC
+  (detent-snap + ACTION exec, §5a) and Capture GP1; still free elsewhere.
+- **`<` / `>`** are value-nudge on most pages — but claimed on PROC (plane flip) and in
+  INS sel-view (keyboard scroll); check §5a/§4 before reusing.
 - **datawheel push** — used sparsely; a free per-page confirm/toggle.
 - **LEFT / RIGHT firmware functions** — physically dead, but the *firmware handlers* exist
   if ever re-wired.
@@ -294,10 +342,11 @@ The forward-looking layer — where new gestures can land, and what's already sa
 
 ### 7.1 Pages reachable (MENU + GP or buttons)
 EDIT, MUTE, PMUTE, PATTERN, SONG (→PHRASE), MIXER, TRKEVNT, TRKINST, TRKMODE, TRKDIR,
-TRKDIV, TRKLEN, TRKTRAN, TRKGRV, TRGASG, TRKMORPH, TRKRND, TRKEUCLID, TRKJAM, MANUAL,
-FX + FX_ECHO/HUMANIZE/ROBOTIZE/LIMIT/LFO/DUPL/LOOP/SCALE, **ROBOLOOP** [fork],
-**GRAVITY** [fork], UTIL, BPM, OPT, SAVE, MIDI, MIDIMON, SYSEX, CV, DISK, ETH, TRKLIVE,
-PATTERN_RMX, BOOKMARKS, INFO, TRKPITCHGEN [fork], **CAPTURE** [fork].
+TRKDIV, TRKLEN, TRKTRAN, TRKGRV, TRGASG, TRKMORPH, TRKRND, TRKEUCLID (menu "GENERATE"),
+TRKJAM, MANUAL, FX + FX_ECHO/HUMANIZE/ROBOTIZE/LIMIT/LFO/DUPL/LOOP/SCALE,
+**ROBOLOOP** [fork, legacy], **GRAVITY** [fork, legacy], UTIL, BPM, OPT, SAVE, MIDI,
+MIDIMON, SYSEX, CV, DISK, ETH, TRKLIVE, PATTERN_RMX, BOOKMARKS, INFO,
+TRKPITCHGEN [fork, POC — retirement queued], **CAPTURE** [fork], **PROC** [fork, LIVE button].
 (`seq_ui_page_t` in `seq_ui_pages.h`.)
 
 ### 7.2 Note on SysEx test-control codes
