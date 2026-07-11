@@ -6072,6 +6072,7 @@ static s32 SEQ_CORE_ResetTrkPos(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc)
   t->step_saved = t->step;
 
   t->arp_pos = 0;
+  t->waypoint_target = 0; // POC (waypoint path): mark segment target unset; Fill resyncs to the path start
 
   // reset LFO
   SEQ_LFO_ResetTrk(track);
@@ -6138,11 +6139,206 @@ extern s32 SEQ_CORE_SetTrkPos(u8 track, u8 value, u8 scale_value)
 /////////////////////////////////////////////////////////////////////////////
 // Determine next step depending on direction mode
 /////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////
+// POC (waypoint path): step traversal that bounces through a sparse set of
+// "pins" defined by a dedicated Waypoint parameter layer (value = visit order,
+// 0 = not on the path). If no Waypoint layer is assigned, falls back to the
+// track's gated steps (order 1 each -> plain step order).
+//   - WaypointHop:  land only on pins, ping-pong through them IN ORDER-KEY
+//                   sequence (value, then step for ties) -> a bouncing contour
+//                   that can run non-monotonic (jump around the step line).
+//   - WaypointFill: ping-pong the window between the first & last pin BY STEP;
+//                   every step sounds. (Order is ignored in Fill for now; the
+//                   ordered segment-scan is the queued follow-up.)
+// The direction (t->state.BACKWARD) is reused as the momentum flag. Only ever
+// called on the primary advance (reverse==0) because NextStep bypasses the
+// jump-back/skip/replay progression for waypoint modes.
+//
+// Returns 1 if it placed t->step (fully handled); 0 to fall back to the legacy
+// stepping (e.g. fewer than 2 pins -> nothing to bounce between).
+/////////////////////////////////////////////////////////////////////////////
+
+// order-key comparison: is (o1,s1) strictly before (o2,s2) in the path order?
+static u8 SEQ_CORE_WpKeyLt(u8 o1, u16 s1, u8 o2, u16 s2)
+{
+  return (o1 < o2) || (o1 == o2 && s1 < s2);
+}
+
+// pin order for a step: >0 = on the path (visit-order key); 0 = not a pin.
+// wp_layer<0 -> gate fallback (every gated step is a pin with equal order).
+static u8 SEQ_CORE_WpOrderGet(u8 track, s16 wp_layer, u16 step)
+{
+  if( wp_layer >= 0 )
+    return (u8)SEQ_PAR_Get(track, step, (u8)wp_layer, 0);
+  return SEQ_TRG_GateGet(track, step, 0) ? 1 : 0;
+}
+
+// Next pin after (cur_ord,cur_step) in path order. (min_k*,max_k*) are the path
+// endpoints. *backward carries momentum (flipped here on a turnaround); *wrapped
+// is set on any loop boundary (reflection or sawtooth reset) so the caller can
+// bump the bar counter. Returns the next pin's step (>=0).
+//   saw==0: ping-pong -- reflect at both ends (triangle over the order).
+//   saw==1: sawtooth  -- forward through the order, hard-reset to the first pin
+//           at the top (rotary). A same-number edge (tie) folds the traversal
+//           back; the fold sweeps down to the first pin and reflects forward.
+//           Distinct numbers => pure rotary; a repeat => a movable fold that
+//           holds out the pins above it. (Backward ignores ties, so no re-trap.)
+static s16 SEQ_CORE_WpNextPin(u8 track, s16 wp_layer, u8 lo, u8 hi,
+                              u8 cur_ord, u16 cur_step,
+                              u8 min_ko, s16 min_ks, u8 max_ko, s16 max_ks,
+                              u8 saw, u8 *backward, u8 *wrapped)
+{
+  int s; s16 nxt = -1; u8 nxt_ord = 0;
+  *wrapped = 0;
+
+  if( saw ) {
+    if( !*backward ) {
+      // smallest key strictly greater than the current pin
+      for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+        if( o && SEQ_CORE_WpKeyLt(cur_ord, cur_step, o, s) && (nxt < 0 || SEQ_CORE_WpKeyLt(o, s, nxt_ord, nxt)) ) { nxt = s; nxt_ord = o; } }
+      if( nxt < 0 ) { *wrapped = 1; return min_ks; }   // top -> reset to first pin (stay forward)
+      if( nxt_ord == cur_ord ) { *backward = 1; *wrapped = 1; } // forward tie -> fold back next advance
+      return nxt;
+    } else {
+      // largest key strictly less than the current pin (ties do NOT flip here)
+      for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+        if( o && SEQ_CORE_WpKeyLt(o, s, cur_ord, cur_step) && (nxt < 0 || SEQ_CORE_WpKeyLt(nxt_ord, nxt, o, s)) ) { nxt = s; nxt_ord = o; } }
+      if( nxt >= 0 ) return nxt;                         // keep folding down
+      // bottom -> reflect forward, take the second-lowest
+      *backward = 0; *wrapped = 1;
+      for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+        if( o && SEQ_CORE_WpKeyLt(min_ko, min_ks, o, s) && (nxt < 0 || SEQ_CORE_WpKeyLt(o, s, nxt_ord, nxt)) ) { nxt = s; nxt_ord = o; } }
+      return nxt;
+    }
+  }
+
+  // ---- ping-pong ----
+  if( !*backward ) {
+    // smallest key strictly greater than the current pin
+    for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+      if( o && SEQ_CORE_WpKeyLt(cur_ord, cur_step, o, s) && (nxt < 0 || SEQ_CORE_WpKeyLt(o, s, nxt_ord, nxt)) ) { nxt = s; nxt_ord = o; } }
+    if( nxt < 0 ) { // at the top -> reflect, take the second-highest
+      *backward = 1; *wrapped = 1;
+      for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+        if( o && SEQ_CORE_WpKeyLt(o, s, max_ko, max_ks) && (nxt < 0 || SEQ_CORE_WpKeyLt(nxt_ord, nxt, o, s)) ) { nxt = s; nxt_ord = o; } }
+    }
+  } else {
+    // largest key strictly less than the current pin
+    for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+      if( o && SEQ_CORE_WpKeyLt(o, s, cur_ord, cur_step) && (nxt < 0 || SEQ_CORE_WpKeyLt(nxt_ord, nxt, o, s)) ) { nxt = s; nxt_ord = o; } }
+    if( nxt < 0 ) { // at the bottom -> reflect, take the second-lowest
+      *backward = 0; *wrapped = 1;
+      for(s=lo; s<=hi; ++s) { u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+        if( o && SEQ_CORE_WpKeyLt(min_ko, min_ks, o, s) && (nxt < 0 || SEQ_CORE_WpKeyLt(o, s, nxt_ord, nxt)) ) { nxt = s; nxt_ord = o; } }
+    }
+  }
+  return nxt;
+}
+
+static s32 SEQ_CORE_WaypointNextStep(u8 track, seq_core_trk_t *t, seq_cc_trk_t *tcc)
+{
+  u8 lo = tcc->loop;
+  u8 hi = tcc->length;
+  if( hi < lo )
+    return 0;
+
+  // find a Waypoint parameter layer (first one wins); else gate fallback
+  s16 wp_layer = -1;
+  {
+    int l, n = SEQ_PAR_NumLayersGet(track);
+    for(l=0; l<n; ++l)
+      if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_Waypoint ) { wp_layer = l; break; }
+  }
+
+  // census + path endpoints (first/last in order key = the reflection points)
+  int npins = 0;
+  s16 min_ks = -1, max_ks = -1; u8 min_ko = 0, max_ko = 0;
+  {
+    int s;
+    for(s=lo; s<=hi; ++s) {
+      u8 o = SEQ_CORE_WpOrderGet(track, wp_layer, s);
+      if( !o ) continue;
+      ++npins;
+      if( min_ks < 0 || SEQ_CORE_WpKeyLt(o, s, min_ko, min_ks) ) { min_ks = s; min_ko = o; }
+      if( max_ks < 0 || SEQ_CORE_WpKeyLt(max_ko, max_ks, o, s) ) { max_ks = s; max_ko = o; }
+    }
+  }
+  if( npins < 2 )
+    return 0; // <2 pins: nothing to bounce between -> legacy stepping
+
+  if( tcc->dir_mode == SEQ_CORE_TRKDIR_WaypointFill ) {
+    // ordered segment-scan: walk the raw steps toward the next pin IN PATH ORDER,
+    // so the scan direction reverses at interior pins on non-monotonic routes.
+    // t->waypoint_target holds the pin we're heading to (position alone can't say,
+    // because non-monotonic paths self-cross). Self-heals if stale.
+    u8 target = t->waypoint_target;
+    u8 target_valid = (target >= lo && target <= hi && SEQ_CORE_WpOrderGet(track, wp_layer, target));
+    if( t->state.POS_RESET || !target_valid ) {
+      t->step = (u8)min_ks; t->state.BACKWARD = 0; t->waypoint_target = (u8)min_ks;
+      t->state.POS_RESET = 0; t->arp_pos = 0;
+      return 1; // start of path
+    }
+    if( t->step == target ) {
+      // arrived at a pin -> pick the next segment (Fill is always ping-pong: a
+      // sawtooth "reset" is inaudible when every step sounds, so saw=0 here)
+      u8 cur_ord = SEQ_CORE_WpOrderGet(track, wp_layer, target);
+      u8 bw = t->state.BACKWARD, wrapped = 0;
+      s16 nxt = SEQ_CORE_WpNextPin(track, wp_layer, lo, hi, cur_ord, target, min_ko, min_ks, max_ko, max_ks, 0, &bw, &wrapped);
+      if( nxt < 0 )
+        return 0;
+      t->state.BACKWARD = bw;
+      if( wrapped ) { ++t->bar; t->arp_pos = 0; }
+      t->waypoint_target = (u8)nxt;
+      // step one raw step toward the new target (every step sounds)
+      if( (u8)nxt > t->step ) ++t->step;
+      else if( (u8)nxt < t->step ) --t->step;
+      return 1;
+    }
+    // mid-segment: walk one raw step toward the target
+    if( target > t->step ) ++t->step;
+    else --t->step;
+    return 1;
+  }
+
+  // WaypointHop / WaypointHopSaw: land only on pins, traverse them in order key
+  // (ping-pong at the ends, or sawtooth reset-at-top for the Saw variant)
+  u8 saw = (tcc->dir_mode == SEQ_CORE_TRKDIR_WaypointHopSaw);
+  if( t->state.POS_RESET ) {
+    t->step = (u8)min_ks; t->state.BACKWARD = 0; t->state.POS_RESET = 0; t->arp_pos = 0;
+    return 1;
+  }
+  u8 cur_ord = SEQ_CORE_WpOrderGet(track, wp_layer, t->step);
+  if( !cur_ord ) { // not sitting on a pin -> snap to the path start
+    t->step = (u8)min_ks; t->state.BACKWARD = 0; t->arp_pos = 0;
+    return 1;
+  }
+  u8 bw = t->state.BACKWARD, wrapped = 0;
+  s16 nxt = SEQ_CORE_WpNextPin(track, wp_layer, lo, hi, cur_ord, t->step, min_ko, min_ks, max_ko, max_ks, saw, &bw, &wrapped);
+  if( nxt < 0 )
+    return 0; // shouldn't happen with >=2 pins, but stay safe
+  t->state.BACKWARD = bw;
+  if( wrapped ) { ++t->bar; t->arp_pos = 0; }
+  t->step = (u8)nxt;
+  return 1;
+}
+
+
 static s32 SEQ_CORE_NextStep(seq_core_trk_t *t, seq_cc_trk_t *tcc, u8 no_progression, u8 reverse)
 {
   int i;
   u8 save_step = 0;
   u8 new_step = 1;
+
+  // POC (waypoint path): waypoint modes define their own traversal, so bypass the
+  // jump-back/skip/replay progression and the legacy [loop,length] stepping.
+  u8 waypoint = (tcc->dir_mode == SEQ_CORE_TRKDIR_WaypointHop ||
+                 tcc->dir_mode == SEQ_CORE_TRKDIR_WaypointFill ||
+                 tcc->dir_mode == SEQ_CORE_TRKDIR_WaypointHopSaw);
+  if( waypoint && !no_progression ) {
+    if( SEQ_CORE_WaypointNextStep((u8)(t - seq_core_trk), t, tcc) )
+      return 0; // handled
+    // <2 pins: fall through to legacy forward stepping below (BACKWARD stays as-is)
+  }
 
   // handle progression parameters if position shouldn't be reset
   if( !no_progression && !t->state.POS_RESET ) {

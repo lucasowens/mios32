@@ -696,6 +696,53 @@ no longer clicks or stutters. (REVERT always snaps back immediately — it's an 
 
 ---
 
+## Waypoint Direction Modes — a painted path (POC)
+
+Three extra entries on the **Track Direction** page (the `Dir.` page) let a track's
+playhead bounce through a *path of points you paint* instead of the whole step line —
+so you can carve non-linear, ping-ponging or rotary motion out of a plain pattern.
+This is the cure for the classic "self-modulate the Direction and it just traps on two
+steps" problem: only the path's ends turn the playhead around, interior points are
+passed through.
+
+### Set up the path
+
+1. On the **Track EVNT** page, set one spare parameter layer's type to **`WayPt`**
+   (scroll the layer's control to it, confirm with the GP button under it).
+2. On the **EDIT** page, select that layer — you'll see a dotted line. Paint a **number
+   on each step you want in the path**: the number is its **visit order** (`1`, `2`,
+   `3`, …); a dot means "not on the path." Equal numbers order by step position.
+3. On the **Dir.** page, turn the datawheel **past `Rand.D+S`** — three new modes
+   appear in the lower row: `>WpHop`, `>WpFil`, `>WpHpS`. (They're datawheel-only; the
+   GP-button row on that page is already full.)
+
+*(No `WayPt` layer assigned? The modes fall back to using the track's gated steps as
+the path, in step order — handy for a quick try.)*
+
+### The three modes
+
+| Mode | Motion |
+|------|--------|
+| **`WpHop`** | Lands only on your pins, **ping-ponging** through them in number order. The route can jump around the step line (non-monotonic). A bouncing melodic contour. |
+| **`WpFil`** | Plays **every step**, using your pins as **turn-around points** — it scans the steps between consecutive pins in your numbered order, reversing at each. Fills the line in, folding at the pins. |
+| **`WpHpS`** | Rotary/**sawtooth**: runs forward through the numbers, then **hard-resets to the first pin** and repeats (never ping-pongs). Give **two pins the same number** to make the path **fold back** there. |
+
+### Tips
+
+- **A/B `WpHop` vs `WpHpS`** on the same pins to feel ping-pong (back-and-forth) vs
+  rotary (always the same way round).
+- Numbers don't have to follow step order — number a late step `1` and an early step
+  `3` to make the playhead leap around.
+- Keep **Robotize / generators off a Waypoint track** — they mutate parameter layers
+  and can scramble your painted numbers. And don't put **Skip** triggers on the track;
+  they fight the traversal.
+
+> POC feature — likely to grow (more traversal shapes, per-pin dwell, painting the
+> order as a gesture). The path is a normal parameter layer, so it saves/recalls with
+> the pattern.
+
+---
+
 ## Cross-Cutting Notes
 
 ### Where files live
@@ -731,4 +778,4 @@ patterns still load (the v2 byte-count is frozen, read path dispatches on tag).
 
 ---
 
-*Last update: 2026-06-14*
+*Last update: 2026-07-10*

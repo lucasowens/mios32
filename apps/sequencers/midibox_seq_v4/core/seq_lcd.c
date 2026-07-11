@@ -741,10 +741,10 @@ s32 SEQ_LCD_PrintCtrlValue(u8 track, u8 par_layer, u8 instrument, u8 value)
     }
 
     case SEQ_CC_DIRECTION: {
-      static const char dir_names[7][5] = {
-        "Fwd ", "Bwd ", "PPon", "Pend", "RDir", "RStp", "RD+S"
+      static const char dir_names[10][5] = {
+        "Fwd ", "Bwd ", "PPon", "Pend", "RDir", "RStp", "RD+S", "WpH ", "WpF ", "WpHs"
       };
-      if( value < 7 ) {
+      if( value < 10 ) {
         SEQ_LCD_PrintString((char *)dir_names[value]);
         return 1;
       }
@@ -920,6 +920,13 @@ s32 SEQ_LCD_PrintLayerValue(u8 track, u8 par_layer, u8 par_value)
 
   case SEQ_PAR_Type_Scale:
     SEQ_LCD_PrintScaleValue(par_value);
+    break;
+
+  case SEQ_PAR_Type_Waypoint: // POC (waypoint path): value = visit order; 0 = off
+    if( par_value == 0 )
+      SEQ_LCD_PrintString(" .  ");
+    else
+      SEQ_LCD_PrintFormattedString("%3d ", par_value);
     break;
 
   default:
@@ -1100,6 +1107,17 @@ s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 s
   case SEQ_PAR_Type_Scale:
     SEQ_LCD_PrintScaleValue(SEQ_PAR_ScaleValueGet(track, step, instrument, 0x0000));
     break;
+
+  case SEQ_PAR_Type_Waypoint: {
+    // POC (waypoint path): value = visit order; 0 = not on the path (shown as a dot)
+    u8 value = SEQ_PAR_Get(track, step, par_layer, instrument);
+    if( value == 0 )
+      SEQ_LCD_PrintString("  . ");
+    else {
+      SEQ_LCD_PrintFormattedString("%3d", value);
+      SEQ_LCD_PrintVBar(value >> 4);
+    }
+  } break;
 
   default:
     SEQ_LCD_PrintString("????");

@@ -54,6 +54,7 @@ typedef enum {
   SEQ_PAR_Type_Scale=17,
   SEQ_PAR_Type_Chord3=18,
   SEQ_PAR_Type_Ctrl=19,
+  SEQ_PAR_Type_Waypoint=20, // POC: per-step value = visit-order for Waypoint direction modes (0 = not on the path); emits no MIDI
   SEQ_PAR_NUM_TYPES
 } seq_par_layer_type_t;
 

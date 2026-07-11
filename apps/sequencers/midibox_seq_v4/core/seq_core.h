@@ -129,6 +129,7 @@ typedef struct seq_core_trk_t {
   u8                   lfo_cc_muted_from_midi:1; // the same for the LFO CC
   u8                   lfo_cc_muted_from_midi_next:1;
   u8                   arp_pos;          // arpeggiator position
+  u8                   waypoint_target;  // POC (waypoint path): the pin step WaypointFill is scanning toward (segment target); self-heals if stale
   u8                   vu_meter;         // for visualisation in mute menu
   u32                  rec_timestamp;    // for recording function
   u8                   rec_poly_ctr;     // for recording function
@@ -165,7 +166,20 @@ typedef enum {
   SEQ_CORE_TRKDIR_Pendulum,
   SEQ_CORE_TRKDIR_Random_Dir,
   SEQ_CORE_TRKDIR_Random_Step,
-  SEQ_CORE_TRKDIR_Random_D_S
+  SEQ_CORE_TRKDIR_Random_D_S,
+  // POC (waypoint path): traversal bounces through a set of "pins" instead of the
+  // whole [loop,length] line. Pins come from a Waypoint parameter layer (value =
+  // visit order, 0 = off; gate fallback if unassigned). Hop lands only on pins and
+  // ping-pongs through them IN ORDER (can run non-monotonic); Fill ping-pongs the
+  // step-window between the first & last pin (every step sounds). Solves the
+  // Ctrl->Direction 2-step trap by construction: only the path extremes reflect.
+  SEQ_CORE_TRKDIR_WaypointHop,
+  SEQ_CORE_TRKDIR_WaypointFill,
+  // Sawtooth Hop variant: instead of ping-ponging at the ends, the order traversal
+  // hard-resets to the first pin after the last (a rotary loop). A repeated order
+  // number folds the path back at that pin. (Sawtooth is a Hop-only idea: in Fill
+  // every step sounds, so a "reset" just becomes a backward sweep = ping-pong.)
+  SEQ_CORE_TRKDIR_WaypointHopSaw
 } seq_core_trk_dir_t;
 
 typedef enum {

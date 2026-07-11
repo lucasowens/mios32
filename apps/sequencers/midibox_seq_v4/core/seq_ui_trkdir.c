@@ -124,7 +124,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
   // for GP encoders and Datawheel
   switch( ui_selected_item ) {
     case ITEM_GXTY:          return SEQ_UI_GxTyInc(incrementer);
-    case ITEM_DIRECTION:     return SEQ_UI_CC_Inc(SEQ_CC_DIRECTION, 0, 6, incrementer);
+    case ITEM_DIRECTION:     return SEQ_UI_CC_Inc(SEQ_CC_DIRECTION, 0, 9, incrementer); // 7,8,9 = Waypoint Hop/Fill/HopSaw (POC, datawheel-only)
     case ITEM_STEPS_FORWARD: return SEQ_UI_CC_Inc(SEQ_CC_STEPS_FORWARD, 0, 7, incrementer);
     case ITEM_STEPS_JMPBCK:  return SEQ_UI_CC_Inc(SEQ_CC_STEPS_JMPBCK, 0, 7, incrementer);
     case ITEM_STEPS_REPLAY:  return SEQ_UI_CC_Inc(SEQ_CC_STEPS_REPLAY, 0, 7, incrementer);
@@ -288,6 +288,14 @@ static s32 LCD_Handler(u8 high_prio)
   // 3 additional spaces to fill LCD (avoids artefacts on page switches)
   SEQ_LCD_CursorSet(37, 1);
   SEQ_LCD_PrintSpaces(3);
+
+  // POC (waypoint path): modes 7/8/9 don't fit the 7-slot grid; show whichever is
+  // selected in the one free cell on line 1 (the datawheel reaches them).
+  if( selected_direction >= 7 ) {
+    SEQ_LCD_CursorSet(34, 1);
+    SEQ_LCD_PrintString((selected_direction == SEQ_CORE_TRKDIR_WaypointHopSaw) ? ">WpHpS" :
+                        (selected_direction == SEQ_CORE_TRKDIR_WaypointFill)   ? ">WpFil" : ">WpHop");
+  }
 
 
   ///////////////////////////////////////////////////////////////////////////

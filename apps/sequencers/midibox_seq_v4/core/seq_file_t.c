@@ -627,6 +627,9 @@ static s32 SEQ_FILE_T_Write_Hlp(u8 write_to_file, u8 track)
     case SEQ_CORE_TRKDIR_Random_Dir: sprintf(str_buffer, "Random Dir"); break;
     case SEQ_CORE_TRKDIR_Random_Step: sprintf(str_buffer, "Random Step"); break;
     case SEQ_CORE_TRKDIR_Random_D_S: sprintf(str_buffer, "Random Dir/Step"); break;
+    case SEQ_CORE_TRKDIR_WaypointHop: sprintf(str_buffer, "Waypoint Hop"); break;
+    case SEQ_CORE_TRKDIR_WaypointFill: sprintf(str_buffer, "Waypoint Fill"); break;
+    case SEQ_CORE_TRKDIR_WaypointHopSaw: sprintf(str_buffer, "Waypoint Hop Saw"); break;
     default: sprintf(str_buffer, "unknown"); break;
   }
   sprintf(line_buffer, "DirectionMode %d (%s)\n", tcc->dir_mode, str_buffer);
