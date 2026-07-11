@@ -301,6 +301,11 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
         case SEQ_PAR_Type_Scale:
           par_asg[i] = SEQ_PAR_Type_None;
           break;
+        // SEQ_PAR_Type_Waypoint: deliberately PRESERVED (hand-painted path =
+        // deterministic step data, like Note). Inert on the frozen copy —
+        // dir_mode was reset to Forward above, and the path only drives the
+        // Wp* traversal modes — but re-arming a Wp mode re-uses the painted
+        // path instead of finding it silently erased.
         default:
           break;
       }

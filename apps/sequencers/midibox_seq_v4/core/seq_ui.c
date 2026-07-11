@@ -1858,6 +1858,8 @@ static const u8 lfo_wave_palette[16] = {
 
 // Short (<=4 char) name of an LFO waveform for the encoder cell / palette readout. The
 // bit-7 disable flag is masked off by the caller. Rec05..Rec95 read as pulse-width "P05".
+// Returns a STATIC buffer for the Rec* names: UI-task-only, and at most ONE call per
+// printf — a format printing two wave names would read the same clobbered buffer twice.
 static const char *SEQ_UI_PROC_LfoWaveName(u8 wave)
 {
   switch( wave ) {

@@ -17,10 +17,7 @@ to "Closed" at the bottom with the date — don't delete it.
 
 From the 2026-07-10 whole-fork review (report artifact linked in the session memo):
 
-| # | Item | Sev | Where | Fix shape |
-|---|---|---|---|---|
-| F3 | Only compiler warning in the build: `win_o` may-be-uninitialized (false positive) | P4 | `SEQ_CORE_CaptureSpanReSim`, seq_core.c ~2690 | `u8 win_o = 0;` |
-| F4 | Notes: `SEQ_UI_PROC_LfoWaveName` static sprintf buf (UI-only, comment it); 1-step track never fires `SEQ_GENERATOR_Tick` wrap-detect; `SEQ_PAR_Type_Waypoint` not classified in `ResetGenerativeForBounce` (inert today — dir resets to Forward) | P4 | — | opportunistic |
+*(all closed — see the Closed section)*
 
 ## 2. Adversarial-review tail (2026-07-01; still open)
 
@@ -93,3 +90,11 @@ reply-buffer bound needs a `static_assert` · idea: small undo ring (2–3 deep)
 - **2026-07-11** | F2 | Slot-capture restore fans skipped Arp — **FIXED, HIL 250/250**: new
   `SEQ_CORE_AllSlotSync()` helper (all 5 tenant syncs) replaces the 4-sync fans in the 3 restore loops
   + the `seq_file_t.c` preset-import fan. Bystander pin (both slot verbs) in `test_arp_bounce.py`.
+- **2026-07-11** | F3 | `win_o` may-be-uninitialized warning — **FIXED**: `u8 win_o = 0;` in
+  `SEQ_CORE_CaptureSpanReSim`. Build now has ZERO warnings — treat any new one as a defect signal.
+- **2026-07-11** | F4 | Three P4 notes — **CLOSED** (comments/classification, no behavior change):
+  `SEQ_UI_PROC_LfoWaveName` static-buf constraint documented (one call per printf);
+  `SEQ_GENERATOR_Tick` 1-step-track wrap hole documented as accepted (degenerate musically, not
+  worth a per-track advance counter); `SEQ_PAR_Type_Waypoint` classified in
+  `ResetGenerativeForBounce` as **PRESERVE** (painted path = deterministic step data like Note;
+  inert on the frozen copy since dir_mode resets to Forward, but re-arming a Wp mode re-uses it).

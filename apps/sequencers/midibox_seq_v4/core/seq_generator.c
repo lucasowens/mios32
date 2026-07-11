@@ -943,6 +943,10 @@ void SEQ_GENERATOR_Tick(void)
 
     // Fire on track-wrap to step 0. 0xFF sentinel (post-init) also fires:
     // makes the first measure after start carry generator mutation.
+    // Known hole: a 1-step track never leaves step 0, so no wrap is ever seen
+    // and its engaged generators never auto-mutate (only ROLL / ForceMutate
+    // move them). Degenerate musically; left undetected rather than paying a
+    // per-track advance counter for it (OPEN_ITEMS F4, 2026-07-11).
     if( cur != 0 ) continue;
     if( prev == 0 ) continue; // same step as last tick — no wrap event
 

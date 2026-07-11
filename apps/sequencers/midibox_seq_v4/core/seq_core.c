@@ -2715,7 +2715,7 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // the helper reduces to FrameBack(k) for n==1.
   u8 n = (u8)n_meas;
   u32 mctr = seq_core_trk[src].robotize_measure_ctr;
-  u8 win_o;
+  u8 win_o = 0; // always written on the ==0 path; init quiets a may-be-uninitialized false positive
   if( SEQ_CORE_CaptureRingLoopWindow(src, mctr, n, k, NULL, &win_o, NULL) != 0 )
     return -6;                                          // not enough aligned history
   const seq_core_cap_frame_t *frame = &seq_core_cap_ring[(mctr - win_o) % SEQ_CORE_CAP_RING_BARS];

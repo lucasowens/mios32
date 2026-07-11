@@ -1883,3 +1883,11 @@ HIL 250/250 — 244 baseline + 6 new pins, green on first run after flash)**
   the whole-group bounce (incl. source restore), the GP8 in-place freeze, the stale-dst
   to-track path, and the F2 bystander (both slot verbs). All green on hardware; full suite
   250/250, zero regressions.
+- **F3/F4 closed same session (P4 tail; comments/classification, no behavior change).**
+  `win_o` init → the build is now ZERO-warning (any new warning = defect signal). One real
+  classification call: **`SEQ_PAR_Type_Waypoint` is PRESERVED by
+  `ResetGenerativeForBounce`** — the painted path is deterministic step data (like Note),
+  inert on a frozen copy (dir_mode resets to Forward), and re-arming a Wp mode should
+  re-use it, not find it silently erased. Also documented: LfoWaveName's static buf
+  (one call per printf) and the accepted 1-step-track auto-mutate hole in
+  `SEQ_GENERATOR_Tick` (degenerate musically; not worth a per-track advance counter).
