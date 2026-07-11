@@ -19,8 +19,6 @@ From the 2026-07-10 whole-fork review (report artifact linked in the session mem
 
 | # | Item | Sev | Where | Fix shape |
 |---|---|---|---|---|
-| F1 | Arp tenant never neutralized on bounce/capture — frozen material re-arps when `ArpSlotSync` next fires | **P1 musical** | `SEQ_CC_ResetGenerativeForBounce` (seq_cc.c) + `SEQ_CORE_ProcessorBounce` (seq_core.c) | add `arp_mode = 0; arp_bus = 0;` to both; HIL pin: capture arp-armed track → dst `SEQ_CC_ARP_MODE == 0` |
-| F2 | Slot-capture restore fans re-sync 4 tenants but not Arp — arp-armed track in dst group comes back silently un-arped | P2 | `SEQ_CORE_CaptureToSlotTrack` / `CaptureSpanToSlotTrack` / `CopyTrackLiveToSlot` restore loops | add `SEQ_CORE_ArpSlotSync` to the 3 fans; consider one `SEQ_CORE_AllSlotSync()` helper |
 | F3 | Only compiler warning in the build: `win_o` may-be-uninitialized (false positive) | P4 | `SEQ_CORE_CaptureSpanReSim`, seq_core.c ~2690 | `u8 win_o = 0;` |
 | F4 | Notes: `SEQ_UI_PROC_LfoWaveName` static sprintf buf (UI-only, comment it); 1-step track never fires `SEQ_GENERATOR_Tick` wrap-detect; `SEQ_PAR_Type_Waypoint` not classified in `ResetGenerativeForBounce` (inert today — dir resets to Forward) | P4 | — | opportunistic |
 
@@ -87,4 +85,11 @@ reply-buffer bound needs a `static_assert` · idea: small undo ring (2–3 deep)
 
 ## Closed (move lines here with a date, don't delete)
 
-*(nothing closed since the board was created)*
+- **2026-07-11** | F1 | Arp tenant never neutralized on bounce/capture — **FIXED, HIL 250/250**:
+  `arp_mode`/`arp_bus` zeroed in `SEQ_CC_ResetGenerativeForBounce` + `SEQ_CORE_ProcessorBounce`; sibling
+  stale-slot fix on the to-track paths (`CaptureToTrack`/`CaptureSpanPrepDst` get `SEQ_CORE_AllSlotSync`
+  — ARP renders from `slot->strength`, so a stale-armed slot re-arps even with tcc zeroed). Pins in
+  `test_arp_bounce.py`. Full derivation: DECISIONS_LOG 2026-07-11.
+- **2026-07-11** | F2 | Slot-capture restore fans skipped Arp — **FIXED, HIL 250/250**: new
+  `SEQ_CORE_AllSlotSync()` helper (all 5 tenant syncs) replaces the 4-sync fans in the 3 restore loops
+  + the `seq_file_t.c` preset-import fan. Bystander pin (both slot verbs) in `test_arp_bounce.py`.

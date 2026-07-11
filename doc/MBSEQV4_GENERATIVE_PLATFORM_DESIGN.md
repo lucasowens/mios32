@@ -2229,6 +2229,7 @@ there and add one line to the chronology index at the end of this section.
 - **2026-07-10 — §10 CAPTURE open question reconciled** (stale one-measure framing corrected)
 - **2026-07-10 — Atomic CHECKPOINT anchor write** (§8 queue #7 reliability half SHIPPED; temp+rename via new FILE_Rename)
 - **2026-07-10 — Waypoint direction modes: painted-path traversal** (SHIPPED POC; WpHop/WpFill/WpHopSaw; HIL pin deferred)
+- **2026-07-11 — F1/F2 closed: Arp bounce-neutralize + AllSlotSync raw-write rule** (FIXED; HIL 250/250)
 
 
 ---

@@ -1995,6 +1995,22 @@ void SEQ_CORE_LimitSlotSync(u8 track)
   }
 }
 
+// Re-derive EVERY processor-slot bridge from tcc. Call after any RAW tcc write
+// on a LIVE track (memcpy restore, direct-field reset) — SEQ_CC_Set fires the
+// per-CC syncs itself, but raw writes bypass the chokepoint and leave slots
+// stale under the new tcc. Stale slots are not always benign: ARP/CHORD_MASK/
+// TENSION render from slot->strength (the mode/dial copied at arm time), so a
+// stale-armed slot keeps transforming after its tcc says neutral. Each sync is
+// idempotent and only re-renders on an actual change.
+void SEQ_CORE_AllSlotSync(u8 track)
+{
+  SEQ_CORE_ChordMaskSlotSync(track);
+  SEQ_CORE_TensionSlotSync(track);
+  SEQ_CORE_PitchSlotSync(track);
+  SEQ_CORE_LimitSlotSync(track);
+  SEQ_CORE_ArpSlotSync(track);
+}
+
 // PITCH is implicit-dirty (per tick) only when its inputs are live — the
 // transposer bus / global transpose can change between any two ticks without a
 // CC write. Static transpose+FTS render on events instead (CC writes touch via
@@ -2229,6 +2245,11 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
   tcc->tension_grip = 0;
   tcc->limit_lower = 0;
   tcc->limit_upper = 0;
+  // ARP is doubly-bound the same way (slot mirrors tcc->arp_mode/arp_bus via
+  // SEQ_CORE_ArpSlotSync) — a kept arp_mode would re-arm the slot on the next
+  // sync and re-arp the just-bounced material.
+  tcc->arp_mode = 0;
+  tcc->arp_bus  = 0;
 
   // Re-render so the output mirror equals the new source (identity copy).
   SEQ_CORE_RenderTouched(track);
@@ -2386,7 +2407,12 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
   // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
 
   // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated.
+  //    The reset is a raw tcc write: step 1's CC replay armed dst's slots from
+  //    PRE-reset values (e.g. dst's own old arp_mode — the fork CCs at 0x80+
+  //    are not in the 0x00..0x7f inherit), so re-sync or a stale-armed
+  //    ARP/CHORD_MASK/TENSION slot re-transforms the frozen tape at render.
   SEQ_CC_ResetGenerativeForBounce(dst_track);
+  SEQ_CORE_AllSlotSync(dst_track);
 
   // 4. Force a full dst render so SEQ_PAR_Get(dst) reads the captured bytes
   //    across the whole buffer immediately.
@@ -2633,6 +2659,11 @@ static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
     }
   }
   SEQ_CC_LinkUpdate(dst);
+  // The reset above is a raw tcc write: the full-CC inherit armed dst's slots
+  // from PRE-reset values (dst's own fork CCs at 0x80+ are never inherited) —
+  // re-sync so no stale-armed ARP/CHORD_MASK/TENSION slot re-transforms the
+  // captured tape (same rationale as SEQ_CORE_CaptureToTrack step 3).
+  SEQ_CORE_AllSlotSync(dst);
   memset(seq_par_layer_value[dst], 0, SEQ_PAR_MAX_BYTES); // start as all-rest
   memset(seq_trg_layer_value[dst], 0, SEQ_TRG_MAX_BYTES);
 }
@@ -3199,13 +3230,10 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     SEQ_GENERATOR_TrackRestore(dst_base+t, slottrk_gen_snap[t], slottrk_gen_count[t]);
     // Track 2: steps 3/4 above moved the processor slots (PatternRead replays
     // CCs through SEQ_CC_Set; the CC inherit too) but this restore is a raw
-    // memcpy — re-sync the slot bridges so a live Transpose/FTS/LIMIT/GRIP
+    // memcpy — re-sync ALL slot bridges so a live Transpose/FTS/LIMIT/GRIP/ARP
     // track doesn't come back with a disarmed slot under a non-neutral tcc
     // (silently raw playback until the next CC touch).
-    SEQ_CORE_ChordMaskSlotSync(dst_base+t);
-    SEQ_CORE_TensionSlotSync(dst_base+t);
-    SEQ_CORE_PitchSlotSync(dst_base+t);
-    SEQ_CORE_LimitSlotSync(dst_base+t);
+    SEQ_CORE_AllSlotSync(dst_base+t);
     SEQ_CORE_RenderDirtySet(dst_base+t);
   }
   memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
@@ -3538,10 +3566,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
     seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
     SEQ_CC_LinkUpdate(dst_base+t);
     SEQ_GENERATOR_TrackRestore(dst_base+t, slottrk_gen_snap[t], slottrk_gen_count[t]);
-    SEQ_CORE_ChordMaskSlotSync(dst_base+t);
-    SEQ_CORE_TensionSlotSync(dst_base+t);
-    SEQ_CORE_PitchSlotSync(dst_base+t);
-    SEQ_CORE_LimitSlotSync(dst_base+t);
+    SEQ_CORE_AllSlotSync(dst_base+t);
     SEQ_CORE_RenderDirtySet(dst_base+t);
   }
   memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);
@@ -3659,10 +3684,7 @@ s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst
     seq_core_trk[dst_base+t].play_section = slottrk_play_section_snap[t];
     SEQ_CC_LinkUpdate(dst_base+t);
     SEQ_GENERATOR_TrackRestore(dst_base+t, slottrk_gen_snap[t], slottrk_gen_count[t]);
-    SEQ_CORE_ChordMaskSlotSync(dst_base+t);
-    SEQ_CORE_TensionSlotSync(dst_base+t);
-    SEQ_CORE_PitchSlotSync(dst_base+t);
-    SEQ_CORE_LimitSlotSync(dst_base+t);
+    SEQ_CORE_AllSlotSync(dst_base+t);
     SEQ_CORE_RenderDirtySet(dst_base+t);
   }
   memcpy(seq_pattern_name[dst_group], slottrk_name_snap, 20);

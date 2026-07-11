@@ -292,6 +292,10 @@ class CC:
     CHORDMASK_DRUM_L = 0x98    # bit i = process drum i  (drums 0..7)
     CHORDMASK_DRUM_H = 0x99    # bit i = process drum 8+i (drums 8..15)
     TENSION_GRIP = 0x9A        # 0..127 per-track GRAVITY-field grip
+    CHORDMASK_MASK_L = 0x9B    # static Self mask, pitch classes C..G (bits 0..7)
+    CHORDMASK_MASK_H = 0x9C    # static Self mask, pitch classes G#..B (bits 0..3)
+    ARP_MODE = 0x9D            # ARP tenant: 0=Off 1=Up 2=Down 3=UpDown 4=Random
+    ARP_BUS = 0x9E             # ARP chord source: 0=Self (static mask), 1..4=bus A..D
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:

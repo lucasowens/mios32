@@ -1854,3 +1854,32 @@ auto-mutate marks a group dirty** (`seq_generator.c` → `SEQ_PATTERN_DirtySetTr
   (program only the sectors that changed) — drops a save from ~18 sectors to a few. Its own
   bundle; touches the SD/file write path.
 
+
+**2026-07-11 — F1/F2 closed: Arp bounce-neutralize + the AllSlotSync raw-write rule (FIXED;
+HIL 250/250 — 244 baseline + 6 new pins, green on first run after flash)**
+- **F1 (P1 musical): the ARP tenant joins the GENERATION axis.** `arp_mode`/`arp_bus` are now
+  zeroed in `SEQ_CC_ResetGenerativeForBounce` (every capture verb) and in
+  `SEQ_CORE_ProcessorBounce`'s doubly-bound-tcc untangle — the capture bakes the arp's
+  re-ordering into the notes, so a kept `arp_mode` re-arps the frozen tape when
+  `ArpSlotSync` next fires.
+- **F2: `SEQ_CORE_AllSlotSync(track)`** — one helper = all five tenant syncs
+  (ChordMask/Tension/Pitch/Limit/Arp). The three slot-capture restore fans
+  (`CaptureToSlotTrack` / `CaptureSpanToSlotTrack` / `CopyTrackLiveToSlot`) and the
+  preset-import fan (`seq_file_t.c`) use it, so an arp-armed bystander track in the borrowed
+  dst group comes back audible, not silently un-arped.
+- **New rule surfaced by the trace: stale slots are NOT benign for slot-strength tenants.**
+  ARP/CHORD_MASK/TENSION render from `slot->strength` (the mode/dial copied at arm time);
+  PITCH/LIMIT re-read tcc and no-op when stale. So **every RAW tcc write on a LIVE track
+  (memcpy restore / direct-field reset) needs `SEQ_CORE_AllSlotSync` after it** — the
+  SEQ_CC_Set chokepoint fires syncs itself, raw writes bypass it. Applied to the to-track
+  paths (`CaptureToTrack`, `CaptureSpanPrepDst`), whose CC inherit armed dst's slots from
+  PRE-reset values: capture onto a track that previously ran an arp re-arped the frozen tape
+  (sibling of F1, found while fixing it).
+- **Deliberately NOT synced: `SEQ_CORE_CaptureToSlot`'s staged window.** The reset stays
+  sync-free, so the source's slots keep matching the ORIGINAL tcc through the borrow and the
+  raw restore lands consistent by construction (invariant documented at the reset).
+- **HIL: 6 pins in `test_arp_bounce.py`** — CC readback + output-mirror evidence (Self mask
+  {D,A}, mode Up → step-dependent snap {62,69,62} vs raw {60,64,67}) across the slot path,
+  the whole-group bounce (incl. source restore), the GP8 in-place freeze, the stale-dst
+  to-track path, and the F2 bystander (both slot verbs). All green on hardware; full suite
+  250/250, zero regressions.

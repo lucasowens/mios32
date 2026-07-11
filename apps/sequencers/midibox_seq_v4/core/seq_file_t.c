@@ -472,11 +472,10 @@ s32 SEQ_FILE_T_Read(char *filepath, u8 track, seq_file_t_import_flags_t flags, u
   // into tcc (not via SEQ_CC_Set), so the processor-slot bridges never fire —
   // without an explicit re-sync an imported preset's transpose/FTS/limit (or
   // ChordMask playmode / GRIP) would stay silently disarmed until some
-  // unrelated CC write. Re-sync everything the preset can carry + re-render.
-  SEQ_CORE_ChordMaskSlotSync(track);
-  SEQ_CORE_TensionSlotSync(track);
-  SEQ_CORE_PitchSlotSync(track);
-  SEQ_CORE_LimitSlotSync(track);
+  // unrelated CC write. Re-sync ALL bridges (ARP included: the preset doesn't
+  // carry arp CCs, but an imported EventMode/TrackMode can change its fence)
+  // + re-render.
+  SEQ_CORE_AllSlotSync(track);
   SEQ_CORE_RenderDirtySet(track);
   // FEARLESS: the whole import writes par/trg/CCs directly (never through the
   // Set chokepoints) — without this the pattern-page paste was discarded on

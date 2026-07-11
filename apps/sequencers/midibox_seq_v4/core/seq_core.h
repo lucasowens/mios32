@@ -498,6 +498,11 @@ extern void SEQ_CORE_LimitSlotSync(u8 track);
 // playmode or Drum event mode (same fence as PITCH/LIMIT). Called from SEQ_CC_Set.
 extern void SEQ_CORE_ArpSlotSync(u8 track);
 
+// All five tenant syncs in one call — required after any RAW tcc write on a
+// LIVE track (memcpy restore / direct-field reset bypasses the SEQ_CC_Set
+// chokepoint and leaves slots stale under the new tcc).
+extern void SEQ_CORE_AllSlotSync(u8 track);
+
 // Set the global GRAVITY dial (clamped −64..+63) and touch the field-bearing
 // tracks so a live cockpit-encoder sweep re-renders smoothly. Called from the
 // GRAVITY page encoder.

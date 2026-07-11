@@ -254,6 +254,13 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->chordmask_mask_l   = 0;
   tcc->chordmask_mask_h   = 0;
   tcc->tension_grip       = 0;
+  // ARP tenant off (GENERATION axis): the capture baked its re-ordering into
+  // the notes — a kept arp_mode would re-arp the frozen material when
+  // ArpSlotSync next fires. NOTE for callers holding a LIVE dst: this is a raw
+  // tcc write, so an already-armed ARP slot stays stale-armed until
+  // SEQ_CORE_AllSlotSync (arp renders from slot->strength, unlike PITCH/LIMIT).
+  tcc->arp_mode = 0;
+  tcc->arp_bus  = 0;
   {
     u8 i;
     for(i=0; i<16; ++i)
