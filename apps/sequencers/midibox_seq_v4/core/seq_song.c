@@ -520,9 +520,13 @@ s32 SEQ_SONG_Fwd(void)
     u32 measure = bpm_tick / ticks_per_pattern;
     u32 next_bpm_tick = (measure+1) * ticks_per_pattern;
 
+    // The jump lands atomically inside SEQ_CORE_Reset (its SEQ_BPM_TickSet is
+    // IRQ-guarded). Mainline re-pinned the tick again AFTER NextPos — a redundant
+    // read-modify-write that discarded any master-ISR ticks elapsed during NextPos
+    // (adversarial #2, lost-update race); the ISR must keep counting from the
+    // landed position, so no trailing TickSet.
     SEQ_CORE_Reset(next_bpm_tick);
     SEQ_SONG_NextPos();
-    SEQ_BPM_TickSet(next_bpm_tick);
   }
 
   return 0; // no error
@@ -544,9 +548,9 @@ s32 SEQ_SONG_Rew(void)
     u32 measure = bpm_tick / ticks_per_pattern;
     u32 next_bpm_tick = measure ? ((measure-1) * ticks_per_pattern) : 0;
 
+    // No trailing TickSet — see SEQ_SONG_Fwd (adversarial #2 lost-update)
     SEQ_CORE_Reset(next_bpm_tick);
     SEQ_SONG_PrevPos();
-    SEQ_BPM_TickSet(next_bpm_tick);
   }
 
   return 0; // no error

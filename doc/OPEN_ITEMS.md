@@ -19,16 +19,11 @@ From the 2026-07-10 whole-fork review (report artifact linked in the session mem
 
 *(all closed — see the Closed section)*
 
-## 2. Adversarial-review tail (2026-07-01; still open)
+## 2. Adversarial-review tail (2026-07-01)
 
 Source: [reviews/2026-07-01-adversarial-review.md](reviews/2026-07-01-adversarial-review.md)
-(72 findings; all but these closed by the 07-01/07-02 sweeps).
-
-| # | Item | Sev | Note |
-|---|---|---|---|
-| #54 | Catch-up/prefetch can run ~120 `SEQ_CORE_Tick`s in one 1 ms slot under MUTEX_MIDIOUT | P2 rt-timing | bound ticks-per-service; **prerequisite for the jitter arc** |
-| #55 | CAPTURE tape note-off back-walk up to 768 ring entries inside the MIDI drain | P2 rt-timing | cap scan depth or index opens by note |
-| #2 | Fwd/Rew `bpm_tick` read-modify-write races the master timer ISR | P3 concurrency | wrap in IRQ-disable (SEQ_BPM_Start/Stop pattern) |
+(72 findings; the last software-only three — #54/#55/#2 — closed 2026-07-11, see Closed.
+The hardware-gated pair #35/#46 stays in section 3.)
 
 ## 3. Held — hardware-gated (deliberate future sessions)
 
@@ -81,6 +76,19 @@ reply-buffer bound needs a `static_assert` · idea: small undo ring (2–3 deep)
 ---
 
 ## Closed (move lines here with a date, don't delete)
+
+- **2026-07-11** | #54 | Catch-up/prefetch burst under MUTEX_MIDIOUT — **FIXED**: prefetched
+  (not-yet-due) ticks capped at 8/service (`SEQ_CORE_PREFETCH_TICKS_PER_SERVICE`), remainder carried
+  in `bpm_tick_prefetch_carry` (separate from `prefetch_req` so a spread batch can't refuse a new
+  forward-delay; carry holds the PRE-offset-pad goal so the pad can't creep the target). Due ticks
+  never capped. First rung of the jitter ladder.
+- **2026-07-11** | #55 | CAPTURE tape note-off 768-entry ring back-walk — **FIXED**: O(1) per-note
+  open-index (`seq_core_cap_tape_open_idx[128]`, index+1 sentinel, re-validated against ring wrap;
+  +256 B). Accepted edge: same-note overlap keeps the OUTER note at default gate.
+- **2026-07-11** | #2 | Fwd/Rew `bpm_tick` RMW race — **FIXED**, but not by the suggested IRQ-wrap
+  (that would mask IRQs across `PlayOffEvents`/`FetchPos` — the #17 anti-pattern): the actual
+  lost-update was the redundant trailing `SEQ_BPM_TickSet` re-pin after `SEQ_CORE_Reset` had already
+  landed the jump atomically (TickSet is IRQ-guarded since #1's fix); dropped it in both verbs.
 
 - **2026-07-11** | F1 | Arp tenant never neutralized on bounce/capture — **FIXED, HIL 250/250**:
   `arp_mode`/`arp_bus` zeroed in `SEQ_CC_ResetGenerativeForBounce` + `SEQ_CORE_ProcessorBounce`; sibling

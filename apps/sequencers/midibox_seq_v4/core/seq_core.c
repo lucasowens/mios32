@@ -283,6 +283,14 @@ static seq_core_cap_tape_evt_t seq_core_cap_tape[SEQ_CORE_CAP_TAPE_EVENTS]; // m
 static u16 seq_core_cap_tape_head;    // ring write cursor (next slot)
 static u16 seq_core_cap_tape_count;   // retained events (saturates at EVENTS once wrapped)
 static u32 seq_core_cap_tape_bar_start[SEQ_CORE_CAP_RING_BARS]; // downbeat abs tick per bar slot
+// Per-note fast path for the note-off gate back-fill (#55): index+1 into seq_core_cap_tape
+// of the most recent still-open note-on of that note, 0 = none. The off used to LIFO-walk
+// the whole ring (up to 768 iterations per off, inside the MIDI drain under MUTEX_MIDIOUT);
+// this makes the match O(1). A slot can be overwritten after the ring wraps, so the reader
+// must re-validate (note match + gate still 0) before filling. Accepted edge vs the old
+// walk: a re-trigger of a note that is still open steals the slot, so the OUTER note of a
+// same-note overlap keeps gate 0 (-> default gate on grab).
+static u16 seq_core_cap_tape_open_idx[128];
 
 
 // Convert a measured gate length (bpm-ticks) into a stored length-layer par value.
@@ -386,6 +394,7 @@ static void SEQ_CORE_CaptureTapeReset(void)
 {
   seq_core_cap_tape_head = 0;
   seq_core_cap_tape_count = 0;
+  memset(seq_core_cap_tape_open_idx, 0, sizeof(seq_core_cap_tape_open_idx));
   // Clear the bar markers too: a grab only reads bar_start[(ctr-k)%BARS] for k < filled,
   // and filled counts only this-run boundaries, so stale ticks can't be reached today —
   // but zeroing here removes the latent coupling (defense-in-depth, 68 B).
@@ -430,21 +439,19 @@ static s32 SEQ_CORE_CaptureTapeTap(mios32_midi_port_t port, mios32_midi_package_
   if( p.velocity == 0 ) {
     // Note-off (running-status: every engine note-off is the same package with vel 0,
     // seq_midi_out.c:672 / seq_core.c:2699). Back-fill the gate of the most recent still-
-    // open note-on of the same number (LIFO match — correct for re-triggers). The off's
-    // scheduled tick is on_tick+gatelength, so gate = timestamp - on.tick. A note whose off
-    // never arrives (held past grab / scrolled out of the ring) keeps gate 0 -> default.
-    u16 n = seq_core_cap_tape_count;
-    u16 idx = seq_core_cap_tape_head;                       // one past the newest; walk back
-    u16 j;
-    for(j=0; j<n; ++j) {
-      idx = (u16)((idx + SEQ_CORE_CAP_TAPE_EVENTS - 1) % SEQ_CORE_CAP_TAPE_EVENTS);
-      seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[idx];
-      if( e->note == p.evnt1 && e->gate == 0 ) {
+    // open note-on of the same number via the per-note open-index (#55: O(1), was an
+    // up-to-768-entry ring walk on the drain path). The off's scheduled tick is
+    // on_tick+gatelength, so gate = timestamp - on.tick. A note whose off never arrives
+    // (held past grab / slot overwritten after ring wrap) keeps gate 0 -> default.
+    u16 slot = seq_core_cap_tape_open_idx[p.evnt1 & 0x7f];
+    if( slot ) {
+      seq_core_cap_tape_evt_t *e = &seq_core_cap_tape[slot-1];
+      if( e->note == p.evnt1 && e->gate == 0 ) {            // re-validate: ring may have wrapped
         s32 g = (s32)(timestamp - e->tick);
         if( g < 1 ) g = 1;                                  // guard same-tick / reorder
         e->gate = (g > 0xffff) ? 0xffff : (u16)g;
-        break;
       }
+      seq_core_cap_tape_open_idx[p.evnt1 & 0x7f] = 0;
     }
     return 0;
   }
@@ -455,6 +462,7 @@ static s32 SEQ_CORE_CaptureTapeTap(mios32_midi_port_t port, mios32_midi_package_
   e->gate = 0;
   e->note = p.evnt1;
   e->vel  = p.evnt2;
+  seq_core_cap_tape_open_idx[p.evnt1 & 0x7f] = (u16)(seq_core_cap_tape_head + 1);
   seq_core_cap_tape_head = (u16)((seq_core_cap_tape_head + 1) % SEQ_CORE_CAP_TAPE_EVENTS);
   if( seq_core_cap_tape_count < SEQ_CORE_CAP_TAPE_EVENTS )
     ++seq_core_cap_tape_count;
@@ -700,6 +708,17 @@ u8 SEQ_CORE_CaptureMaxK(u8 src)
 
 static u32 bpm_tick_prefetch_req;
 static u32 bpm_tick_prefetched;
+
+// #54: cap on PREFETCHED (not-yet-due) ticks processed per SEQ_CORE_Handler service.
+// The switch forward-delay batches a margin's worth of ticks (100-220 at 384ppqn); running
+// them all in one 1 ms service under MUTEX_MIDIOUT starves the MIDI drain + UI exactly at
+// the switch. Prefetched ticks are early by construction, so a capped batch just completes
+// over batch/CAP services — the runway to the boundary is batch ticks of real time, so any
+// cap >= 2 finishes in time; 8 keeps the worst-case per-service burst ~an order of magnitude
+// smaller while adding <= 7 services (~7 ms) of spread. DUE ticks are never capped.
+#define SEQ_CORE_PREFETCH_TICKS_PER_SERVICE 8
+static u32 bpm_tick_prefetch_carry; // unmet target of a capped batch (0 = none); merged
+                                    // (max) with any new prefetch_req at the next service
 
 // --- emission-task service-gap instrumentation (capture/SD-write freeze probe) ---
 // SEQ_CORE_Handler runs once per TASK_MIDI (+4) service (~every 1ms while the engine
@@ -2446,6 +2465,7 @@ typedef struct {
   u32              bpm_tick;
   u32              prefetched;               // bpm_tick_prefetched (the drive advances it)
   u32              prefetch_req;             // bpm_tick_prefetch_req
+  u32              prefetch_carry;           // bpm_tick_prefetch_carry (#54 capped-batch remainder)
   u32              rng[SEQ_RANDOM_STATE_WORDS]; // global jsw MT + cache
   u8               pattern_dirty;
   u8               last_seen[SEQ_CORE_NUM_TRACKS]; // generator wrap detector
@@ -2584,6 +2604,7 @@ static void SEQ_CORE_CaptureSpanSnapshot(u8 src)
   seq_core_cap_snap.bpm_tick = SEQ_BPM_TickGet();
   seq_core_cap_snap.prefetched = bpm_tick_prefetched;
   seq_core_cap_snap.prefetch_req = bpm_tick_prefetch_req;
+  seq_core_cap_snap.prefetch_carry = bpm_tick_prefetch_carry;
   SEQ_RANDOM_StateGet(seq_core_cap_snap.rng);
   seq_core_cap_snap.pattern_dirty = seq_pattern_dirty;
   u8 t;
@@ -2601,6 +2622,7 @@ static void SEQ_CORE_CaptureSpanRestore(u8 src)
   SEQ_BPM_TickSet(seq_core_cap_snap.bpm_tick);
   bpm_tick_prefetched = seq_core_cap_snap.prefetched;
   bpm_tick_prefetch_req = seq_core_cap_snap.prefetch_req;
+  bpm_tick_prefetch_carry = seq_core_cap_snap.prefetch_carry;
   SEQ_RANDOM_StateSet(seq_core_cap_snap.rng);
   seq_pattern_dirty = seq_core_cap_snap.pattern_dirty; // clear src's spurious wander-dirty
   u8 t;
@@ -4633,6 +4655,9 @@ s32 SEQ_CORE_Handler(void)
 
   u8 num_loops = 0;
   u8 again = 0;
+  // #54: per-SERVICE budget for prefetched (not-yet-due) ticks — shared across the
+  // request-loop iterations below so a re-check can't re-open a fresh burst window
+  u8 prefetch_budget = SEQ_CORE_PREFETCH_TICKS_PER_SERVICE;
   do {
     ++num_loops;
 
@@ -4729,17 +4754,27 @@ s32 SEQ_CORE_Handler(void)
       // in this case bpm_tick_prefetch_req is > bpm_tick
       // in all other cases, we only generate a single tick (realtime play)
       u32 add_bpm_ticks = 0;
-      if( bpm_tick_prefetch_req > bpm_tick ) {
-	add_bpm_ticks = bpm_tick_prefetch_req - bpm_tick;
+      // #54: a capped batch from a previous service resumes here; merge by max so a NEW
+      // forward-delay raised meanwhile isn't clobbered. prefetch_goal stays PRE-offset-pad:
+      // the pad below is relative to real time and re-derived every service — carrying a
+      // padded target would creep it by `offset` per service (runaway if offset >= budget).
+      u32 prefetch_goal = bpm_tick_prefetch_req;
+      if( bpm_tick_prefetch_carry > prefetch_goal )
+	prefetch_goal = bpm_tick_prefetch_carry;
+      if( prefetch_goal > bpm_tick ) {
+	add_bpm_ticks = prefetch_goal - bpm_tick;
       }
+      bpm_tick_prefetch_carry = 0;
       // invalidate request before a new one will be generated (e.g. via SEQ_SONG_NextPos())
       bpm_tick_prefetch_req = 0;
 
       // consider negative delay offsets: preload the appr. number of ticks
-      s8 max_negative_offset = SEQ_MIDI_PORT_TickDelayMaxNegativeOffset();	
+      s8 max_negative_offset = SEQ_MIDI_PORT_TickDelayMaxNegativeOffset();
+      u32 bpm_tick_must = bpm_tick; // ticks <= this are DUE (realtime + offset preload) — never capped
       if( max_negative_offset < 0 ) {
 	s32 offset = -max_negative_offset + 3; // +3 margin
 	add_bpm_ticks += offset;
+	bpm_tick_must += offset;
       }
 
       // remove ticks which have already been processed before
@@ -4748,8 +4783,16 @@ s32 SEQ_CORE_Handler(void)
 	bpm_tick = bpm_tick_prefetched + 1;
       }
 
-      // processing remaining ticks
+      // processing remaining ticks (#54: prefetched ticks capped per service, see the
+      // prefetch_budget declaration at the top of the handler)
       for(; bpm_tick<=bpm_tick_target; ++bpm_tick) {
+	if( bpm_tick > bpm_tick_must ) {
+	  if( !prefetch_budget ) {
+	    bpm_tick_prefetch_carry = prefetch_goal; // carry the PRE-pad goal to the next service
+	    break;
+	  }
+	  --prefetch_budget;
+	}
 	bpm_tick_prefetched = bpm_tick;
 
 #if LED_PERFORMANCE_MEASURING == 1
@@ -4924,6 +4967,7 @@ s32 SEQ_CORE_Reset(u32 bpm_start)
 
   // cancel prefetch requests/counter
   bpm_tick_prefetch_req = 0;
+  bpm_tick_prefetch_carry = 0;
   bpm_tick_prefetched = bpm_start;
   seq_core_recall_rephase_req = 0; // drop a pending grid re-phase on transport reset
 

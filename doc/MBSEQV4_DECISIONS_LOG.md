@@ -1891,3 +1891,51 @@ HIL 250/250 — 244 baseline + 6 new pins, green on first run after flash)**
   re-use it, not find it silently erased. Also documented: LfoWaveName's static buf
   (one call per printf) and the accepted 1-step-track auto-mutate hole in
   `SEQ_GENERATOR_Tick` (degenerate musically; not worth a per-track advance counter).
+
+
+**2026-07-11 (cont.) — RT-timing tail closed: #54 prefetch cap, #55 O(1) tape off-match,
+#2 Fwd/Rew lost-update (the adversarial review's last software-only items)**
+- **#54 (P2 rt-timing): the switch forward-delay prefetch is now capped per service.**
+  The margin-sized batch (100–220 ticks at 384ppqn) used to run to completion inside ONE
+  1 ms `SEQ_CORE_Handler` service under MUTEX_MIDIOUT — a multi-ms drain/UI starvation
+  right at the switch instant. Now prefetched (not-yet-due) ticks are budgeted at
+  **8/service** (`SEQ_CORE_PREFETCH_TICKS_PER_SERVICE`); the unmet target is carried in a
+  new `bpm_tick_prefetch_carry` and merged (max) with any new `prefetch_req` next service.
+  Design points that mattered:
+  - **Carry ≠ req.** `SEQ_CORE_AddForwardDelay` refuses while `prefetch_req` is nonzero;
+    carrying in the same variable would refuse fresh forward-delays for the whole spread
+    window. Separate variable + max-merge keeps both.
+  - **Carry the PRE-offset-pad goal.** The negative-port-delay preload (`+offset`) is
+    re-derived from real time every service; carrying the padded target would creep it by
+    `offset` per service — a runaway prefetch whenever `offset >= budget` (caught in
+    self-review before flash).
+  - **Due ticks are never capped** (`bpm_tick_must` = real tick + offset pad): realtime
+    catch-up after a starved service behaves exactly as before.
+  - Completion headroom is structural: the runway to the boundary is `batch` ticks of real
+    time, a capped batch completes in `batch/8` services — ~9× margin at any tempo. The
+    budget is shared across the handler's do-while re-checks (no fresh burst window), and
+    the carry joins `prefetch_req` in `SEQ_CORE_Reset`'s cancel + the capture-span snapshot.
+- **#55 (P2 rt-timing): the CAPTURE tape note-off gate back-fill is O(1).** Every drained
+  note-off of the recording track used to LIFO-walk the tape ring (up to 768 iterations,
+  modulo each) inside the MIDI drain under MUTEX_MIDIOUT — a chord release multiplied it.
+  Replaced with `seq_core_cap_tape_open_idx[128]` (index+1 of the most recent still-open
+  note-on per note; 256 B main SRAM), re-validated against ring wrap (note match + gate
+  still 0) before filling. Chosen over the review's "cap the scan depth" because a depth
+  cap breaks exactly the note that matters most — a long-held drone under dense playing
+  loses its measured gate. Accepted edge (documented at the decl): a same-note re-trigger
+  while the note is still open steals the slot, so the OUTER note of a same-note overlap
+  falls back to the default gate.
+- **#2 (P3 concurrency): Fwd/Rew tick-jump lost-update — fixed by DELETING code, not by
+  the suggested IRQ-wrap.** The review proposed wrapping the read-modify-write in
+  IRQ-disable, but the RMW window spans `SEQ_CORE_Reset` (PlayOffEvents) + `NextPos`
+  (pattern fetch) — masking IRQs across that is the #17 anti-pattern. Re-derivation
+  against current source: `SEQ_BPM_TickSet` is already IRQ-atomic (finding #1's fix), and
+  `SEQ_CORE_Reset` already lands the jump atomically; the only REAL lost-update was the
+  mainline-inherited trailing `SEQ_BPM_TickSet(next_bpm_tick)` re-pin, which discarded any
+  master-ISR ticks elapsed during `NextPos`/`PrevPos`. Dropped it in both verbs
+  (`SEQ_SONG_Fwd`/`SEQ_SONG_Rew`); `FetchPos` verified to never move the tick itself.
+- **No new HIL pins**: #2 and #54 are timing/race shapes the USB harness can't observe
+  directly; the 250-suite pins behavior (capture articulation covers #55's gate fidelity,
+  switch/recall tests cover #54's prefetch path). Validation = full suite on hardware +
+  the by-ear switch feel; the freeze-net probes (`diag_switch.py`/`diag_freeze.py`,
+  CMD_SWITCH_PERF 0x44) remain available if a number is ever wanted.
