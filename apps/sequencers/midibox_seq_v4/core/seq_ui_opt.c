@@ -78,8 +78,9 @@
 #define ITEM_RECALL_MODE                  34
 #define ITEM_INSSEL_DRUM_TRIGGER          35
 #define ITEM_INSSEL_KBD_LAYOUT            36
+#define ITEM_INSSEL_KBD_FOLD              37
 
-#define NUM_OF_ITEMS                      37
+#define NUM_OF_ITEMS                      38
 
 
 static const char *item_text[NUM_OF_ITEMS][2] = {
@@ -268,6 +269,11 @@ static const char *item_text[NUM_OF_ITEMS][2] = {
     "Melodic keyboard layout:",
     NULL, // Scale degrees / Chromatic (isomorphic)
   },
+
+  {//<-------------------------------------->
+    "Melodic keyboard collapse to scale:",
+    NULL, // enabled/disabled (folds chromatic keys in-key)
+  },
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -389,6 +395,14 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       ui_store_file_required = 1;
       return 1;
     } break;
+
+    case ITEM_INSSEL_KBD_FOLD:
+      if( incrementer )
+	seq_ui_options.INSSEL_KBD_FOLD = (incrementer > 0) ? 1 : 0;
+      else
+	seq_ui_options.INSSEL_KBD_FOLD ^= 1;
+      ui_store_file_required = 1;
+      return 1;
 
     case ITEM_PATTERN_RESEND_PC:
       if( incrementer )
@@ -1042,6 +1056,15 @@ static s32 LCD_Handler(u8 high_prio)
     } else {
       SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_KBD_CHORD ? "Diatonic chords (in key)" :
 				(seq_ui_options.INSSEL_KBD_SCALE_DEGREE ? "Scale degrees (in key)" : "Chromatic (isomorphic)"), 40);
+    }
+  } break;
+
+  ///////////////////////////////////////////////////////////////////////////
+  case ITEM_INSSEL_KBD_FOLD: {
+    if( ui_cursor_flash ) {
+      SEQ_LCD_PrintSpaces(40);
+    } else {
+      SEQ_LCD_PrintStringPadded(seq_ui_options.INSSEL_KBD_FOLD ? "on (Jump strides scale degrees)" : "off", 40);
     }
   } break;
 

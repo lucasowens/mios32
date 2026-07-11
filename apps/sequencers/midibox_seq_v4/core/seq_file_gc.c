@@ -447,6 +447,10 @@ s32 SEQ_FILE_GC_Read(void)
 #ifndef MBSEQV4L
             seq_ui_options.INSSEL_KBD_CHORD = value;
 #endif
+          } else if( strcmp(parameter, "UiInsselKbdFold") == 0 ) {
+#ifndef MBSEQV4L
+            seq_ui_options.INSSEL_KBD_FOLD = value;
+#endif
 	  } else if( strcmp(parameter, "RemoteMode") == 0 ) {
 	    seq_midi_sysex_remote_mode = (value > 2) ? 0 : value;
 	  } else if( strcmp(parameter, "RemotePort") == 0 ) {
@@ -821,6 +825,11 @@ static s32 SEQ_FILE_GC_Write_Hlp(u8 write_to_file)
 
 #ifndef MBSEQV4L
   sprintf(line_buffer, "UiInsselKbdChord %d\n", seq_ui_options.INSSEL_KBD_CHORD);
+  FLUSH_BUFFER;
+#endif
+
+#ifndef MBSEQV4L
+  sprintf(line_buffer, "UiInsselKbdFold %d\n", seq_ui_options.INSSEL_KBD_FOLD);
   FLUSH_BUFFER;
 #endif
 

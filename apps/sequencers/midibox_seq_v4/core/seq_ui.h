@@ -211,6 +211,7 @@ typedef union {
     u16 INSSEL_DRUM_TRIGGER:1;
     u16 INSSEL_KBD_SCALE_DEGREE:1;
     u16 INSSEL_KBD_CHORD:1;
+    u16 INSSEL_KBD_FOLD:1;
   };
 } seq_ui_options_t;
 
@@ -421,6 +422,7 @@ extern u8  SEQ_UI_CAPTURE_DstTrackGet(void);     // for the select-row LED
 extern s32 SEQ_UI_EDIT_LED_Handler(u16 *gp_leds);
 extern s32 SEQ_UI_EDIT_Button_Handler(seq_ui_button_t button, s32 depressed);
 extern s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode);
+extern s32 SEQ_UI_EDIT_MidiLearnActive(void);
 
 extern s32 SEQ_UI_PATTERN_MultiCopy(u8 only_selected);
 extern s32 SEQ_UI_PATTERN_MultiPaste(u8 only_selected);
@@ -499,6 +501,9 @@ extern s32 SEQ_UI_INSSEL_KeyboardLeds(u16 *green, u16 *red);
 extern s32 SEQ_UI_INSSEL_KeyboardActive(void);
 extern s32 SEQ_UI_INSSEL_KeyboardScroll(s32 delta);
 extern s32 SEQ_UI_INSSEL_KeyboardJump(s32 incrementer);
+extern s32 SEQ_UI_INSSEL_KeyboardVelocity(s32 incrementer);
+extern s32 SEQ_UI_INSSEL_KeyboardLayoutCycle(void);
+extern s32 SEQ_UI_INSSEL_KeyboardFoldToggle(void);
 extern s32 SEQ_UI_SONG_Button_Handler(seq_ui_button_t button, s32 depressed);
 
 

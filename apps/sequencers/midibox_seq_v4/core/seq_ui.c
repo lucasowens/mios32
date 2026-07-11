@@ -1312,7 +1312,7 @@ s32 SEQ_UI_Button_Record(s32 depressed)
 
   SEQ_UI_Msg(SEQ_UI_MSG_USER_R,
 	     1000,
-	     seq_record_options.STEP_RECORD ? "Step Recording" : "Live Recording", 
+	     seq_record_options.STEP_RECORD ? "Step Recording" : "Live Recording",
 	     seq_record_state.ENABLED ? "      on" : "     off");
 
   return 0; // no error
@@ -5297,11 +5297,13 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
   } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_INS && SEQ_UI_INSSEL_KeyboardActive() &&
 	     (encoder == 0 || encoder == 1) ) {
     // INS view, melodic keyboard on the B-row: the datawheel scrolls the row ±1
-    // semitone and the GP1 encoder sets the isomorphic Jump. Handled here (not in
-    // the INSSEL page's encoder callback) so they work from ANY page while the
-    // keyboard is played on the latched INS sel-view. encoder 0 = datawheel, 1 = GP1.
+    // semitone and the GP1 encoder sets the isomorphic Jump (SELECT held: the
+    // play/record velocity). Handled here (not in the INSSEL page's encoder
+    // callback) so they work from ANY page while the keyboard is played on the
+    // latched INS sel-view. encoder 0 = datawheel, 1 = GP1.
     if( (encoder == 0) ? SEQ_UI_INSSEL_KeyboardScroll(incrementer)
-		       : SEQ_UI_INSSEL_KeyboardJump(incrementer) )
+		       : (seq_ui_button_state.SELECT_PRESSED ? SEQ_UI_INSSEL_KeyboardVelocity(incrementer)
+							     : SEQ_UI_INSSEL_KeyboardJump(incrementer)) )
       seq_ui_display_update_req = 1;
   } else if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC ) {
     // PROC view: the GP encoders operate the focused processor (invariant 3),

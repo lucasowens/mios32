@@ -224,23 +224,42 @@ the mode: flash = play-surface hot, steady = instrument-select.
 | Track type | B-row plays | held-modifier + key |
 |---|---|---|
 | **Drum** | TR-909-style pads (one drum per key), vel 100 on press | **INSTR-held + tap = silent retarget** of the selected instrument (`INS_SEL`; bare tap plays). Frees SELECT. |
-| **Melodic** | a one-row keyboard; layout set by **OPT → "Melodic keyboard layout"** | **SELECT + key1 / key16 = octave down / up** (coarse scroll ±12) |
+| **Melodic** | a one-row keyboard; layout set by **OPT → "Melodic keyboard layout"** or **SELECT + key2** | **SELECT + key1 / key16 = octave down / up** (coarse scroll ±12) · **SELECT + key2 = cycle layout** · **SELECT + key15 = collapse-to-scale toggle** |
 
 Melodic layouts (`INSSEL_KBD_LAYOUT`, base = middle C `0x3c`):
 **Chromatic (isomorphic)** key k = base + k·**Jump** · **Scale degrees (in key)** ·
 **Diatonic chords (in key)** in-key triads. Scale & root read live.
+**Collapse to scale** (`INSSEL_KBD_FOLD`, OPT item or SELECT+key15): **Jump strides
+scale degrees** from the tonic instead of semitones — compact, every key a distinct
+scale note: Jump 1 = scale steps, 2 = diatonic thirds, 3 = diatonic fourths, …
 
 **Isomorphic keyboard controls** (melodic play-surface) — all live in INS sel-view from any page:
 - **GP1 encoder** = **Jump** — semitones between adjacent keys, 1..12 (1=chromatic,
   2=whole-tone, 5=fourths, 7=fifths, 12=octaves). Chromatic layout only.
+  **SELECT + GP1 encoder** = **velocity** (1..127, plays *and* records; default 100).
 - **‹ / ›** and **datawheel** = **scroll** the whole row ±1 semitone (fine); **SELECT +
   key1/key16** = ±1 octave (coarse). One row reaches the full range by scrolling.
   (Jump/scroll are intercepted globally in `SEQ_UI_Encoder_Handler` / `SEQ_UI_Button_Up/Down`
-  so they work off the INSSEL page; a transient LCD readout confirms base note / Jump.)
+  so they work off the INSSEL page; a transient LCD readout confirms base note / Jump /
+  velocity / layout / fold.)
 - **B-row LEDs** (native 2-colour `select_leds`): **green** = in-scale key, **amber** =
-  root/tonic, **dark** = out-of-scale (`SEQ_UI_INSSEL_KeyboardLeds`). The GP row keeps its
-  page function. The INSSEL page's LCD shows layout / Jump / base note / scale on line 0 and
+  root/tonic, **dark** = out-of-scale, **red** = key under a finger
+  (`SEQ_UI_INSSEL_KeyboardLeds`). The GP row keeps its page function. The INSSEL page's
+  LCD shows layout(+fold) / Jump / base note / transpose / velocity / scale on line 0 and
   the 16 keys' note names on line 1.
+
+**EDIT RECORDING punch-in (hold-step + key) [fork].** On the EDIT page, holding a GP step
+button arms the stock MIDI-learn; while it's held, a B-row **keyboard key or drum pad
+punches its note into the held step** — same path an external MIDI keyboard takes
+(`SEQ_UI_NotifyMIDIINCallback` is offered the event before the play/record branch,
+`seq_ui_inssel.c`). Chord-layout presses land **atomically** on the held step (all three
+notes; the stock per-note learn is last-note-wins). Works with **ALL held** too: the learn
+handler copies the punched note across all selected steps. Monitoring follows the stock
+learn behavior (the step is replayed as it now sounds).
+
+*The stock SELECT-tap learn latch on the EDIT page is REMOVED* **[fork]** — SELECT is
+the play surface's modifier (octave/layout/fold/velocity), and every tap was arming a
+latch that then swallowed the keys. **Hold-a-step is the only learn gesture.**
 
 ---
 

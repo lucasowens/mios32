@@ -743,6 +743,60 @@ the path, in step order — handy for a quick try.)*
 
 ---
 
+## The Play Surface (drum pads · isomorphic keyboard)
+
+With **OPT → "Instrument-Sel buttons PLAY the track"** enabled (or a clean **re-tap of
+INSTR** while the INS select-view is up), the B-row becomes a live play surface for the
+selected track, from **any page**: a **Drum** track gets one pad per drum (TR-909 style),
+a **melodic** track gets a **one-row keyboard**. The INSTR LED flashes while the play
+surface is hot. Preview is always heard through the track's own port/channel — the
+track's transpose, force-to-scale and FX apply — and with **REC armed** what you play is
+recorded.
+
+### Keyboard layouts
+
+**OPT → "Melodic keyboard layout"**, or **SELECT + key2** to cycle live:
+
+| Layout | Key *k* plays |
+|---|---|
+| **Chromatic (isomorphic)** | base + *k*·**Jump** semitones — Jump (GP1 encoder, 1..12) is the interval between adjacent keys: 1 = chromatic, 2 = whole-tone, 5 = fourths, 7 = fifths, 12 = octaves |
+| **Scale degrees** | the *k*-th note of the track's scale above the tonic |
+| **Diatonic chords** | the in-key triad on degree *k* |
+
+**Collapse to scale** (**SELECT + key15**, or OPT → "Melodic keyboard collapse to
+scale"): **Jump now strides *scale degrees* from the tonic** instead of semitones —
+compact, every key a distinct scale note, so the row reaches much further in-key.
+**Jump 1** = scale steps (like the Degrees layout), **Jump 2** = diatonic thirds (instant
+arpeggios), **Jump 3** = diatonic fourths (quartal shapes), and so on. The scale-walking
+layouts are in-key by construction and ignore it.
+
+### Controls (from any page, INS view latched)
+
+- **Datawheel / ‹ ›** — scroll the whole row ±1 semitone; **SELECT + key1 / key16** —
+  octave down / up.
+- **GP1 encoder** — Jump (chromatic layout); **SELECT + GP1 encoder** — **velocity**
+  (1..127), used for both preview and recording.
+- **LEDs**: green = in-scale, amber = root, dark = out-of-scale, **red = held key**.
+- The **INSSEL page** shows the full readout: layout(+fold), Jump, base note, transpose,
+  velocity, live scale, and all 16 key names. Everywhere else, transient messages confirm
+  each control change.
+
+### Recording with the keyboard
+
+- **REC armed, playing**: notes land on the running step (record-quantized), chords land
+  **atomically** on one step — a triad never scatters across steps.
+- **REC armed, step record**: the stock step-record flow, from the panel.
+- **EDIT RECORDING (punch-in)**: on the **EDIT page, hold a step button and tap a key**
+  — the note is punched into **that held step**, exactly like playing an external MIDI
+  keyboard into the stock MIDI-learn. Chord-layout presses punch the whole triad onto the
+  held step. Hold **ALL** too and the punched note is copied across all selected steps.
+  You hear the step replayed as it now sounds.
+  *Note: the stock "tap SELECT to toggle MIDI-learn" on the EDIT page is gone — SELECT
+  belongs to the keyboard's octave/layout/fold/velocity gestures now; holding a step is
+  the only punch-in gesture.*
+
+---
+
 ## Cross-Cutting Notes
 
 ### Where files live
@@ -751,7 +805,7 @@ the path, in step order — handy for a quick try.)*
 | --- | --- |
 | `MBSEQ_B1..B4.V4` | Pattern banks. The fork stores its v2 per-track extension block (robotize CCs + bar anchors) appended inside each track slot. |
 | `MBSEQ_C.V4` | Session config. Generator state (per-layer type, parameters, PG selection) lives here. |
-| `MBSEQ_GC.V4` | Global config. Unmodified by the fork. |
+| `MBSEQ_GC.V4` | Global config. The fork adds the play-surface options (`UiInsselDrumTrigger`, `UiInsselKbdScaleDegree`, `UiInsselKbdChord`, `UiInsselKbdFold`). |
 | `MBSEQ_BM.V4` | Bookmarks. ROBOLOOP and GENERATE are bookmarkable; existing bookmarks survive the GENERATE page rename. |
 
 ### Page IDs and bookmarks

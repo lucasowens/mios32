@@ -39,25 +39,34 @@
 // layout"):
 //   - Chromatic (isomorphic): key k = base + k*JUMP semitones. JUMP is the
 //     interval between adjacent keys (GP1 encoder, 1..12): 1=chromatic, 2=whole
-//     tone, 5=fourths, 7=fifths, 12=octaves. Like a Hapax pad layout.
+//     tone, 5=fourths, 7=fifths, 12=octaves. Like a Hapax pad layout. With the
+//     FOLD option ("collapse to scale", SELECT+key15) Jump strides SCALE
+//     DEGREES from the tonic instead of semitones — compact, no duplicate
+//     keys: Jump 1 = scale steps, 2 = diatonic thirds, 3 = diatonic fourths.
 //   - Scale degrees: key k = the k-th note of the track's scale above the tonic.
 //   - Diatonic chords: key k = the in-key triad on degree k (k, k+2, k+4).
+// SELECT+key2 cycles the layout live (same state as OPT "Melodic keyboard layout").
 // The whole row transposes on a shared BASE offset (TRANSPOSE), so one row can
 // reach the full range: < / > and the datawheel scroll by 1 semitone, SELECT +
 // GP1/GP16 by an octave. Scale/root are read live via SEQ_CORE_FTS_GetScaleAndRoot.
 // Plays like a pad (preview always; records when REC is armed) so the track's
 // transpose / force-to-scale / FX apply to preview and playback alike.
+// EDIT RECORDING: while a GP step button is held on the EDIT page (the stock
+// MIDI-learn punch-in), a key press is offered to the page's MIDI-IN callback
+// first — it lands on the held step exactly like an external MIDI keyboard
+// (chords land atomically via the chord recorder, see KbdNote).
 /////////////////////////////////////////////////////////////////////////////
 #define INSSEL_KBD_BASE_NOTE 0x3c            // key 0 at transpose 0 (middle C); multiple of 12
-#define INSSEL_KBD_TRIGGER_VELOCITY 100
 #define INSSEL_KBD_MAX_NOTES 3               // up to a triad per key
 #define INSSEL_KBD_TRANSPOSE_MIN -60         // ±5 octaves of base travel
 #define INSSEL_KBD_TRANSPOSE_MAX  60
 
 static u8  inssel_kbd_jump = 1;              // isomorphic interval 1..12 semitones (GP1 encoder)
+static u8  inssel_kbd_velocity = 100;        // play/record velocity (SELECT + GP1 encoder)
 static s16 inssel_kbd_transpose = 0;         // base offset in semitones (scroll: </> + datawheel = ±1, SELECT+GP1/16 = ±12)
 static u8  inssel_kbd_held[16][INSSEL_KBD_MAX_NOTES]; // notes held per key (0xff = empty), for note-off
-static u8  inssel_kbd_recorded_chord[16];    // 1 = this key's press used the atomic chord recorder
+static u8  inssel_kbd_recorded_chord[16];    // 1 = this key's press used the atomic chord recorder (release = live note-offs only)
+static u8  inssel_kbd_learned[16];           // 1 = this key's press was consumed by the EDIT page's MIDI-learn (release goes there too)
 
 // Build the note list a key would play, given the current layout + transpose +
 // jump. Returns the number of notes (1, or up to 3 for chords). Single source of
@@ -67,9 +76,10 @@ static u8 inssel_kbd_build_notes(u8 track, u8 key, u8 *notes)
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
   u8 num = 0;
 
-  if( seq_ui_options.INSSEL_KBD_SCALE_DEGREE || seq_ui_options.INSSEL_KBD_CHORD ) {
-    u8 scale, root_selection, root;
-    SEQ_CORE_FTS_GetScaleAndRoot(track, seq_core_trk[track].step, 0, tcc, &scale, &root_selection, &root);
+  u8 scale, root_selection, root;
+  SEQ_CORE_FTS_GetScaleAndRoot(track, seq_core_trk[track].step, 0, tcc, &scale, &root_selection, &root);
+
+  if( seq_ui_options.INSSEL_KBD_SCALE_DEGREE || seq_ui_options.INSSEL_KBD_CHORD || seq_ui_options.INSSEL_KBD_FOLD ) {
     int base = (int)INSSEL_KBD_BASE_NOTE + (int)inssel_kbd_transpose + (int)root; // tonic in anchor octave
     if( base < 0 )   base = 0;
     if( base > 127 ) base = 127;
@@ -78,8 +88,16 @@ static u8 inssel_kbd_build_notes(u8 track, u8 key, u8 *notes)
       notes[num++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)key);
       notes[num++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)(key + 2));
       notes[num++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)(key + 4));
-    } else {
+    } else if( seq_ui_options.INSSEL_KBD_SCALE_DEGREE ) {
       notes[num++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)key);
+    } else {
+      // FOLD ("collapse to scale") on the chromatic layout: Jump becomes a
+      // stride in SCALE DEGREES — key k = the (k*Jump)-th scale note above the
+      // tonic. Compact (no duplicate keys, unlike snapping each key in place):
+      // Jump 1 = scale steps, 2 = diatonic thirds, 3 = diatonic fourths, ...
+      int dd = (int)key * (int)inssel_kbd_jump;
+      if( dd > 127 ) dd = 127; // WalkScale takes s8; 127 degrees is past MIDI range anyway
+      notes[num++] = (u8)SEQ_SCALE_WalkScale((u8)base, scale, root, (s8)dd);
     }
   } else {
     // chromatic isomorphic row: key k = base + k*jump semitones
@@ -145,9 +163,50 @@ s32 SEQ_UI_INSSEL_KeyboardJump(s32 incrementer)
     return 0;
   {
     char buf[24];
-    sprintf(buf, "Jump: +%d semitone%s", inssel_kbd_jump, (inssel_kbd_jump == 1) ? "" : "s");
+    sprintf(buf, seq_ui_options.INSSEL_KBD_FOLD ? "Jump: +%d degree%s" : "Jump: +%d semitone%s",
+	    inssel_kbd_jump, (inssel_kbd_jump == 1) ? "" : "s");
     SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Isomorphic keyboard", buf);
   }
+  return 1;
+}
+
+// set the play/record velocity (SELECT + GP1 encoder). Returns 1 if changed.
+s32 SEQ_UI_INSSEL_KeyboardVelocity(s32 incrementer)
+{
+  u8 old = inssel_kbd_velocity;
+  SEQ_UI_Var8_Inc(&inssel_kbd_velocity, 1, 127, incrementer);
+  if( inssel_kbd_velocity == old )
+    return 0;
+  {
+    char buf[24];
+    sprintf(buf, "Velocity: %d", inssel_kbd_velocity);
+    SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Keyboard", buf);
+  }
+  return 1;
+}
+
+// cycle the melodic layout live: Chromatic -> Scale degrees -> Diatonic chords
+// (SELECT + key2). Same state as OPT "Melodic keyboard layout".
+s32 SEQ_UI_INSSEL_KeyboardLayoutCycle(void)
+{
+  u8 layout = seq_ui_options.INSSEL_KBD_CHORD ? 2 : (seq_ui_options.INSSEL_KBD_SCALE_DEGREE ? 1 : 0);
+  layout = (layout + 1) % 3;
+  seq_ui_options.INSSEL_KBD_SCALE_DEGREE = (layout == 1) ? 1 : 0;
+  seq_ui_options.INSSEL_KBD_CHORD = (layout == 2) ? 1 : 0;
+  ui_store_file_required = 1;
+  SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Keyboard layout",
+	     (layout == 2) ? "Diatonic chords" : ((layout == 1) ? "Scale degrees" : "Chromatic (iso)"));
+  return 1;
+}
+
+// toggle FOLD / "collapse to scale" (SELECT + key15). Chromatic layout only —
+// the scale-walking layouts are in-key by construction.
+s32 SEQ_UI_INSSEL_KeyboardFoldToggle(void)
+{
+  seq_ui_options.INSSEL_KBD_FOLD ^= 1;
+  ui_store_file_required = 1;
+  SEQ_UI_Msg(SEQ_UI_MSG_USER, 1000, "Collapse to scale",
+	     seq_ui_options.INSSEL_KBD_FOLD ? "on (Jump strides the scale)" : "off");
   return 1;
 }
 
@@ -198,6 +257,10 @@ s32 SEQ_UI_INSSEL_KeyboardLeds(u16 *green, u16 *red)
       g |= (1 << key);            // note is a member of the scale -> green
     if( (n % 12) == (root % 12) )
       r |= (1 << key);            // tonic pitch class -> amber (green+red)
+    if( inssel_kbd_held[key][0] != 0xff ) {
+      r |= (1 << key);            // key under a finger -> pure red (green off)
+      g &= ~(1 << key);
+    }
   }
 
   *green = g;
@@ -274,6 +337,13 @@ static s32 SEQ_UI_INSSEL_DrumTrigger(u8 track, u8 drum, s32 depressed)
   p.note = tcc->lay_const[0*16 + drum] & 0x7f; // drum instrument note (SEQ_CC_LAY_CONST_A1 + drum); masked — lay_const comes from SD and SEQ_LIVE_PlayEvent indexes 128-wide arrays by note (#21)
   p.velocity = depressed ? 0x00 : INSSEL_DRUM_TRIGGER_VELOCITY;
 
+  // EDIT RECORDING: while a GP step is held on the EDIT page, the pad punches
+  // its hit into the held step through the page's MIDI-learn — same path an
+  // external MIDI pad would take (seq_midi_in.c offers the package to the UI
+  // callback before the record path).
+  if( SEQ_UI_EDIT_MidiLearnActive() && SEQ_UI_NotifyMIDIINCallback(DEFAULT, p) > 0 )
+    return 0;
+
   if( seq_record_state.ENABLED )
     SEQ_RECORD_Receive(p, track);
   else
@@ -324,7 +394,9 @@ static void SEQ_UI_INSSEL_EmitNote(u8 track, u8 note, u8 velocity)
 // the target step once (matching how single notes land - the record-quantize
 // forward-snap while playing) and write all notes to that step's note layers under
 // the MIDI-out mutex, so the chord always lands together.
-static void SEQ_UI_INSSEL_RecordChord(u8 track, u8 *notes, u8 num_notes, u8 velocity)
+// force_step >= 0 pins the target step (EDIT-page punch-in onto a held step);
+// force_step < 0 picks it live as before.
+static void SEQ_UI_INSSEL_RecordChord(u8 track, u8 *notes, u8 num_notes, u8 velocity, s32 force_step)
 {
   seq_cc_trk_t *tcc = &seq_cc_trk[track];
   seq_core_trk_t *t = &seq_core_trk[track];
@@ -335,7 +407,9 @@ static void SEQ_UI_INSSEL_RecordChord(u8 track, u8 *notes, u8 num_notes, u8 velo
   MUTEX_MIDIOUT_TAKE;
 
   u16 step;
-  if( SEQ_BPM_IsRunning() && !seq_record_options.STEP_RECORD ) {
+  if( force_step >= 0 ) {
+    step = (u16)force_step;
+  } else if( SEQ_BPM_IsRunning() && !seq_record_options.STEP_RECORD ) {
     step = t->step;
     // snap forward to the next step if we're within the record-quantize window
     u32 now = SEQ_BPM_TickGet();
@@ -385,15 +459,20 @@ static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
   if( depressed ) {
     // release exactly the notes we started (octave/scale/layout may have moved meanwhile).
     // A chord that was recorded atomically was only monitored live -> just stop the live
-    // note; everything else goes back through the same path that started it.
+    // note; a press that went to the EDIT page's MIDI-learn sends its note-off there
+    // too (falling back to a live note-off if the step was released meanwhile — the
+    // learn exit already killed the forwarded notes, the extra off is harmless);
+    // everything else goes back through the same path that started it.
     // Drain the per-key state atomically first — the physical-button and
     // MIDI-remote paths run in different tasks and can interleave on the same
     // key (#22); the note-off sends then work from the local snapshot.
-    u8 as_chord;
+    u8 as_chord, as_learned;
     u8 held[INSSEL_KBD_MAX_NOTES];
     MIOS32_IRQ_Disable();
     as_chord = inssel_kbd_recorded_chord[key];
+    as_learned = inssel_kbd_learned[key];
     inssel_kbd_recorded_chord[key] = 0;
+    inssel_kbd_learned[key] = 0;
     for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i) {
       held[i] = inssel_kbd_held[key][i];
       inssel_kbd_held[key][i] = 0xff;
@@ -403,7 +482,17 @@ static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
       if( held[i] != 0xff ) {
 	if( as_chord )
 	  SEQ_UI_INSSEL_PlayLive(track, held[i], 0x00);
-	else
+	else if( as_learned ) {
+	  mios32_midi_package_t p;
+	  p.ALL = 0;
+	  p.type = NoteOn;
+	  p.event = NoteOn;
+	  p.chn = seq_cc_trk[track].midi_chn;
+	  p.note = held[i];
+	  p.velocity = 0x00;
+	  if( !(SEQ_UI_EDIT_MidiLearnActive() && SEQ_UI_NotifyMIDIINCallback(DEFAULT, p) > 0) )
+	    SEQ_UI_INSSEL_PlayLive(track, held[i], 0x00);
+	} else
 	  SEQ_UI_INSSEL_EmitNote(track, held[i], 0x00);
       }
     }
@@ -417,25 +506,56 @@ static s32 SEQ_UI_INSSEL_KbdNote(u8 track, u8 key, s32 depressed)
   // store the exact notes (for note-off) — atomically, same cross-task
   // reentrancy as the release drain (#22)
   MIOS32_IRQ_Disable();
+  inssel_kbd_recorded_chord[key] = 0;
+  inssel_kbd_learned[key] = 0;
   for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i)
     inssel_kbd_held[key][i] = 0xff;
   for(i=0; i<num_notes; ++i)
     inssel_kbd_held[key][i] = notes[i];
   MIOS32_IRQ_Enable();
 
+  // EDIT RECORDING: a GP step button is held on the EDIT page (MIDI-learn) —
+  // punch this key into the HELD step, like an external MIDI keyboard would.
+  if( SEQ_UI_EDIT_MidiLearnActive() ) {
+    if( num_notes > 1 ) {
+      // the stock learn path is per-note (last note wins on one layer) — punch
+      // the whole chord atomically instead, then monitor it live
+      SEQ_UI_INSSEL_RecordChord(track, notes, num_notes, inssel_kbd_velocity, (s32)ui_selected_step);
+      inssel_kbd_recorded_chord[key] = 1;
+      for(i=0; i<num_notes; ++i)
+	SEQ_UI_INSSEL_PlayLive(track, notes[i], inssel_kbd_velocity);
+      return 0;
+    } else {
+      mios32_midi_package_t p;
+      p.ALL = 0;
+      p.type = NoteOn;
+      p.event = NoteOn;
+      p.chn = seq_cc_trk[track].midi_chn;
+      p.note = notes[0];
+      p.velocity = inssel_kbd_velocity;
+      if( SEQ_UI_NotifyMIDIINCallback(DEFAULT, p) > 0 ) {
+	// consumed: recorded onto the held step + monitored by the learn
+	// handler's FWD path (which replays the step as it now sounds)
+	inssel_kbd_learned[key] = 1;
+	return 0;
+      }
+      // not consumed (step released in between): fall through to normal play
+    }
+  }
+
   if( seq_record_state.ENABLED && num_notes > 1 ) {
     // recording a chord: write the whole chord to one step atomically (the stock
     // per-note record path races the running step and scatters/drops notes), then
     // monitor it live so you still hear what you played.
-    SEQ_UI_INSSEL_RecordChord(track, notes, num_notes, INSSEL_KBD_TRIGGER_VELOCITY);
+    SEQ_UI_INSSEL_RecordChord(track, notes, num_notes, inssel_kbd_velocity, -1);
     inssel_kbd_recorded_chord[key] = 1;
     for(i=0; i<num_notes; ++i)
-      SEQ_UI_INSSEL_PlayLive(track, notes[i], INSSEL_KBD_TRIGGER_VELOCITY);
+      SEQ_UI_INSSEL_PlayLive(track, notes[i], inssel_kbd_velocity);
   } else {
     // single note, or preview-only: the proven per-note path
     inssel_kbd_recorded_chord[key] = 0;
     for(i=0; i<num_notes; ++i)
-      SEQ_UI_INSSEL_EmitNote(track, notes[i], INSSEL_KBD_TRIGGER_VELOCITY);
+      SEQ_UI_INSSEL_EmitNote(track, notes[i], inssel_kbd_velocity);
   }
 
   return 0; // no error
@@ -480,9 +600,13 @@ s32 SEQ_UI_INSSEL_SelectRow_Button(seq_ui_button_t button, s32 depressed)
     } else {
       // Melodic track: one-row keyboard. SELECT + key1/key16 scroll the whole row
       // down/up by an OCTAVE (coarse); < / > + datawheel scroll by a semitone (fine).
+      // SELECT + key2 cycles the layout, SELECT + key15 toggles collapse-to-scale —
+      // the performance toggles live next to the octave keys, no OPT trip needed.
       if( seq_ui_button_state.SELECT_PRESSED ) {
 	if( depressed ) return 0;
 	if( button == SEQ_UI_BUTTON_GP1 )  return SEQ_UI_INSSEL_KeyboardScroll(-12);
+	if( button == SEQ_UI_BUTTON_GP2 )  return SEQ_UI_INSSEL_KeyboardLayoutCycle();
+	if( button == SEQ_UI_BUTTON_GP15 ) return SEQ_UI_INSSEL_KeyboardFoldToggle();
 	if( button == SEQ_UI_BUTTON_GP16 ) return SEQ_UI_INSSEL_KeyboardScroll(+12);
 	return 0;
       }
@@ -553,7 +677,7 @@ static s32 LCD_Handler(u8 high_prio)
     u8 scale, root_selection, root;
     SEQ_CORE_FTS_GetScaleAndRoot(visible_track, seq_core_trk[visible_track].step, 0, &seq_cc_trk[visible_track], &scale, &root_selection, &root);
 
-    // line 0, left half (cols 0..39): layout + jump + base (leftmost key) note
+    // line 0, left half (cols 0..39): layout (+fold) + jump + base note + transpose + velocity
     u8 k0[INSSEL_KBD_MAX_NOTES];
     inssel_kbd_build_notes(visible_track, 0, k0);
     SEQ_LCD_CursorSet(0, 0);
@@ -563,12 +687,16 @@ static s32 LCD_Handler(u8 high_prio)
       SEQ_LCD_PrintStringPadded("Degrees", 12);
     else {
       char b[13];
-      sprintf(b, "Iso Jump+%d", inssel_kbd_jump);
+      sprintf(b, seq_ui_options.INSSEL_KBD_FOLD ? "IsoFold J+%d" : "Iso Jump+%d", inssel_kbd_jump);
       SEQ_LCD_PrintStringPadded(b, 12);
     }
     SEQ_LCD_PrintString("Base:");
     SEQ_LCD_PrintNote(k0[0]);
-    SEQ_LCD_PrintSpaces(20);
+    {
+      char b[21];
+      sprintf(b, " Trn%+4d Vel%3d", inssel_kbd_transpose, inssel_kbd_velocity);
+      SEQ_LCD_PrintStringPadded(b, 20);
+    }
 
     // line 0, right half (cols 40..79): live scale name
     SEQ_LCD_CursorSet(40, 0);
@@ -660,6 +788,7 @@ s32 SEQ_UI_INSSEL_Init(u32 mode)
     int k, i;
     for(k=0; k<16; ++k) {
       inssel_kbd_recorded_chord[k] = 0;
+      inssel_kbd_learned[k] = 0;
       for(i=0; i<INSSEL_KBD_MAX_NOTES; ++i)
 	inssel_kbd_held[k][i] = 0xff;
     }

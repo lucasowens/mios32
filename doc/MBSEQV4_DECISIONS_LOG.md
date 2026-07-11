@@ -1939,3 +1939,74 @@ HIL 250/250 — 244 baseline + 6 new pins, green on first run after flash)**
   switch/recall tests cover #54's prefetch path). Validation = full suite on hardware +
   the by-ear switch feel; the freeze-net probes (`diag_switch.py`/`diag_freeze.py`,
   CMD_SWITCH_PERF 0x44) remain available if a number is ever wanted.
+
+**2026-07-11 (cont. 2) — Isomorphic keyboard integration push: EDIT-RECORDING punch-in,
+collapse-to-scale, live layout/velocity controls (SHIPPED, by-ear GO — "its awesome i
+love it" — after two same-session revs below; HIL 250 regression pending)**
+Origin: user ask — deepen the B-row isomorphic keyboard (shipped 2026-07-03 with parked
+polish): use it in the stock EDIT RECORDING mode, improve the UI, add collapse-to-scale,
+push expressiveness.
+- **EDIT-RECORDING punch-in.** Play-surface events (melodic keys AND drum pads) are now
+  offered to the active page's MIDI-IN callback (`SEQ_UI_NotifyMIDIINCallback`) — the same
+  hook `seq_midi_in.c` offers external packages before the record path — gated on a new
+  `SEQ_UI_EDIT_MidiLearnActive()` (EDIT page + GP step held). Hold-step + tap key =
+  punch that key into the held step, exactly like an external MIDI keyboard into the
+  stock MIDI-learn. ALL-held note-copy across selected steps rides for free (it lives in
+  the learn handler); monitoring is the stock learn FWD (the step replays as it now
+  sounds; `SEQ_RECORD_PrintEditScreen` feedback included).
+- **Chord punches land atomically.** The stock learn path is per-note last-wins (per-
+  package Enable toggle + `SEQ_RECORD_Reset` after each insert clears the held-note
+  stack), so a triad through notify would collapse to its last note. Chord-layout presses
+  instead pin the held step through `SEQ_UI_INSSEL_RecordChord(..., force_step)` (new
+  param; <0 = pick live as before) and monitor live. Release symmetry via a new per-key
+  `inssel_kbd_learned` flag: learned releases go back through notify; if the step was
+  released first, the learn exit's AllNotesOff already cleaned up and the fallback live
+  note-off is harmless.
+- **Inherited stock quirk (documented, not fixed):** the learn handler leaves
+  `seq_record_state.ENABLED = 0` on exit, so punching while REC is armed disarms record —
+  identical behavior with an external keyboard; fix belongs upstream of this feature.
+- **Collapse-to-scale (FOLD).** `INSSEL_KBD_FOLD` — the 16th (last) bit of
+  `seq_ui_options`. **Rev same session after first by-ear**: v1 snapped each chromatic
+  key in place via `SEQ_SCALE_NoteValueGet`, which left adjacent keys doubling on one
+  note ("duplicate notes filling in" — user); reworked to **compact**: with FOLD on,
+  Jump strides **scale degrees** from the tonic (`SEQ_SCALE_WalkScale(base, key*jump)`,
+  tonic-anchored like the Degrees layout; degree delta clamped to 127 for the s8 param).
+  Every key a distinct scale note — Jump 1 = scale steps (≡ Degrees), 2 = diatonic
+  thirds, 3 = diatonic fourths. Jump encoder + transient messages read "degrees" in fold
+  mode. Degrees/chords layouts are in-key by construction and ignore it. OPT item +
+  persisted as `UiInsselKbdFold` in `MBSEQ_GC.V4`.
+- **Performance gestures (no OPT trip mid-jam):** SELECT+key2 = cycle layout
+  (Chromatic → Degrees → Chords), SELECT+key15 = fold toggle, SELECT+GP1 encoder =
+  velocity 1..127 (replaces the fixed 100; plays AND records). Octave keys stay on
+  SELECT+key1/key16 — the toggles sit inboard of them. All confirm via transient LCD.
+- **Rev same session (by-ear): stock SELECT-tap learn latch REMOVED — no replacement;
+  hold-a-step is the only learn gesture.** The stock EDIT page latched MIDI-learn on
+  every SELECT tap, which collided head-on with the keyboard's SELECT modifier
+  ("annoying" — user): shifting an octave latched learn and the latch then swallowed the
+  keys. A double-tap-REC replacement latch was built (PROC-row <350 ms convention,
+  flashing REC lamp, latch surviving the deferred page Init) and **dropped the same hour
+  on user feedback** — the hold-a-step punch-in already covers the workflow and a second
+  latched mode wasn't pulling its weight ("i cant see the point"). Final state: the
+  momentary hold-a-step learn (which the play-surface punch-in rides) is the whole
+  feature; SELECT on the EDIT page does nothing. One durable gotcha from the dropped
+  attempt, worth keeping: **`SEQ_UI_PageSet` defers the target page's Init** (via
+  `seq_ui_display_init_req`), so state set right after PageSet gets clobbered by the
+  page's Init unless the Init is taught to preserve it.
+- **UI:** held keys light pure red (the green in-scale / amber root planes yield while
+  pressed — finger feedback was previously absent); INSSEL LCD line 0 gains fold flag
+  ("IsoFold J+n"), transpose (`Trn ±nn`) and velocity (`Vel nnn`) readouts.
+- Files: `seq_ui_inssel.c` (core), `seq_ui_edit.c` (learn getter), `seq_ui.c` (SELECT+GP1
+  intercept), `seq_ui_opt.c` (OPT item 37), `seq_file_gc.c` (persistence), `seq_ui.h`.
+  Docs: surface map §4 block rewritten, manual fork gains "The Play Surface" section
+  (also fixed the stale "GC unmodified by the fork" row).
+- **Ideas surfaced, unbuilt** (expressiveness ladder — pick by ear, each wants a
+  workflow-bundle framing per §2.7 before licensing): note-repeat/ratchet on held key at
+  a clock division (strongest live-record candidate); latch/sustain mode for drones;
+  strum (ms spread) on the chord layout; chord voicing/inversion dial (GP2-encoder
+  candidate — would claim a second global encoder, weigh like the GP1 tradeoff);
+  hold-time → CC pressure curve; per-key velocity tilt across the row.
+- **Validation:** zero-warning build (only the pre-existing uip header-guard warning,
+  verified present on unmodified main). **By-ear GO 2026-07-11** across three flashed
+  iterations (v1 → fold compaction rev → learn-gesture rev). HIL 250-suite = the
+  regression gate, still pending; **no new pin** — the harness has no verb for B-row key
+  presses or a held-GP learn gesture (same gap as the waypoint pin, deferred with it).

@@ -553,7 +553,9 @@ s32 SEQ_UI_EDIT_Button_Handler(seq_ui_button_t button, s32 depressed)
       return 1; // value changed
     }
 
-    // enable/disable MIDI Learn mode
+    // enable/disable MIDI Learn mode — momentary while a GP step is held. This
+    // is the ONLY way learn arms (the stock SELECT-tap latch is removed): it's
+    // the punch-in surface for external MIDI and the B-row keyboard/pads alike.
     midi_learn_mode = depressed ? MIDI_LEARN_MODE_OFF : MIDI_LEARN_MODE_ON;
     if( midi_learn_mode_used && midi_learn_mode == MIDI_LEARN_MODE_OFF ) {
       midi_learn_mode_used = 0;
@@ -690,14 +692,11 @@ s32 SEQ_UI_EDIT_Button_Handler(seq_ui_button_t button, s32 depressed)
   } else {
     switch( button ) {
       case SEQ_UI_BUTTON_Select:
-	// toggle MIDI learn
-	if( !depressed )
-	  midi_learn_mode = (midi_learn_mode == MIDI_LEARN_MODE_ON) ? MIDI_LEARN_MODE_OFF : MIDI_LEARN_MODE_ON;
-	    if( midi_learn_mode_used && midi_learn_mode == MIDI_LEARN_MODE_OFF ) {
-	      midi_learn_mode_used = 0;
-	      SEQ_RECORD_AllNotesOff();
-	    }
-	return 1; // value always changed
+	// stock latched MIDI-learn on every SELECT tap — removed: SELECT is the
+	// play-surface's modifier (octave/layout/fold/velocity), so each tap armed
+	// a learn latch that then swallowed the keyboard keys. Punch-in is the
+	// momentary hold-a-step gesture only (GP handler above).
+	return -1; // unsupported
 
       case SEQ_UI_BUTTON_Right: {
 	if( depressed ) return 0; // ignore when button depressed
@@ -1413,6 +1412,17 @@ static s32 CheckStoreFile(void)
   }
 
   return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// 1 while the EDIT page's MIDI-learn is armed (a GP step button is held), so
+// the panel play-surfaces (B-row keyboard / drum pads) can punch into the held
+// step like an external MIDI keyboard would ("EDIT RECORDING").
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_UI_EDIT_MidiLearnActive(void)
+{
+  return ui_page == SEQ_UI_PAGE_EDIT && midi_learn_mode == MIDI_LEARN_MODE_ON;
 }
 
 
