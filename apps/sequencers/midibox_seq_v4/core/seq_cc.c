@@ -78,7 +78,8 @@ s32 SEQ_CC_Init(u32 mode)
     tcc->chordmask_mask_l   = 0;
     tcc->chordmask_mask_h   = 0;
     tcc->tension_grip       = 0;
-    tcc->voice_strum        = 64; // bipolar, 64 = center detent = no strum (spread/inv 0 via memset)
+    tcc->voice_strum        = 64; // bipolar, 64 = center detent = no strum (spread/inv/drop 0 via memset)
+    tcc->voice_tilt         = 64; // bipolar, 64 = flat = no velocity ramp
 
     {
       u8 i;
@@ -142,9 +143,9 @@ s32 SEQ_CC_Init(u32 mode)
 //   - lay_const slots holding Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl
 //   - par_assignment_drum slots holding Velocity/Length
 //   - groove (style + value) — deterministic shaping, re-applied identically
-//   - chord voicing (spread/inv/strum) — deterministic shaping of the chord-layer
-//     expansion; the captured buffer still holds chord BYTES, so the voicing CCs
-//     must survive for the copy to re-expand to what was heard
+//   - chord voicing (spread/inv/strum/drop/tilt) — deterministic shaping of the
+//     chord-layer expansion; the captured buffer still holds chord BYTES, so the
+//     voicing CCs must survive for the copy to re-expand to what was heard
 //
 // When you add a new SEQ_CC_*, classify it: GENERATION → reset here; deterministic
 // SHAPING → preserve (a frozen copy must still sound like what was heard).
@@ -570,6 +571,12 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       case SEQ_CC_VOICE_STRUM:
 	tcc->voice_strum = value & 0x7f; // 64 = center detent (off)
 	break;
+      case SEQ_CC_VOICE_DROP:
+	tcc->voice_drop = (value > 3) ? 3 : value; // 0=off, 1=Drop2, 2=Drop3, 3=Drop2&4
+	break;
+      case SEQ_CC_VOICE_TILT:
+	tcc->voice_tilt = value & 0x7f; // 64 = flat (off)
+	break;
 
       default:
 	portEXIT_CRITICAL();
@@ -795,6 +802,8 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_VOICE_SPREAD:         return tcc->voice_spread;
     case SEQ_CC_VOICE_INV:            return tcc->voice_inv;
     case SEQ_CC_VOICE_STRUM:          return tcc->voice_strum;
+    case SEQ_CC_VOICE_DROP:           return tcc->voice_drop;
+    case SEQ_CC_VOICE_TILT:           return tcc->voice_tilt;
   }
 
   return -2; // invalid CC

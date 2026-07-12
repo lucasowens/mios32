@@ -35,6 +35,24 @@ def _ensure_autotest_fixtures(b: Board) -> None:
         for pattern, gate in _AUTOTEST_FIXTURE_GATES.items():
             b.pattern_load(group=0, bank=0, pattern=pattern)
             time.sleep(0.15)
+            # CC-debris heal (2026-07-11): a hands-on jam on the AUTOTEST session +
+            # auto-writeback can save a stray track transpose/groove into a fixture.
+            # The migrated PITCH render then bakes the transpose into the OUTPUT
+            # MIRROR, so track_par_get reads value-shifted bytes that masquerade as
+            # rotations/wrong-pitch failures across the capture/tension families
+            # (semi -6 folded 1..16 into 7..10 with a rest at the seam — see the
+            # reference-hil memory). Neutralize the shaping CCs; save only if the
+            # bigger rebuild below also fires, else RAM-fix is enough (the per-test
+            # fixture reload replays the file, so persist the fix once).
+            debris = (b.cc_get(0, CC.TRANSPOSE_SEMI) or b.cc_get(0, CC.TRANSPOSE_OCT)
+                      or b.cc_get(0, CC.GROOVE_VALUE))
+            if debris:
+                b.cc_set(0, CC.TRANSPOSE_SEMI, 0)
+                b.cc_set(0, CC.TRANSPOSE_OCT, 0)
+                b.cc_set(0, CC.GROOVE_VALUE, 0)
+                b.pattern_save(0, 0, pattern)
+                time.sleep(0.2)
+                print(f"[conftest] neutralized CC debris on AUTOTEST bank0/pat{pattern}")
             if b.cc_get(0, CC.EVENT_MODE) == _FIXTURE_EVENT_MODE_NOTE:
                 continue  # healthy
             # Clobbered to Drum (or other) — rebuild track 0 to its Note spec.

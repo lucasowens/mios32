@@ -779,7 +779,9 @@ nothing — the right screen says `no Chord layer on trk` so a dead dial never p
 | --- | --- | --- |
 | **Sprd** | 0–12 | Opens the voicing upward: each click lifts one upper voice an octave (cycling through them, bottom voice anchored). Click 1 on a plain triad = the classic open triad (root–5th–10th). High values reach pipe-organ territory. |
 | **Inv** | −8…+7 | Classic inversion walk: each **+** click lifts the lowest-sounding voice an octave, each **−** click drops the highest. 0 = the table's own voicing. |
+| **Drop** | off/Dp2/Dp3/D2+4 | Classic jazz drop voicings: the named voice(s) **from the top** of the close voicing down an octave (Drop2 = the warm guitar/piano register). Applies after Inv, before Sprd; skipped gracefully on chords too small for the named voice. |
 | **Strm** | −63…+63 | Bipolar strum, **center detent = off**. Clockwise strums **up** (lowest voice first), counter-clockwise strums **down**; the value is **ticks per voice** (24 ≈ a 16th at 96 ppqn), so small values humanize and large values become deliberate broken chords. Echo repeats and rolls follow the strummed onsets. |
+| **Tilt** | −63…+63 | Velocity ramp across the chord by pitch order: clockwise accents the **top** voice, counter-clockwise the **bottom**, linear in between (±half the dial each way, never below velocity 1). Pairs beautifully with a down-strum. |
 
 Everything at neutral = byte-identical stock playback. **Double-tap the B-row key** to
 bypass the whole row (config kept), like every emission tenant. Encoder-push snaps a
@@ -802,8 +804,10 @@ dial to its detent.
 
 ### Caveats (POC)
 
-- **Sprd saves/recalls with the pattern; Inv and Strm are RAM-only for now** (they sit
-  above the persisted ext-CC block; the V5 block bump is queued on OPEN_ITEMS).
+- **Sprd saves/recalls with the pattern; Inv, Strm, Drop and Tilt are RAM-only for now**
+  (they sit above the persisted ext-CC block; the V5 block bump is queued on
+  OPEN_ITEMS). The follow-on roadmap (per-step voicing layer, GRAVITY×spread coupling)
+  lives in `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`.
 - MIDI export ignores the strum stagger.
 
 ---
@@ -892,6 +896,8 @@ CCs added by the fork:
 | 0x9f | `voice_spread` (chord voicing; bits 0..3 = spread, bit 7 = row bypass) |
 | 0xa0 | `voice_inv` (chord voicing inversion; RAM-only until the V5 ext bump) |
 | 0xa1 | `voice_strum` (chord voicing strum, 64-biased bipolar; RAM-only until the V5 ext bump) |
+| 0xa2 | `voice_drop` (chord voicing drop 0..3; RAM-only until the V5 ext bump) |
+| 0xa3 | `voice_tilt` (chord voicing velocity tilt, 64-biased bipolar; RAM-only until the V5 ext bump) |
 
 The robotize five live in the ext block (above 0x7f) and follow the upstream V4.088
 robotize CC range (0x80..0x90). The **v3 ext block** (2026-06-10) widened the persisted

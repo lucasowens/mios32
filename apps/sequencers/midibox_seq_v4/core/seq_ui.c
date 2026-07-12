@@ -1435,8 +1435,10 @@ typedef enum {
                       // bit-2 encoding. Read/write generic; kind exists only to print the name.
   PROC_KIND_VOICE_SPREAD, // Voicing spread: value in bits 0..3, 0x80 = the row's bypass bit.
                       //   Masked RMW so a spread edit preserves bypass (Echo idiom) (Voicing).
-  PROC_KIND_VOICE_STRUM, // Voicing strum: BIPOLAR CC, logical (raw-64) -63..+63 around a 64
-                      //   raw centre. 0 = detent = no strum; sign = direction (Voicing).
+  PROC_KIND_VOICE_BIPOLAR, // Voicing Strm/Tilt: BIPOLAR CC, logical (raw-64) -63..+63
+                      //   around a 64 raw centre. 0 = detent = off; sign = direction (Voicing).
+  PROC_KIND_VOICE_DROP, // Voicing drop selector 0..3 — generic CC read/write, kind exists
+                      //   so ParamPrintValue can name the voicing (off/Dp2/Dp3/D2+4) (Voicing).
 } proc_pkind_t;
 
 // Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot). PitchGen and
@@ -1738,9 +1740,11 @@ static const proc_param_t proc_params_humanize[] = {
 // Occupancy is ANY dial off-neutral (custom RowState arm — no single headline CC
 // can proxy it); bypass = bit 7 of SPREAD, gating all three in the DSP.
 static const proc_param_t proc_params_voicing[] = {
-  { "Sprd", PROC_KIND_VOICE_SPREAD, SEQ_CC_VOICE_SPREAD,   0, 12, 0, PROC_FMT_DEFAULT },
-  { "Inv",  PROC_KIND_SNIBBLE,      SEQ_CC_VOICE_INV,     -8,  7, 0, PROC_FMT_DEFAULT },
-  { "Strm", PROC_KIND_VOICE_STRUM,  SEQ_CC_VOICE_STRUM,  -63, 63, 0, PROC_FMT_DEFAULT },
+  { "Sprd", PROC_KIND_VOICE_SPREAD,  SEQ_CC_VOICE_SPREAD,   0, 12, 0, PROC_FMT_DEFAULT },
+  { "Inv",  PROC_KIND_SNIBBLE,       SEQ_CC_VOICE_INV,     -8,  7, 0, PROC_FMT_DEFAULT },
+  { "Drop", PROC_KIND_VOICE_DROP,    SEQ_CC_VOICE_DROP,     0,  3, 0, PROC_FMT_DEFAULT },
+  { "Strm", PROC_KIND_VOICE_BIPOLAR, SEQ_CC_VOICE_STRUM,  -63, 63, 0, PROC_FMT_DEFAULT },
+  { "Tilt", PROC_KIND_VOICE_BIPOLAR, SEQ_CC_VOICE_TILT,   -63, 63, 0, PROC_FMT_DEFAULT },
 };
 
 static const proc_row_t proc_rows[] = {
@@ -1786,7 +1790,7 @@ static const proc_row_t proc_rows[] = {
     .occ_cc = SEQ_CC_HUMANIZE_VALUE, .disable_mask = 0x08, .disable_cc = SEQ_CC_HUMANIZE_MODE,
     .status = SEQ_UI_PROC_Status_Humanize },
   { .name = "Voicing",   .rowkind = PROC_ROW_EMISSION,
-    .params = proc_params_voicing,   .n_params = 3,
+    .params = proc_params_voicing,   .n_params = 5,
     .occ_cc = SEQ_CC_VOICE_SPREAD, .disable_mask = 0x80, // double-tap bypass; occupancy is a custom RowState arm
     .status = SEQ_UI_PROC_Status_Voicing },
 };
@@ -2057,7 +2061,10 @@ static proc_rowstate_t SEQ_UI_PROC_RowState(u8 track, u8 row)
     u8 sprd = SEQ_CC_Get(track, SEQ_CC_VOICE_SPREAD);
     u8 inv  = SEQ_CC_Get(track, SEQ_CC_VOICE_INV) & 0x0f;
     u8 strm = SEQ_CC_Get(track, SEQ_CC_VOICE_STRUM);
-    s.occupied = ((sprd & 0x0f) != 0) || (inv != 0) || (strm != 64);
+    u8 drop = SEQ_CC_Get(track, SEQ_CC_VOICE_DROP);
+    u8 tilt = SEQ_CC_Get(track, SEQ_CC_VOICE_TILT);
+    s.occupied = ((sprd & 0x0f) != 0) || (inv != 0) || (strm != 64)
+              || (drop != 0) || (tilt != 64);
     s.enabled  = s.occupied && !(sprd & 0x80);
     s.strength = sprd & 0x0f;
   } else {
@@ -2177,7 +2184,7 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
     return (SEQ_CC_Get(track, p->cc) & (1 << 2)) ? 1 : 0;
   case PROC_KIND_VOICE_SPREAD:
     return SEQ_CC_Get(track, p->cc) & 0x0f; // spread magnitude; strip the 0x80 bypass bit
-  case PROC_KIND_VOICE_STRUM:
+  case PROC_KIND_VOICE_BIPOLAR:
     return (s32)SEQ_CC_Get(track, p->cc) - 64; // bipolar: raw 0..127 -> logical -64..+63
   default: // CC, CM_STR, HUM_VALUE
     return SEQ_CC_Get(track, p->cc);
@@ -2411,7 +2418,7 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     SEQ_CC_Set(track, p->cc, (raw & 0x80) | ((u8)v & 0x0f)); // preserve the bypass bit
     break;
   }
-  case PROC_KIND_VOICE_STRUM:
+  case PROC_KIND_VOICE_BIPOLAR:
     SEQ_CC_Set(track, p->cc, (u8)(v + 64)); // bipolar: logical -63..+63 -> raw 1..127, 64 = detent
     break;
   default: // CC, CM_STR
@@ -2514,9 +2521,14 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_KIND_SNIBBLE:
   case PROC_KIND_GRAVITY:
   case PROC_KIND_SDEG:
-  case PROC_KIND_VOICE_STRUM:
+  case PROC_KIND_VOICE_BIPOLAR:
     SEQ_UI_PROC_PrintSigned(v);
     return;
+  case PROC_KIND_VOICE_DROP: {
+    static const char *const dn[4] = { "off ", "Dp2 ", "Dp3 ", "D2+4" };
+    SEQ_LCD_PrintString(dn[(v >= 0 && v < 4) ? v : 0]);
+    return;
+  }
   case PROC_KIND_ECHO_DLY:
     SEQ_LCD_PrintFormattedString("%-4s",
                                  SEQ_CORE_Echo_GetDelayModeName(SEQ_CC_Get(track, p->cc)));

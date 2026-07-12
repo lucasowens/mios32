@@ -232,6 +232,8 @@
 #define SEQ_CC_VOICE_SPREAD						0x9F // bits 0..3 = spread 0..12 (octave-lift clicks); bit 7 = voicing bypass (rack disable)
 #define SEQ_CC_VOICE_INV						0xA0 // inversion, 4-bit two's complement -8..+7 (transpose_semi idiom); + lifts low voice, - drops high
 #define SEQ_CC_VOICE_STRUM						0xA1 // 0..127 biased at 64 (=off); >64 = strum up (low voice first), <64 = down; |v-64| = ticks/voice
+#define SEQ_CC_VOICE_DROP						0xA2 // 0=off, 1=Drop2, 2=Drop3, 3=Drop2&4 — jazz drops on the (inverted) close voicing
+#define SEQ_CC_VOICE_TILT						0xA3 // 0..127 biased at 64 (=flat); velocity ramp by pitch order, >64 accents top voice, <64 bottom
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -334,6 +336,8 @@ typedef struct {
   u8		voice_spread;            // chord-voicing spread: bits 0..3 = 0..12 octave-lift clicks; bit 7 = voicing bypass
   u8		voice_inv;               // chord-voicing inversion: 4-bit two's complement -8..+7
   u8		voice_strum;             // chord-voicing strum: 0..127 biased at 64 (=off); |v-64| = ticks per voice rank
+  u8		voice_drop;              // chord-voicing drop: 0=off, 1=Drop2, 2=Drop3, 3=Drop2&4
+  u8		voice_tilt;              // chord-voicing velocity tilt: 0..127 biased at 64 (=flat ramp off)
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

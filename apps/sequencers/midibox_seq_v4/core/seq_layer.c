@@ -101,6 +101,8 @@ static const u8 seq_layer_preset_table_static[][2] = {
   { SEQ_CC_VOICE_SPREAD,   0 },
   { SEQ_CC_VOICE_INV,      0 },
   { SEQ_CC_VOICE_STRUM,    64 }, // bipolar center detent = no strum
+  { SEQ_CC_VOICE_DROP,     0 },
+  { SEQ_CC_VOICE_TILT,     64 }, // bipolar center detent = flat velocities
   { 0xff,                  0xff } // end marker
 };
 
@@ -815,8 +817,9 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	    u8 voicing_off = (tcc->voice_spread & 0x80) || chord_muted || nvoices < 2;
 	    if( !voicing_off ) {
 	      u8 spread = tcc->voice_spread & 0x0f;
+	      u8 vdrop = tcc->voice_drop;
 	      s8 inv = (tcc->voice_inv < 8) ? (s8)tcc->voice_inv : (s8)tcc->voice_inv - 16;
-	      if( spread || inv ) {
+	      if( spread || inv || vdrop ) {
 		int k, j;
 		// inversion: each + click lifts the lowest-sounding voice an octave
 		// (classic inversion walk); each - click drops the highest.
@@ -826,6 +829,32 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 		    if( (inv > 0) ? (notes[j] < notes[vi]) : (notes[j] > notes[vi]) )
 		      vi = j;
 		  notes[vi] += (inv > 0) ? 12 : -12;
+		}
+		// drop: classic jazz drops on the (inverted) close voicing — the
+		// named voice(s) FROM THE TOP down an octave. 1=Drop2, 2=Drop3,
+		// 3=Drop2&4. Both targets resolve against the close position BEFORE
+		// either moves (the textbook definition); a named voice a small
+		// chord doesn't have is skipped.
+		if( vdrop ) {
+		  static const u8 drop_sel[3][2] = { {2,0}, {3,0}, {2,4} };
+		  s8 targets[2] = { -1, -1 };
+		  for(j=0; j<2; ++j) {
+		    u8 nth = drop_sel[vdrop-1][j]; // 1-based from the top, 0 = unused
+		    if( !nth || nth > nvoices )
+		      continue;
+		    u8 want = (u8)(nvoices - nth); // ascending rank of the nth-from-top
+		    int a, b;
+		    for(a=0; a<nvoices; ++a) {
+		      u8 rk = 0;
+		      for(b=0; b<nvoices; ++b)
+			if( notes[b] < notes[a] || (notes[b] == notes[a] && b < a) )
+			  ++rk;
+		      if( rk == want ) { targets[j] = (s8)a; break; }
+		    }
+		  }
+		  for(j=0; j<2; ++j)
+		    if( targets[j] >= 0 )
+		      notes[targets[j]] -= 12;
 		}
 		// spread: k-th click lifts voice 1 + ((k-1) % (n-1)) an octave —
 		// bottom voice anchored, uppers cycle wider (monotone widening).
@@ -837,19 +866,23 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	      }
 	    }
 
-	    // STRUM ranks: each voice's direction-resolved pitch order (0 = sounds
-	    // first). Up-strum = ascending pitch, down-strum = descending. The rank
-	    // rides the event; the tick stagger itself is applied at emission
-	    // (SEQ_CORE_Tick) where the schedule tick exists.
+	    // Per-voice pitch order (ascending), shared by STRUM (timing rank —
+	    // rides the event; the tick stagger applies at emission where the
+	    // schedule tick exists) and TILT (velocity ramp, applied below).
+	    // Strum ranks are direction-resolved: up-strum = ascending, down = reversed.
 	    u8 ranks[6] = { 0, 0, 0, 0, 0, 0 };
-	    if( !voicing_off && tcc->voice_strum != 64 ) {
+	    u8 asc[6]   = { 0, 0, 0, 0, 0, 0 };
+	    u8 tilt_on  = (!voicing_off && tcc->voice_tilt != 64);
+	    if( tilt_on || (!voicing_off && tcc->voice_strum != 64) ) {
 	      int a, b;
 	      for(a=0; a<nvoices; ++a) {
 		u8 rk = 0;
 		for(b=0; b<nvoices; ++b)
 		  if( notes[b] < notes[a] || (notes[b] == notes[a] && b < a) )
 		    ++rk;
-		ranks[a] = (tcc->voice_strum > 64) ? rk : (u8)(nvoices - 1 - rk);
+		asc[a] = rk;
+		if( tcc->voice_strum != 64 )
+		  ranks[a] = (tcc->voice_strum > 64) ? rk : (u8)(nvoices - 1 - rk);
 	      }
 	    }
 
@@ -861,6 +894,19 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	      *e = e_proto;
 	      e->midi_package.note = (u8)notes[i];
 	      e->strum = ranks[i];
+	      // TILT: linear velocity ramp across the chord by pitch order — CW (+)
+	      // accents the top voice, CCW (-) the bottom (±half the dial each way).
+	      // Clamped to 1..127: a 0 would turn the voice into the disabled-note
+	      // idiom and rest it.
+	      if( tilt_on && e->midi_package.velocity ) {
+		s16 t = (s16)tcc->voice_tilt - 64;
+		s16 dv = (s16)((t * (s16)(2*(s16)asc[i] - (s16)(nvoices - 1)))
+			       / (s16)(2*(nvoices - 1)));
+		s16 v = (s16)e->midi_package.velocity + dv;
+		if( v < 1 )   v = 1;
+		if( v > 127 ) v = 127;
+		e->midi_package.velocity = (u8)v;
+	      }
 	      ++num_events;
 	    }
 	  }

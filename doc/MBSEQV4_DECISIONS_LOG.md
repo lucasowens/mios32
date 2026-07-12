@@ -2128,3 +2128,38 @@ push expressiveness.
 - Files: `seq_chord.c/.h` (PC-mask precompute + getter), `seq_core.c` (snap +
   transpose-PC helpers, chord pass, live-sig term), `tests/apps/seq_v4/
   test_tension_chord.py` (new), `tests/harness/sysex.py` (CC.LAY_CONST_A1).
+
+**2026-07-11 (cont. 5) — Ladder rung 1: Drop + Tilt dials (SHIPPED, by-ear GO, HIL 254/254) + the expressiveness-ladder plan + the A1 CC-debris incident**
+- **The surfaced ideas got a durable home:** `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`
+  — 6 rungs (Drop/Tilt · per-step voicing par layer · GRAVITY×spread coupling ·
+  Ctrl-layer legibility · V5 persistence · strum export), each its own by-ear gate.
+  Key insight written down so it survives: once voicing is a PAR LAYER it lives in the
+  render buffer, so "GRAVITY collapses spread" and "LFO on spread" become ordinary
+  render targets with MIRROR-faithful bounce — prefer that route over any emission
+  coupling.
+- **Rung 1 shipped: Drop (0..3 = off/Drop2/Drop3/Drop2&4) + Tilt (bipolar ±63)** on the
+  Voicing row (now 5 dials). Drop = classic jazz drops applied Inv → Drop → Sprd (both
+  Drop2&4 targets resolve against the close position BEFORE either moves — textbook);
+  Tilt = linear velocity ramp by pitch order, top-accent CW / bottom CCW, clamped
+  1..127 (a 0 would rest the voice via the disabled-note idiom). Same class as the
+  act-1 trio: pure functions of the chord byte, preserved on bounce, gated by the row
+  bypass, occupancy extended. CCs 0xA2/0xA3 RAM-only (V5 payload now 0xA0..0xA3).
+  PROC_KIND_VOICE_STRUM generalized to PROC_KIND_VOICE_BIPOLAR (Strm + Tilt share it).
+- **HIL incident #2 of the day (environment again — the DIAGNOSTIC is the keeper):**
+  the validation run red-ringed the recorder-capture family with reads that looked like
+  a 6-step buffer rotation (and, at first glance, like act-2 substitution: chord ix
+  1 → 7). Real cause: a jam + auto-writeback had saved **TRANSPOSE_SEMI = −6** (+
+  groove 80, length 10) into AUTOTEST A1 track 0 — the migrated PITCH render bakes
+  transpose into the mirror, and TrimNote's octave fold turns v−6 into a fake
+  "rotation" (1→7, 6→0-rest at the seam). The event-mode self-heal passes this class.
+  **Diagnostic that cracked it: diff the sick fixture's track-0 CCs against a healthy
+  fixture's.** Fixed A1 + hardened conftest: `_ensure_autotest_fixtures` now
+  neutralizes semi/oct/groove debris and persists the fix.
+- **Process lesson, recorded:** a user interrupt does NOT kill a background pytest —
+  restarting created two concurrent suites on one device (both runs void, ~130 broad
+  cross-talk failures each). Check for a live pytest before kicking a run.
+- **Validation:** zero-warning build (only the pre-existing uip header-guard pair on a
+  full rebuild); full suite **254/254** after the A1 repair; **by-ear GO 2026-07-11.**
+- Files: `seq_cc.h/.c` (0xA2/0xA3), `seq_layer.c` (drop transform, tilt ramp, preset
+  rows), `seq_ui.c` (2 kinds reworked, 5-dial row, occupancy), `tests/conftest.py`
+  (CC-debris heal), plan doc, OPEN_ITEMS V5 item widened.

@@ -2234,6 +2234,7 @@ there and add one line to the chronology index at the end of this section.
 - **2026-07-11 (cont. 2) — Isomorphic keyboard integration push** (EDIT-RECORDING punch-in + fold→scale-degree stride + layout/velocity gestures; SHIPPED by-ear GO, HIL regression pending)
 - **2026-07-11 (cont. 3) — Voicing tenant: internal chord mode joins the rack** (Sprd/Inv/Strm on the Chord1/2/3 expansion, 6th emission tenant; SHIPPED by-ear GO; act 2 = GRAVITY chord-substitution APPROVED, unbuilt)
 - **2026-07-11 (cont. 4) — Act 2: chord-space GRAVITY** (TENSION substitutes the chord BYTE along the band ladder — quality collapse/tension, never re-roots; SHIPPED by-ear GO, HIL 254/254 = new baseline)
+- **2026-07-11 (cont. 5) — Ladder rung 1: Drop + Tilt dials** (Voicing row → 5 dials; expressiveness-ladder plan doc captured; A1 CC-debris HIL incident diagnosed + conftest hardened; SHIPPED by-ear GO, HIL 254/254)
 
 
 ---
