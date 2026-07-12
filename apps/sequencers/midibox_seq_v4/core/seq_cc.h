@@ -226,9 +226,10 @@
 // Chord-voicing tenant (Voicing POC): parametric voicing of the internal chord-layer
 // expansion (Chord1/2/3 par layers only) — a pure function of (chord byte, dials),
 // evaluated in SEQ_LAYER_GetEvents. All-neutral = byte-identical stock expansion.
-// SPREAD sits at 0x9f (the last free ext-block slot -> persists with the pattern);
-// INV/STRUM live above the 0x80..0x9f ext block and DO NOT persist yet (POC gap —
-// persisting them needs the ext-block V5 bump).
+// All five dials persist via the V5 ext-CC block (0x80..0xaf, 2026-07-11) — but
+// only in sessions/banks whose slots were created by V5 firmware; older slots
+// degrade the record to V4 and INV/STRUM/DROP/TILT reset to neutral on reboot
+// there (recreate the session to upgrade).
 #define SEQ_CC_VOICE_SPREAD						0x9F // bits 0..3 = spread 0..12 (octave-lift clicks); bit 7 = voicing bypass (rack disable)
 #define SEQ_CC_VOICE_INV						0xA0 // inversion, 4-bit two's complement -8..+7 (transpose_semi idiom); + lifts low voice, - drops high
 #define SEQ_CC_VOICE_STRUM						0xA1 // 0..127 biased at 64 (=off); >64 = strum up (low voice first), <64 = down; |v-64| = ticks/voice

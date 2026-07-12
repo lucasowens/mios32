@@ -38,16 +38,6 @@ Fix plans live in [plans/2026-07-02-held-findings-35-46.md](plans/2026-07-02-hel
 
 ## 4. Cleanup queue (code surfaces / repo)
 
-- **ext-CC block V5 bump — persist `voice_inv/strum/drop/tilt` (0xA0..0xA3)** — licensed by
-  the Voicing GO (2026-07-11, LOG cont. 3; drop/tilt added same day, ladder rung 1). Follow
-  the V2→V3 precedent in `seq_file_b.c/.h`: freeze the V3/V4 count (32), widen
-  `SEQ_FILE_B_TRK_EXT_CC_LAST` to a new boundary with headroom, new tag 0x05. **Cautions:**
-  the writer silently skips ext blocks that don't fit old-sized pattern slots (check
-  capacity math); the phrase-morph Loop A iterates the live count — `voice_inv` (nibble,
-  discontinuity at raw 8) and `voice_drop` (discrete selector) → SNAP list, `voice_strum`/
-  `voice_tilt` (64-biased linear) → lerp is fine. Until then these reset to neutral on
-  power-cycle only (they survive pattern switches in RAM). Full ladder:
-  [plans/2026-07-11-chord-mode-expressiveness-ladder.md](plans/2026-07-11-chord-mode-expressiveness-ladder.md).
 - **`seq_midexp` MIDI export ignores the Voicing strum stagger** — export renders unstrummed
   onsets (spread/inv ARE rendered — they're in the expansion). Decide: teach export the
   per-voice offset, or document as accepted (the tape/capture path already hears strum).
@@ -95,6 +85,18 @@ reply-buffer bound needs a `static_assert` · idea: small undo ring (2–3 deep)
 
 ## Closed (move lines here with a date, don't delete)
 
+- **2026-07-11** | ext-CC block V5 bump — **SHIPPED, HIL 256/256 = new baseline**: tag 0x05,
+  range 0x80..0xAF (voicing 0xA0..0xA3 + 12 headroom slots), frozen V3/V4 count=32, write
+  ladder V5→V4→V3→none, `PhraseReadCCs` NEUTRAL-extends older records (strum/tilt off=64,
+  NOT 0), morph snap list += voice_inv/voice_drop. **Gotchas that outlive the session:**
+  voicing persists only in sessions/banks CREATED by V5 firmware (older slots degrade the
+  record silently — recreate the session to upgrade); headroom slots 0xA4..0xAF are persisted
+  as 0 today, so future CCs there MUST be 0-neutral (a 64-biased dial needs a V6 bump — note
+  at the `SEQ_FILE_B_TRK_EXT_CC_LAST` define); first-touch `pattern_save` to a HIGH slot of a
+  freshly created (sparse) bank can outrun the 4 s reply timeout (cluster-chain allocation) —
+  use a low slot + long timeout in harness rigs. Pins: `test_voicing_persist.py`
+  (fresh-session round-trip + old-slot degrade-non-corruption). Full derivation:
+  DECISIONS_LOG 2026-07-11 cont. 6.
 - **2026-07-11** | #54 | Catch-up/prefetch burst under MUTEX_MIDIOUT — **FIXED**: prefetched
   (not-yet-due) ticks capped at 8/service (`SEQ_CORE_PREFETCH_TICKS_PER_SERVICE`), remainder carried
   in `bpm_tick_prefetch_carry` (separate from `prefetch_req` so a spread batch can't refuse a new

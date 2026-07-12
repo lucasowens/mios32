@@ -62,11 +62,13 @@ Add unit decode (the self-bus legibility pattern, 2026-07-08) so the Ctrl step v
 read as `Sprd 3` / `Inv -2` instead of raw bytes. Cheap; superseded by rung 2 if that
 ships first.
 
-## Rung 5 — ext-CC block V5 bump (persistence; LICENSED)
+## Rung 5 — ext-CC block V5 bump (persistence) — SHIPPED 2026-07-11 (cont. 6)
 
-Persist 0xA0..0xA3 (Inv/Strm/Drop/Tilt) with the pattern. Full cautions on
-OPEN_ITEMS §4 (freeze the V3/V4 count at 32, new tag 0x05, slot-capacity check,
-morph snap-vs-lerp: Inv nibble + Drop discrete → SNAP, Strm/Tilt bias-64 → lerp).
+DONE (HIL 256/256 = new baseline): tag 0x05, range 0x80..0xAF, frozen V3/V4=32,
+write ladder V5→V4→V3, PhraseReadCCs neutral-extends (strum/tilt=64), snap list
++= inv/drop. Voicing persists only in sessions created by V5 firmware (older
+slots degrade the record). Pins: `test_voicing_persist.py`. Outcome owned by
+DECISIONS_LOG 2026-07-11 cont. 6.
 
 ## Rung 6 — Strum in MIDI export
 

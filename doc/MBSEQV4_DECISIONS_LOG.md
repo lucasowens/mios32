@@ -2163,3 +2163,56 @@ push expressiveness.
 - Files: `seq_cc.h/.c` (0xA2/0xA3), `seq_layer.c` (drop transform, tilt ramp, preset
   rows), `seq_ui.c` (2 kinds reworked, 5-dial row, occupancy), `tests/conftest.py`
   (CC-debris heal), plan doc, OPEN_ITEMS V5 item widened.
+
+**2026-07-11 (cont. 6) — ext-CC block V5 bump: voicing dials persist (SHIPPED, HIL 256/256 = new baseline)**
+- **What:** the per-track ext block gets tag **0x05 (V5)**: CC range widened
+  `0x80..0x9f` → **`0x80..0xaf`** (COUNT 32 → 48) so the voicing dials
+  INV/STRUM/DROP/TILT (0xA0..0xA3) persist with the pattern; 0xA4..0xAF = headroom.
+  Follows the V2→V3 precedent exactly: **V3/V4 count frozen at 32**
+  (`SEQ_FILE_B_TRK_EXT_CC_COUNT_V3`, like the frozen V2=22), per-tag stride in all
+  three read paths (PatternRead / TrackRead / PhraseReadCCs), write ladder
+  **V5→V4→V3→none** per record (a degraded record carries only the frozen 32-CC
+  payload; gen sub-block rides V4+). `SEQ_FILE_B_TRK_EXT_SIZE` → V5 (822/track), so
+  only sessions/banks **created by V5 firmware** reserve V5 room — older slots
+  degrade silently (voicing resets to neutral on reboot there; recreate the session
+  to upgrade). Old firmware reading a V5 file: unknown tag → ext skipped, no
+  misalignment (same forward-compat degrade as ever).
+- **The one non-mechanical decision — NEUTRAL-extend, not zero-extend:**
+  `PhraseReadCCs` fills the morph B endpoint; the old V2 arm zero-extended (correct
+  there — masks/GRIP are 0-neutral), but STRUM/TILT are **64-biased** (center detent
+  = off). A zero-fill would make "morph toward an old-format phrase" sweep strum/tilt
+  to hard-left instead of to neutral. New `ExtCcNeutral(cc)` helper (64 for
+  0xA1/0xA3, 0 otherwise, matches `SEQ_CC_TrackInit`) extends every shorter record
+  to the live count.
+- **Headroom constraint written at the define:** V5 records persist 0xA4..0xAF as 0
+  TODAY, so any future CC assigned into the headroom must be 0-neutral (mask /
+  selector / two's-complement-nibble idiom). A 64-biased dial there would read "hard
+  left" from every record written before its birth — that shape needs a V6 bump, not
+  a headroom slot.
+- **Posture-morph:** snap list gains VOICE_INV (two's-complement nibble — raw lerp
+  crosses the +7/−8 discontinuity) and VOICE_DROP (discrete selector); STRUM/TILT
+  lerp (64-biased linear, per the OPEN_ITEMS spec). Unmapped headroom CCs in the
+  morph loop are inert (`SEQ_CC_Set` returns −2, no write, no dirty).
+- **Old-range read semantics kept (precedent):** a V3/V4 record read leaves
+  0xA0..0xAF at their in-RAM values (same as the V2 arm has always left 0x96+ alone)
+  — loading an old pattern does NOT stomp live voicing to neutral.
+- **Validation:** zero-warning build. New `test_voicing_persist.py`: pin 1 =
+  round-trip on a **freshly created session** (`V5EXT` — AUTOTEST's banks are
+  older-firmware-sized and would degrade; restores AUTOTEST in `finally`); pin 2 =
+  degrade-non-corruption on AUTOTEST (frozen range incl. SPREAD@0x9F must
+  round-trip; 0xA0+ dials must read written-or-clobbered, never a third value =
+  misaligned stride). **Full suite 256/256 = the new baseline.**
+- **Harness gotcha found by the first run (pin 1 red, everything else green):**
+  a freshly created bank is SPARSE (`SEQ_FILE_B_Create` is header-only), so the
+  first `pattern_save` to a HIGH slot must allocate the whole cluster chain up to
+  `N × pattern_size` — slot 61 ≈ 550 KB of FAT allocation, which outran the verb's
+  4 s reply timeout (`cmd 0x6d` TimeoutError; the save itself was fine — the V5EXT
+  session came up intact). Fix: first-touch writes on a fresh bank use a LOW slot
+  (extension trivial) + `timeout=30.0`. AUTOTEST never shows this because its bank
+  files are already grown. The `finally` AUTOTEST-restore held even on the failing
+  run — the other 255 stayed green.
+- Files: `seq_file_b.h` (range + headroom constraint), `seq_file_b.c` (tag, frozen
+  count, sizes, 3 read arms, write ladder, ExtCcNeutral), `seq_pattern.c` (snap
+  list), `seq_cc.h` (comment), `tests/harness/sysex.py` (CC.VOICE_*),
+  `tests/harness/board.py` (docstring), `tests/apps/seq_v4/test_voicing_persist.py`
+  (new).

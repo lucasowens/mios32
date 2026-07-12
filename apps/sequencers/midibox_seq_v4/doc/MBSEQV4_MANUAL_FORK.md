@@ -804,10 +804,13 @@ dial to its detent.
 
 ### Caveats (POC)
 
-- **Sprd saves/recalls with the pattern; Inv, Strm, Drop and Tilt are RAM-only for now**
-  (they sit above the persisted ext-CC block; the V5 block bump is queued on
-  OPEN_ITEMS). The follow-on roadmap (per-step voicing layer, GRAVITY×spread coupling)
-  lives in `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`.
+- **All five dials save/recall with the pattern (V5 ext block, 2026-07-11) — but only
+  in sessions created by V5 firmware.** Slots reserve their ext room when the
+  session/bank is created, so on an older session the save silently degrades and
+  Inv/Strm/Drop/Tilt reset to neutral on the next reboot (Sprd sits inside the older
+  block and persists everywhere). Recreate the session (SAVE → SESSIONS → NEW) to
+  upgrade its slots. The follow-on roadmap (per-step voicing layer, GRAVITY×spread
+  coupling) lives in `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`.
 - MIDI export ignores the strum stagger.
 
 ---
@@ -894,17 +897,18 @@ CCs added by the fork:
 | 0x95 | `robotize_loop_rotate` |
 | 0x9a | `tension_grip` (GRAVITY field, per track) |
 | 0x9f | `voice_spread` (chord voicing; bits 0..3 = spread, bit 7 = row bypass) |
-| 0xa0 | `voice_inv` (chord voicing inversion; RAM-only until the V5 ext bump) |
-| 0xa1 | `voice_strum` (chord voicing strum, 64-biased bipolar; RAM-only until the V5 ext bump) |
-| 0xa2 | `voice_drop` (chord voicing drop 0..3; RAM-only until the V5 ext bump) |
-| 0xa3 | `voice_tilt` (chord voicing velocity tilt, 64-biased bipolar; RAM-only until the V5 ext bump) |
+| 0xa0 | `voice_inv` (chord voicing inversion) |
+| 0xa1 | `voice_strum` (chord voicing strum, 64-biased bipolar) |
+| 0xa2 | `voice_drop` (chord voicing drop 0..3) |
+| 0xa3 | `voice_tilt` (chord voicing velocity tilt, 64-biased bipolar) |
 
 The robotize five live in the ext block (above 0x7f) and follow the upstream V4.088
 robotize CC range (0x80..0x90). The **v3 ext block** (2026-06-10) widened the persisted
-range to 0x80..0x9f, so chord-mask (0x96–0x99) and GRIP (0x9a) now save/recall; old v2
-patterns still load (the v2 byte-count is frozen, read path dispatches on tag).
-`voice_spread` (2026-07-11) took the block's last free slot, 0x9f; `voice_inv`/
-`voice_strum` sit above it and need the V5 bump to persist.
+range to 0x80..0x9f, so chord-mask (0x96–0x99) and GRIP (0x9a) save/recall; the
+**v5 ext block** (2026-07-11) widened it again to 0x80..0xaf, so the voicing dials
+(0x9f..0xa3) persist too — in slots created by V5 firmware (older slots degrade the
+record; each older byte-count is frozen and the read path dispatches on tag, so old
+patterns always load correctly).
 
 ---
 

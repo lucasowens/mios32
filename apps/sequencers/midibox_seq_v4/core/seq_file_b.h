@@ -49,14 +49,20 @@
 // 16 phrases, each a 4-group snapshot -> exactly fills a 64-pattern bank.
 #define SEQ_FILE_B_NUM_PHRASES 16
 
-// The ext-CC "posture" block carried in every track record: CC 0x80..0x9f
-// (robotize mask/probabilities, chord-mask 0x96..0x99, tension GRIP 0x9a, ...).
+// The ext-CC "posture" block carried in every track record: CC 0x80..0xaf
+// (robotize mask/probabilities, chord-mask 0x96..0x99, tension GRIP 0x9a,
+// arp 0x9d/0x9e, voicing 0x9f..0xa3, ...).
 // Public because SEQ_FILE_B_PhraseReadCCs fills exactly SEQ_FILE_B_TRK_EXT_CC_COUNT
 // bytes (the caller's cc_out must be at least that big) and the posture-morph
 // reads/writes this CC range live via SEQ_CC_Get/Set(track, _CC_FIRST + i).
+// HEADROOM CONSTRAINT: the unassigned slots (0xa4..0xaf) are already written
+// as 0 by V5 records, so any future CC assigned into them must be 0-neutral
+// (mask / selector / two's-complement-nibble idiom). A 64-biased bipolar dial
+// there would read "hard left" from every record written before its birth —
+// that shape needs a V6 bump (fresh range + neutral-extend), not a headroom slot.
 #define SEQ_FILE_B_TRK_EXT_CC_FIRST     0x80
-#define SEQ_FILE_B_TRK_EXT_CC_LAST      0x9f   // widened past GRIP (0x9a); a clean boundary with headroom
-#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)  // 32 (V3)
+#define SEQ_FILE_B_TRK_EXT_CC_LAST      0xaf   // V5: widened past voicing (0xa3); a clean boundary with headroom
+#define SEQ_FILE_B_TRK_EXT_CC_COUNT     (SEQ_FILE_B_TRK_EXT_CC_LAST - SEQ_FILE_B_TRK_EXT_CC_FIRST + 1)  // 48 (V5)
 
 
 /////////////////////////////////////////////////////////////////////////////

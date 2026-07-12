@@ -1072,9 +1072,11 @@ class Board:
     ) -> bool:
         """Persist the working group's current in-RAM pattern (all 4 tracks) to
         the (bank, pattern) slot on SD. Use to snapshot a host-built rig so it
-        survives reboot. Returns True if the write committed. The V3 ext block
-        persists CCs 0x80..0x9f, so GRIP (0x9a) and the chord-mask CCs travel
-        with the save (pinned by test_tension_persist)."""
+        survives reboot. Returns True if the write committed. The V5 ext block
+        persists CCs 0x80..0xaf, so GRIP (0x9a), the chord-mask CCs and the
+        voicing dials (0x9f..0xa3) travel with the save (pinned by
+        test_tension_persist / test_voicing_persist) — voicing only in slots
+        created by V5 firmware (older slots degrade the record to V4/V3)."""
         if not 0 <= group <= 3:
             raise ValueError(f"group out of range: {group}")
         if not 0 <= bank <= 7:

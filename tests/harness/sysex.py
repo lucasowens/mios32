@@ -297,6 +297,11 @@ class CC:
     CHORDMASK_MASK_H = 0x9C    # static Self mask, pitch classes G#..B (bits 0..3)
     ARP_MODE = 0x9D            # ARP tenant: 0=Off 1=Up 2=Down 3=UpDown 4=Random
     ARP_BUS = 0x9E             # ARP chord source: 0=Self (static mask), 1..4=bus A..D
+    VOICE_SPREAD = 0x9F        # Voicing: bits 0..3 = spread 0..12; bit 7 = row bypass
+    VOICE_INV = 0xA0           # Voicing: inversion, two's-complement nibble -8..+7
+    VOICE_STRUM = 0xA1         # Voicing: 64-biased strum (64 = off; |v-64| = ticks/voice)
+    VOICE_DROP = 0xA2          # Voicing: 0=off 1=Drop2 2=Drop3 3=Drop2&4
+    VOICE_TILT = 0xA3          # Voicing: 64-biased velocity tilt by pitch order (64 = flat)
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:

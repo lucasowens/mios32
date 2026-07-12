@@ -289,18 +289,23 @@ Adding a new small-range field: prefer a bitfield. Adding a new CC: place it in 
 
 CCs ≥ 0x80 require the per-track ext block in `seq_file_b.c` to persist. As of the
 **V3 ext-tag (2026-06-10)** the persisted range is 0x80–0x9F, so chord-mask (0x96–0x99)
-and GRIP (0x9a) now survive reboot/recall. (Before V3 the range stopped at
-`SEQ_FILE_B_TRK_EXT_CC_LAST = 0x95` and 0x96+ reset on reload — closed.)
+and GRIP (0x9a) survive reboot/recall; the **V5 ext-tag (2026-07-11)** widened it to
+0x80–0xAF, adding the voicing dials (0x9F..0xA3) + 12 headroom slots. (Headroom bytes
+are persisted as 0 — future CCs there must be 0-neutral, see the constraint note at
+`SEQ_FILE_B_TRK_EXT_CC_LAST`.)
 
 ### Extension-block format ([seq_file_b.c:45](../core/seq_file_b.c#L45))
 
 Per-track block appended after the trigger layers, within each pattern slot:
 - `tag:u8` (0x00 = no ext, 0x01 = v1 anchors only, 0x02 = v2 ext-CC, 0x03 = v3 ext-CC,
-  0x04 = **v4 = v3 payload + generator sub-block**, FEARLESS Stage B)
+  0x04 = **v4 = v3 payload + generator sub-block** (FEARLESS Stage B), 0x05 = **v5 =
+  48-byte ext-CC range 0x80..0xAF + anchors + generator sub-block**)
 - v2 body: 22 ext-CC bytes (0x80..0x95) + 64 `robotize_bar_anchors`; v3 body: **32** ext-CC
-  bytes (0x80..0x9F) + the same anchors. Read path dispatches on tag; the **v2 byte-count
-  is frozen separately** (`..._CC_COUNT_V2 = 22`) so old patterns still align — bumping
-  `..._CC_LAST` alone would have mis-read every v2 pattern's anchors.
+  bytes (0x80..0x9F) + the same anchors; v5 body: **48** ext-CC bytes (0x80..0xAF) + the
+  same anchors + the v4 generator sub-block. Read path dispatches on tag; **each older
+  byte-count is frozen separately** (`..._CC_COUNT_V2 = 22`, `..._CC_COUNT_V3 = 32` for
+  v3+v4 records) so old patterns still align — bumping `..._CC_LAST` alone would have
+  mis-read every older pattern's anchors.
 - **v4 body** = the v3 payload + a **fixed-stride generator sub-block**: 1 count byte +
   `SEQ_GENERATOR_PERSIST_SLOTS` (4) entry slots × **177 B** (9 header bytes — instrument,
   par_layer, engaged, range_min/max, rate, depth, contour, anchor_valid — + loop[64] +
@@ -308,14 +313,17 @@ Per-track block appended after the trigger layers, within each pattern slot:
   B/track** total. The stride is constant **on purpose** so `TrackRead` can index a single
   track's ext block by `slot_track × per_track_ext_size` (this field is **u16**, not u8 —
   806 truncates in a u8, caught at build by `-Woverflow`).
-- `Create` allocates room from the current (v4) size; `Write` skips ext on slots too small
-  to fit it. In practice existing banks had slack (par/trg layer data dominates
-  `pattern_size`), so the wider block fit without re-formatting. `SEQ_FILE_B_Create` is
-  **header-only** (the slot-fill loop is `#if 0`) — a created bank isn't loadable until its
-  slots are written.
-- **Per-pattern / bank totals (byte map).** `pattern_size` ≈ **8992 B** = 24-byte header +
-  4 tracks × 2242 B (per-track = 156 B `seq_file_b_track_t` + 1024 par + 256 trg + 806 v4-ext).
-  A full bank file is **~575 KB** worst case (64 × 8992 + header) but **sparse-grown** (Create
+- `Create` allocates room from the current (v5, **822 B/track**) size; `Write` degrades
+  per record on smaller slots (v5 → v4 → v3 → none — the fit ladder in `PatternWrite`).
+  **The v4→v5 step does NOT fit in v4-created banks at default track geometry** (their
+  ext room is exactly 4×806), so voicing persistence requires a session/bank created by
+  V5 firmware — unlike the v2→v3 step, where existing banks had slack.
+  `SEQ_FILE_B_Create` is **header-only** (the slot-fill loop is `#if 0`) — a created
+  bank isn't loadable until its slots are written.
+- **Per-pattern / bank totals (byte map).** v5-created `pattern_size` ≈ **9056 B** = 24-byte
+  header + 4 tracks × 2258 B (per-track = 156 B `seq_file_b_track_t` + 1024 par + 256 trg +
+  822 v5-ext); v4-era banks are 8992 B/pattern (806 ext).
+  A full bank file is **~580 KB** worst case (64 × 9056 + header) but **sparse-grown** (Create
   is header-only; slots extend on write), so a lightly-used bank (~8 slots) is ~75 KB. Copying
   a session/set therefore scales with *used* slots, not capacity. *(Supersedes the design doc's
   old "≈ 6 KB/pattern" — that was the pre-v4 figure, before the generator ext-block.)*

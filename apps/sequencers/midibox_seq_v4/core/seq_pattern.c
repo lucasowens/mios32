@@ -1004,7 +1004,7 @@ static void phrase_morph_apply(void)
     u8 changed = 0;
     u8 i;
 
-    // ---- Loop A: ext CCs 0x80..0x9f (magnitudes lerp; bitfield/mode CCs snap) ---
+    // ---- Loop A: ext CCs 0x80..0xaf (magnitudes lerp; bitfield/mode CCs snap) ---
     // The chord-context family — chordmask BUS (bus index + the Self mode bit), the
     // drum-scope bitmasks, and the Self static-mask bitmasks — are NOT magnitudes:
     // a linear lerp yields garbage pitch-class sets and bus-hopping / Self-bit
@@ -1018,6 +1018,8 @@ static void phrase_morph_apply(void)
         SEQ_CC_ARP_MODE, // discrete mode select — snap, don't lerp through intermediate modes
         SEQ_CC_ARP_BUS,  // discrete source select — snap (bus index / Self), not a magnitude
         SEQ_CC_VOICE_SPREAD, // packed byte (spread magnitude + bit-7 bypass) — a lerp corrupts the flag
+        SEQ_CC_VOICE_INV,  // two's-complement nibble — a raw lerp crosses the +7/-8 discontinuity
+        SEQ_CC_VOICE_DROP, // discrete drop-voicing selector — snap, don't walk through other drops
       };
       for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i) {
         u8 cc = SEQ_FILE_B_TRK_EXT_CC_FIRST + i;

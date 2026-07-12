@@ -61,18 +61,21 @@
 #define SEQ_FILE_B_TRK_EXT_TAG_V2       0x02  // ext CCs 0x80..0x95 + anchors
 #define SEQ_FILE_B_TRK_EXT_TAG_V3       0x03  // ext CCs 0x80..0x9f (adds chord-mask 0x96..0x99 + tension GRIP 0x9a) + anchors
 #define SEQ_FILE_B_TRK_EXT_TAG_V4       0x04  // V3 payload + generator sub-block (FEARLESS SWITCHING Stage B)
+#define SEQ_FILE_B_TRK_EXT_TAG_V5       0x05  // ext CCs 0x80..0xaf (adds voicing INV/STRUM/DROP/TILT 0xa0..0xa3 + headroom) + anchors + generator sub-block
 
 // SEQ_FILE_B_TRK_EXT_CC_FIRST / _LAST / _COUNT now live in seq_file_b.h (shared
 // with the posture-morph in seq_pattern.c — they define SEQ_FILE_B_PhraseReadCCs's
 // cc_out contract). Still visible here via the include.
-// V2 count is FROZEN: V2 files on SD hold exactly this many ext-CC bytes, so the
-// V2 read arm must keep using it even though the live range above grew. (Bumping
-// LAST without freezing this would mis-align every V2 pattern's anchors on read.)
+// Per-version counts are FROZEN: files on SD hold exactly this many ext-CC bytes
+// per track record, so each read arm must keep using its own frozen count even
+// though the live range above grew. (Bumping LAST without freezing these would
+// mis-align every older pattern's anchors on read.)
 #define SEQ_FILE_B_TRK_EXT_CC_COUNT_V2  (0x95 - 0x80 + 1)  // 22 (V2, frozen)
+#define SEQ_FILE_B_TRK_EXT_CC_COUNT_V3  (0x9f - 0x80 + 1)  // 32 (V3+V4, frozen)
 #define SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE 64    // sizeof(robotize_bar_anchors)
 #define SEQ_FILE_B_TRK_EXT_V1_SIZE      (1 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
 #define SEQ_FILE_B_TRK_EXT_V2_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT_V2 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
-#define SEQ_FILE_B_TRK_EXT_V3_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
+#define SEQ_FILE_B_TRK_EXT_V3_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT_V3 + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE)
 
 // V4 generator sub-block (FEARLESS SWITCHING Stage B — "the organism comes
 // back alive"): appended after the V3 payload. Fixed-size region — count byte
@@ -85,13 +88,16 @@
                                            + SEQ_GENERATOR_LOOP_LEN + SEQ_GENERATOR_MULT_BYTES)  // 177
 #define SEQ_FILE_B_TRK_EXT_GEN_BLOCK_SIZE (1 + SEQ_GENERATOR_PERSIST_SLOTS*SEQ_FILE_B_TRK_EXT_GEN_ENTRY_SIZE)  // 709
 #define SEQ_FILE_B_TRK_EXT_V4_SIZE      (SEQ_FILE_B_TRK_EXT_V3_SIZE + SEQ_FILE_B_TRK_EXT_GEN_BLOCK_SIZE)  // 806
+#define SEQ_FILE_B_TRK_EXT_V5_SIZE      (1 + SEQ_FILE_B_TRK_EXT_CC_COUNT + SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE \
+                                           + SEQ_FILE_B_TRK_EXT_GEN_BLOCK_SIZE)  // 822
 
-// Slots reserve room for the CURRENT (V4) ext block at create time. Banks
+// Slots reserve room for the CURRENT (V5) ext block at create time. Banks
 // created by older firmware reserved only the older sizes — the write path
-// degrades per record: V4 if the slot has room, else V3 (gen state won't
-// persist there), else no ext at all. Recreate the session/bank
-// (CMD_SESSION_CREATE / CMD_BANK_CREATE) to get V4-sized slots.
-#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V4_SIZE
+// degrades per record: V5 if the slot has room, else V4 (voicing CCs 0xa0+
+// won't persist there), else V3 (gen state won't persist either), else no
+// ext at all. Recreate the session/bank (CMD_SESSION_CREATE /
+// CMD_BANK_CREATE) to get V5-sized slots.
+#define SEQ_FILE_B_TRK_EXT_SIZE         SEQ_FILE_B_TRK_EXT_V5_SIZE
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -555,6 +561,22 @@ s32 SEQ_FILE_B_AnchorWriteAtomic(char *session)
 
 
 /////////////////////////////////////////////////////////////////////////////
+// Neutral value of an ext-block CC — used to extend an OLDER record's CC
+// bytes up to the live SEQ_FILE_B_TRK_EXT_CC_COUNT (PhraseReadCCs contract).
+// Must match the SEQ_CC_TrackInit defaults: everything in the range is
+// 0-neutral EXCEPT the 64-biased bipolar voicing dials (strum/tilt, center
+// detent = 64). A zero-fill there would read as "full strum-down / full
+// bottom-tilt" and the posture-morph would sweep voicing hard instead of
+// toward neutral when morphing to an old-format phrase.
+/////////////////////////////////////////////////////////////////////////////
+static u8 ExtCcNeutral(u8 cc)
+{
+  if( cc == SEQ_CC_VOICE_STRUM || cc == SEQ_CC_VOICE_TILT )
+    return 64;
+  return 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // reads a pattern from bank into given group
 // returns < 0 on errors (error codes are documented in seq_file.h)
 /////////////////////////////////////////////////////////////////////////////
@@ -904,7 +926,9 @@ DEBUG_MSG("Skipping Track %d\n", track);
       FILE_ReadSeek(peek_pos); // rewind regardless of what we saw
 
       u16 per_track_ext_size = 0;
-      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V5 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V5_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V4_SIZE;
       else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
@@ -924,15 +948,18 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	    u8 tag = 0;
 	    status |= FILE_ReadByte(&tag);
 
-	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
-	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // 32 (0x80..0x9f)
-	      status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
+	    if( tag == SEQ_FILE_B_TRK_EXT_TAG_V5 || tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // up to 48 (0x80..0xaf)
+	      u8 cc_count = (tag == SEQ_FILE_B_TRK_EXT_TAG_V5)
+		? SEQ_FILE_B_TRK_EXT_CC_COUNT       // 48 (0x80..0xaf)
+		: SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f); 0xa0+ keep in-RAM values
+	      status |= FILE_ReadBuffer(ext_cc_buffer, cc_count);
 	      u8 i;
-	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+	      for(i=0; i<cc_count; ++i)
 		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
 	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
-	      if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+	      if( tag != SEQ_FILE_B_TRK_EXT_TAG_V3 )
 		status |= PatternGenBlockRead(track);
 	    } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
 	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT_V2];  // 22 frozen (0x80..0x95)
@@ -1213,7 +1240,9 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
     u8 first_tag = 0;
     if( FILE_ReadByte(&first_tag) >= 0 ) {
       u16 per_track_ext_size = 0;
-      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+      if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V5 )
+	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V5_SIZE;
+      else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V4_SIZE;
       else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
 	per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
@@ -1232,16 +1261,19 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 	// corrupt/foreign file (mixed tags are never written): leave the
 	// in-RAM ext values alone
 	if( ext_status >= 0 && tag == first_tag ) {
-	  if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
-	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // 32 (0x80..0x9f)
-	    ext_status |= FILE_ReadBuffer(ext_cc_buffer, SEQ_FILE_B_TRK_EXT_CC_COUNT);
+	  if( tag == SEQ_FILE_B_TRK_EXT_TAG_V5 || tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
+	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // up to 48 (0x80..0xaf)
+	    u8 cc_count = (tag == SEQ_FILE_B_TRK_EXT_TAG_V5)
+	      ? SEQ_FILE_B_TRK_EXT_CC_COUNT       // 48 (0x80..0xaf)
+	      : SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f); 0xa0+ keep in-RAM values
+	    ext_status |= FILE_ReadBuffer(ext_cc_buffer, cc_count);
 	    if( ext_status >= 0 ) {
 	      u8 i;
-	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+	      for(i=0; i<cc_count; ++i)
 		SEQ_CC_Set(dst_track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
 	      ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
 					    SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
-	      if( ext_status >= 0 && tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+	      if( ext_status >= 0 && tag != SEQ_FILE_B_TRK_EXT_TAG_V3 )
 		ext_status |= PatternGenBlockRead(dst_track);
 	    }
 	  } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
@@ -1444,18 +1476,20 @@ s32 SEQ_FILE_B_PhraseReadTrackData(u8 bank, u8 pattern, u8 slot_track,
 
 /////////////////////////////////////////////////////////////////////////////
 // POSTURE-MORPH endpoint reader — reads ONLY one section's ext-CC block
-// (0x80..0x9f) into cc_out[SEQ_FILE_B_TRK_EXT_CC_COUNT] with NO live writes.
+// (0x80..0xaf) into cc_out[SEQ_FILE_B_TRK_EXT_CC_COUNT] with NO live writes.
 //
 // A strict read-only subset of SEQ_FILE_B_TrackRead: it skips EVERY section's
 // data (not just the ones before slot_track) to reach the ext base, then peeks
 // the shared tag and indexes slot_track's ext block directly. Reads only the
-// 32 CC bytes — never the robotize anchors, never the generator sub-block, and
+// CC bytes — never the robotize anchors, never the generator sub-block, and
 // never SEQ_CC_Set / seq_cc_trk[] / seq_par/trg. The morph lerp does the live
 // writes (via SEQ_CC_Set) so seq_cc_trk[] + the tension slot stay consistent.
 //
-// V3/V4 -> 32 CCs; V2 -> 22 CCs with cc_out[22..31] zero-extended; V1 / absent
-// / tag-mismatch -> SEQ_FILE_B_ERR_READ (the caller refuses to arm rather than
-// morph toward undefined values — phrases written by this fork are always V4).
+// V5 -> 48 CCs; V3/V4 -> 32 CCs; V2 -> 22 CCs; shorter records are NEUTRAL-
+// extended to the live count (ExtCcNeutral — NOT a zero-fill: the 64-biased
+// voicing dials are off at 64). V1 / absent / tag-mismatch ->
+// SEQ_FILE_B_ERR_READ (the caller refuses to arm rather than morph toward
+// undefined values — phrases written by this fork are always the newest tag).
 //
 // returns < 0 on errors (error codes are documented in seq_file.h)
 /////////////////////////////////////////////////////////////////////////////
@@ -1544,11 +1578,13 @@ s32 SEQ_FILE_B_PhraseReadCCs(u8 bank, u8 pattern, u8 slot_track, u8 *cc_out)
 
   // ext base: peek the shared tag, index slot_track's block, read its CC bytes
   u32 ext_base = FILE_ReadGetCurrentPosition();
-  s32 rc = SEQ_FILE_B_ERR_READ; // assume "no usable ext" until a V3/V4/V2 read lands
+  s32 rc = SEQ_FILE_B_ERR_READ; // assume "no usable ext" until a V2..V5 read lands
   u8 first_tag = 0;
   if( FILE_ReadByte(&first_tag) >= 0 ) {
     u16 per_track_ext_size = 0;
-    if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+    if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V5 )
+      per_track_ext_size = SEQ_FILE_B_TRK_EXT_V5_SIZE;
+    else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
       per_track_ext_size = SEQ_FILE_B_TRK_EXT_V4_SIZE;
     else if( first_tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
       per_track_ext_size = SEQ_FILE_B_TRK_EXT_V3_SIZE;
@@ -1563,18 +1599,25 @@ s32 SEQ_FILE_B_PhraseReadCCs(u8 bank, u8 pattern, u8 slot_track, u8 *cc_out)
       // only a tag matching first_tag may be parsed at the indexed position
       // (mixed tags are never written -> a mismatch means corruption)
       if( FILE_ReadByte(&tag) >= 0 && tag == first_tag ) {
-	if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 ) {
-	  if( FILE_ReadBuffer(cc_out, SEQ_FILE_B_TRK_EXT_CC_COUNT) >= 0 )
-	    rc = 0;
-	} else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 ) {
-	  if( FILE_ReadBuffer(cc_out, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2) >= 0 ) {
-	    u8 i;
-	    for(i=SEQ_FILE_B_TRK_EXT_CC_COUNT_V2; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
-	      cc_out[i] = 0; // zero-extend chord-mask 0x96..0x99 + GRIP 0x9a
-	    rc = 0;
-	  }
+	u8 read_count = 0;
+	if( tag == SEQ_FILE_B_TRK_EXT_TAG_V5 )
+	  read_count = SEQ_FILE_B_TRK_EXT_CC_COUNT;      // 48 (0x80..0xaf)
+	else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V4 || tag == SEQ_FILE_B_TRK_EXT_TAG_V3 )
+	  read_count = SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f)
+	else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V2 )
+	  read_count = SEQ_FILE_B_TRK_EXT_CC_COUNT_V2;   // 22 frozen (0x80..0x95)
+	// V1 (anchors only) leaves read_count 0 / rc = ERR_READ — no ext CCs to morph toward
+
+	if( read_count && FILE_ReadBuffer(cc_out, read_count) >= 0 ) {
+	  // NEUTRAL-extend an older record to the live count: the morph B
+	  // endpoint must sit at each missing dial's OFF position (64 for the
+	  // biased strum/tilt dials, 0 elsewhere), so morphing toward an
+	  // old-format phrase sweeps the newer dials to neutral, not to raw 0
+	  u8 i;
+	  for(i=read_count; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+	    cc_out[i] = ExtCcNeutral(SEQ_FILE_B_TRK_EXT_CC_FIRST + i);
+	  rc = 0;
 	}
-	// V1 (anchors only) leaves rc = ERR_READ — no ext CCs to morph toward
       }
     }
   }
@@ -1630,13 +1673,16 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
       num_t_instruments*num_t_layers*t_layer_size;
   }
 
-  // Ext-block fit arbitration, per record: V4 (gen state) if the slot has
-  // room, else degrade to V3 (today's payload — gen state won't persist),
-  // else no ext at all (pre-V2 slots). All-or-nothing per level so a record
-  // never carries mixed tags.
+  // Ext-block fit arbitration, per record: V5 (voicing CCs + gen state) if
+  // the slot has room, else degrade to V4 (voicing CCs 0xa0+ won't persist),
+  // else V3 (gen state won't persist either), else no ext at all (pre-V2
+  // slots). All-or-nothing per level so a record never carries mixed tags.
   u8 ext_tag = 0;
   u16 ext_pattern_size = 0;
-  if( base_pattern_size + (u32)num_tracks * SEQ_FILE_B_TRK_EXT_V4_SIZE <= info->header.pattern_size ) {
+  if( base_pattern_size + (u32)num_tracks * SEQ_FILE_B_TRK_EXT_V5_SIZE <= info->header.pattern_size ) {
+    ext_tag = SEQ_FILE_B_TRK_EXT_TAG_V5;
+    ext_pattern_size = num_tracks * SEQ_FILE_B_TRK_EXT_V5_SIZE;
+  } else if( base_pattern_size + (u32)num_tracks * SEQ_FILE_B_TRK_EXT_V4_SIZE <= info->header.pattern_size ) {
     ext_tag = SEQ_FILE_B_TRK_EXT_TAG_V4;
     ext_pattern_size = num_tracks * SEQ_FILE_B_TRK_EXT_V4_SIZE;
   } else if( base_pattern_size + (u32)num_tracks * SEQ_FILE_B_TRK_EXT_V3_SIZE <= info->header.pattern_size ) {
@@ -1768,16 +1814,21 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
   // bytes - the ext CCs / anchors won't persist for that pattern but no
   // overflow into the next slot.
   if( write_ext ) {
+    // a degraded (V4/V3) record carries only the frozen 32-CC payload
+    u8 write_cc_count = (ext_tag == SEQ_FILE_B_TRK_EXT_TAG_V5)
+      ? SEQ_FILE_B_TRK_EXT_CC_COUNT : SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;
+
     track = source_group * SEQ_CORE_NUM_TRACKS_PER_GROUP;
     for(track_i=0; track_i<num_tracks; ++track_i, ++track) {
       status |= FILE_WriteByte(ext_tag);
 
-      // ext CC bytes (0x80..0x9f) - robotize + chord-mask + tension GRIP CCs that
-      // fall outside the original cc[128] block. SEQ_CC_Get returns -1 for
-      // unmapped CCs; clamp to 0 so the slot is well-defined.
-      u8 cc;
-      for(cc=SEQ_FILE_B_TRK_EXT_CC_FIRST; cc<=SEQ_FILE_B_TRK_EXT_CC_LAST; ++cc) {
-	s32 cc_value = SEQ_CC_Get(track, cc);
+      // ext CC bytes (0x80..) - robotize + chord-mask + tension GRIP + arp +
+      // voicing CCs that fall outside the original cc[128] block. SEQ_CC_Get
+      // returns -1 for unmapped CCs (the V5 headroom 0xa4..0xaf); clamp to 0
+      // so the slot is well-defined.
+      u8 i;
+      for(i=0; i<write_cc_count; ++i) {
+	s32 cc_value = SEQ_CC_Get(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i);
 	if( cc_value < 0 )
 	  cc_value = 0;
 	status |= FILE_WriteByte(cc_value);
@@ -1787,8 +1838,8 @@ s32 SEQ_FILE_B_PatternWrite(char *session, u8 bank, u8 pattern, u8 source_group,
       status |= FILE_WriteBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 				 SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 
-      // V4: generator sub-block — the organism persists with its slot
-      if( ext_tag == SEQ_FILE_B_TRK_EXT_TAG_V4 )
+      // V4/V5: generator sub-block — the organism persists with its slot
+      if( ext_tag != SEQ_FILE_B_TRK_EXT_TAG_V3 )
 	status |= PatternGenBlockWrite(track);
     }
   }

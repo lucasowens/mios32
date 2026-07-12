@@ -2235,6 +2235,7 @@ there and add one line to the chronology index at the end of this section.
 - **2026-07-11 (cont. 3) — Voicing tenant: internal chord mode joins the rack** (Sprd/Inv/Strm on the Chord1/2/3 expansion, 6th emission tenant; SHIPPED by-ear GO; act 2 = GRAVITY chord-substitution APPROVED, unbuilt)
 - **2026-07-11 (cont. 4) — Act 2: chord-space GRAVITY** (TENSION substitutes the chord BYTE along the band ladder — quality collapse/tension, never re-roots; SHIPPED by-ear GO, HIL 254/254 = new baseline)
 - **2026-07-11 (cont. 5) — Ladder rung 1: Drop + Tilt dials** (Voicing row → 5 dials; expressiveness-ladder plan doc captured; A1 CC-debris HIL incident diagnosed + conftest hardened; SHIPPED by-ear GO, HIL 254/254)
+- **2026-07-11 (cont. 6) — ext-CC block V5 bump** (tag 0x05, range 0x80..0xAF: voicing dials persist; frozen V3/V4=32 count, V5→V4→V3 write ladder, PhraseReadCCs NEUTRAL-extends 64-biased dials; headroom must stay 0-neutral or it's a V6; SHIPPED, HIL 256/256 = new baseline)
 
 
 ---
