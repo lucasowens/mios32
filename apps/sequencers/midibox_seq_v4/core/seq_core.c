@@ -1828,6 +1828,39 @@ static void tension_render_range(u8 track, const seq_processor_slot_t *p,
             base[step] = tension_chord_snap(b, chord_set, bands, n_bands, gravity < 0);
         }
       }
+
+      // Rung 3 — register collapse ("collapse, not dropout" for WIDTH, §8.1):
+      // through DRONE the effective spread narrows toward close position,
+      // reaching 0 at full pull + full grip. Mirror-faithful via the rung-2
+      // VSprd layer: the collapsed OFFSET byte replaces the painted one in the
+      // render mirror, so expansion / tape / bounce all read the same narrowed
+      // voicing — no emission-time state. Continuous across ALL steps (no
+      // grip-hash gate): register is a field-wide squeeze, not a per-chord die
+      // roll — GRIP scales DEPTH instead of selecting steps. The Sprd dial is
+      // therefore a live render input on tension chord tracks: folded into
+      // render_live_sig (see the CORRECTNESS note there); dial CC writes have
+      // no slot sync of their own. Bypassed voicing (bit 7) = expansion
+      // ignores the layer anyway → pass-through.
+      if( tcc->link_par_layer_vsprd >= 0 && gravity < -48
+          && !(tcc->voice_spread & 0x80) ) {
+        u16 depth = (u16)(-(s16)gravity - 48);              // 1..16 across DRONE
+        u16 keep_num = 16*127 - depth * (u16)p->strength;   // 2032 → no collapse, 0 → unison
+        u8 dial = tcc->voice_spread & 0x0f;
+        u8 *base = &par_buf[(u32)tcc->link_par_layer_vsprd*num_p_steps];
+        u16 step;
+        for(step=step_lo; step<step_hi; ++step) {
+          u8 painted = base[step];                          // 0 = unpainted (neutral)
+          s16 eff = (s16)dial + (painted ? ((s16)painted - 64) : 0);
+          if( eff <= 0 )
+            continue;                                       // already closed
+          if( eff > 12 )
+            eff = 12;                                       // expansion's clamp, mirrored
+          s16 collapsed = (s16)(((u32)eff * keep_num + (16*127/2)) / (16*127));
+          if( collapsed == eff )
+            continue;                                       // byte-identical pass-through
+          base[step] = (u8)(64 - dial + collapsed);         // 52..76, never 0
+        }
+      }
     }
   }
 }
@@ -4432,6 +4465,12 @@ static u32 render_live_sig(u8 track, u8 *has_live)
           sig = render_sig_mix(sig, ((u32)tcc->playmode << 8) | (u32)tcc->transpose_semi);
           sig = render_sig_mix(sig, ((u32)seq_core_global_transpose_enabled << 8)
                                   | (u32)tcc->busasg.bus);
+          // Rung 3: the register collapse composes against the Sprd dial
+          // (value + bypass bit) and writes through the VSprd layer link —
+          // both live inputs of the TENSION render on chord tracks, and the
+          // voicing dial CCs have NO slot sync (emission-pure before rung 3).
+          sig = render_sig_mix(sig, ((u32)tcc->voice_spread << 8)
+                                  | (u32)(u8)tcc->link_par_layer_vsprd);
         }
         break;
 

@@ -2238,6 +2238,8 @@ there and add one line to the chronology index at the end of this section.
 - **2026-07-11 (cont. 6) — ext-CC block V5 bump** (tag 0x05, range 0x80..0xAF: voicing dials persist; frozen V3/V4=32 count, V5→V4→V3 write ladder, PhraseReadCCs NEUTRAL-extends 64-biased dials; headroom must stay 0-neutral or it's a V6; SHIPPED, HIL 256/256 = new baseline)
 - **2026-07-11 (cont. 7) — Ladder rung 2: per-step voicing par layers** (VSprd/VInv/VStrm/VTilt types 21..24, thin 64-biased OFFSET layers on the dials, 0=unpainted; e→strum now precomputed-tick u16; rung-3 render-write unlock in place; BUILT zero-warning, flash+HIL+by-ear pending)
 - **2026-07-12 — Rung-2 boot hard-fault postmortem** (u16 strum widening inflated the [83] layer_events stack arrays +332 B → task-stack overflow into ucHeap neighbors, PC=0 at boot; strum back to u8 rank + sizeof==8 guard, eff ticks/rank composed at emission; cap_snap → CCM (+5.5 KB main-RAM tail); ld stack fence 0x100→0x400; FIXED, flash pending)
+- **2026-07-12 (cont.) — Rung-2 pins red→green + by-ear GO** (6/6 red = A3 1-par-layer geometry trap, not firmware — pins provision via track_note_init; track_par_set verb now propagates rc; LCD `%+d` strike 3 → SEQ_LCD_PrintSigned; **GO, HIL 262/262 = new baseline**)
+- **2026-07-12 (cont. 2) — Ladder rung 3: GRAVITY × Voicing register collapse** (TENSION render-writes collapsed VSprd offsets through DRONE — mirror-faithful via rung 2, emission route not built; continuous field-wide squeeze, GRIP scales depth not step selection; VSprd layer = per-track opt-in; Sprd dial joins render_live_sig; SHIPPED by-ear GO, HIL 268/268 = new baseline)
 
 
 ---

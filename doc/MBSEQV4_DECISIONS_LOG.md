@@ -2334,3 +2334,51 @@ push expressiveness.
   SEQ_LCD_PrintSigned (hand-emitted sign, fixed 4-char cell). Hex 20f1492c.
 - **OUTCOME: by-ear GO 2026-07-12** (dials + painted offsets + display verified on
   device) — **full suite 262/262 single-pass on hex 20f1492c = the new baseline.**
+
+**2026-07-12 (cont. 2) — Ladder rung 3: GRAVITY × Voicing register collapse (BUILT, flash + HIL + by-ear pending)**
+- Deep pull narrows WHAT the chord is (act 2, byte substitution); rung 3 narrows
+  HOW WIDE it sits: through DRONE (−49..−64) the TENSION render pass scales each
+  step's **effective spread** (Sprd dial + painted VSprd offset, expansion-clamped
+  0..12) toward close position and writes the collapsed OFFSET byte back into the
+  render mirror's VSprd layer. Full pull + full grip = spread 0.
+- **Route: via rung 2, as the ladder plan preferred** — a render write, so
+  expansion / tape / bounce all read the same narrowed voicing. The interim
+  emission route (scale at expansion) stays UNBUILT: it would be invisible to
+  OutputActive (§3 faithfulness class the fork is retiring).
+- **Continuous, not hash-gated:** register is a field-wide squeeze — GRIP scales
+  DEPTH (`keep = 1 − depth×grip/2032`) instead of selecting steps; the grip hash
+  keeps selecting which chord BYTES substitute. Deliberate: at partial grip
+  mid-DRONE the ungripped (still-tense, still-wide) chords narrow too — that's
+  where the musical value lives, since at full pull + full grip the byte pass
+  already lands on 1-voice Root entries where spread is moot anyway.
+- Exact math (pinned): `depth = −g − 48` (1..16); `collapsed = (eff×(2032 −
+  depth×grip) + 1016) / 2032` (round-to-nearest, ties down); write `64 − dial +
+  collapsed` (range 52..76 — never 0 = unpainted); **write only when collapsed ≠
+  eff** (byte-identical pass-through at zone entry / shallow depth / closed
+  voicings — unpainted 0 stays 0). Zero new state, zero RAM.
+- **Scope gates:** chord layer + VSprd layer + playmode ≠ Arp (A8 fence) +
+  voicing not bypassed (Sprd bit 7) + pull deeper than −48. **No VSprd layer =
+  no collapse** — the coupling is opt-in per track via the rung-2 EVENT-page
+  layer assignment.
+- **Durable rule (new live sig input):** the Sprd dial byte (value + bypass bit)
+  and the VSprd layer link are folded into render_live_sig's TENSION chord-track
+  branch. The voicing dial CCs have NO slot sync (emission-pure before rung 3),
+  so the sig fold is the ONLY thing that re-renders the collapse on a dial turn
+  — regression-pinned by `test_dial_move_rerenders_collapse` (transport RUNNING:
+  the sig lives in the tick prologue, so a STOPPED dial turn is structurally
+  invisible until the first tick of the next PLAY — same platform class as a
+  stopped held-chord change; the first pin version tested it stopped and
+  correctly failed).
+- Pins: `test_tension_voicing.py` (6, mirror-exact, offline): zone fencing
+  (detent / −48 / push all byte-identical), full-pull close (all 52), exact ramp
+  math composed onto painted offsets, grip-scales-depth, closed-voicing writes
+  nothing, dial-move re-render. Fixture provisions its own 4-par-layer geometry
+  (the A3 1-par-layer trap from the rung-2 postmortem).
+- Validation: zero-warning rebuild; RAM map unchanged (__ram_end 0x2001cc48 /
+  __ram_end_ccm 0x1000fa48).
+- **OUTCOME: by-ear GO 2026-07-12** (user: GRAVITY sweep through DRONE on a
+  gripped chord track with a VSprd layer) — **full suite 268/268 single-pass
+  (8:37) = the new baseline** (6 new pins; the dial-move pin first ran stopped,
+  failed correctly, and now pins the tick-prologue mechanism while playing).
+- Files: `seq_core.c` (tension_render_range rung-3 block; render_live_sig fold),
+  `tests/apps/seq_v4/test_tension_voicing.py`, ladder plan doc + manual updated.

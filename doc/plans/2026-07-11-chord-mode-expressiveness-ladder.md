@@ -47,18 +47,20 @@ render pass can write them mirror-faithfully. Pins: `test_voicing_steps.py`
 strum stagger both paths, tilt ramp). Outcome owned by DECISIONS_LOG
 2026-07-11 cont. 7.
 
-## Rung 3 — GRAVITY × Voicing coupling ("collapse, not dropout" for register)
+## Rung 3 — GRAVITY × Voicing coupling — SHIPPED, by-ear GO 2026-07-12 (HIL 268/268)
 
 Deep pull narrows *what* the chord is (act 2) — this rung narrows *how wide it sits*:
 effective spread scales down through DRONE, toward unison at full pull.
 
-- **Preferred route: via rung 2** (a render pass writes the collapsed spread into the
-  voicing layer → mirror-faithful).
-- **Interim emission route** (if built before rung 2): scale spread by
-  f(gravity, grip) at expansion. Caveat to weigh: gravity is live GLOBAL state, so
-  the emission result isn't in the mirror — same faithfulness class as legacy FTS on
-  chord tracks, i.e. the thing §3 tries to retire. Grip resets on bounce (frozen
-  copies don't re-collapse), so it's *tape-faithful*, not *mirror-faithful*.
+Built on the **preferred route (via rung 2)**: the TENSION render pass writes the
+collapsed spread OFFSET into the mirror's VSprd layer — expansion/tape/bounce all
+read the same narrowed voicing. The interim emission route stays unbuilt. Settled
+shape (details + exact math in DECISIONS_LOG 2026-07-12 cont. 2, which owns the
+outcome): DRONE-only ramp (−49..−64 → keep 1→0), **continuous across all steps**
+(GRIP scales depth; the grip hash keeps gating only the byte substitution),
+**VSprd layer = per-track opt-in** (no layer, no collapse), Sprd dial folded into
+render_live_sig (new live input), write-only-on-change pass-through. Pins:
+`test_tension_voicing.py` (6).
 
 ## Rung 4 — Ctrl-layer legibility for the voicing CCs — SUPERSEDED by rung 2
 

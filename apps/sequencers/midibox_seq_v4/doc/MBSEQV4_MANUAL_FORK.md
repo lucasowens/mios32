@@ -798,6 +798,13 @@ dial to its detent.
 - **GRAVITY composes upstream:** on a gripped chord track the Tension field substitutes
   the chord itself (see the Tension section's *quality substitution*); the voicing dials
   then shape whatever chord the field chose.
+- **Deep pull also narrows the register** (rung 3): if the track has a **VSprd layer**
+  assigned, the field writes a collapsed spread offset into it through the DRONE zone —
+  at full pull + full GRIP the voicing closes completely ("collapse, not dropout" for
+  width). It's a continuous squeeze across the whole track (GRIP sets how deep, not
+  which steps), and it lands in the step data, so captures freeze the narrowed voicing
+  as heard. **No VSprd layer = no collapse** — assigning the layer is how a track opts
+  in.
 
 ### Per-step voicing (VSprd · VInv · VStrm · VTilt layers)
 
@@ -818,8 +825,8 @@ ends (`VStrm` on the last step), accent-shape inside the chord (`VTilt`).
   chord expansion; muting the layer (MUTE page) silences its offsets.
 - **Capture/bounce-safe by construction:** the offsets are step data in the pattern —
   preserved on bounce like the dials, and because they live in the render buffer,
-  future render processors (GRAVITY register-collapse, LFO→spread) can write them
-  and stay mirror-faithful.
+  render processors can write them and stay mirror-faithful (GRAVITY's register
+  collapse does exactly this; LFO→spread could next).
 - Per-step values persist with the pattern like any parameter layer — no V5-session
   caveat here.
 - Double-tap row bypass kills the offsets along with the dials.
@@ -831,8 +838,8 @@ ends (`VStrm` on the last step), accent-shape inside the chord (`VTilt`).
   session/bank is created, so on an older session the save silently degrades and
   Inv/Strm/Drop/Tilt reset to neutral on the next reboot (Sprd sits inside the older
   block and persists everywhere). Recreate the session (SAVE → SESSIONS → NEW) to
-  upgrade its slots. The follow-on roadmap (per-step voicing layer, GRAVITY×spread
-  coupling) lives in `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`.
+  upgrade its slots. The remaining ladder roadmap (strum in MIDI export) lives in
+  `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`.
 - MIDI export ignores the strum stagger.
 
 ---
