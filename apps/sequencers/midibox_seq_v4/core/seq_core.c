@@ -2633,7 +2633,12 @@ typedef struct {
   u8               trg_src[SEQ_TRG_MAX_BYTES];  // src source trg
 } seq_core_cap_snapshot_t;
 
-static seq_core_cap_snapshot_t seq_core_cap_snap; // main SRAM (~4.8 KB)
+// CCM-placed (2026-07-12): main SRAM's top-of-bss is the MSP/ISR stack region
+// (_estack grows DOWN into it — §A5); this fork's bss growth squeezed the
+// margin to ~408 B and the ISR stack corrupted the top-of-RAM statics
+// (__sf/sysex_buffer/xUIPSemaphore → boot hard fault at PC=0). The snapshot is
+// task-context memcpy state, never DMA — the exact profile CCM is for.
+static seq_core_cap_snapshot_t CCM_SECTION seq_core_cap_snap; // ~5.6 KB
 
 // Materialize-sink params (the re-sim's MIDI-out hook quantizes into dst).
 static u8  capspan_src, capspan_dst;
@@ -6042,17 +6047,32 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
 
 	    // chord-voicing STRUM (fork): per-voice tick stagger for chord-layer
 	    // notes. e->strum carries the voice's direction-resolved pitch rank
-	    // (set by the chord expansion); the Strm dial's magnitude is ticks per
-	    // rank. ONLY chord par layers ever set e->strum — every other producer
-	    // leaves it undefined — so gate on the layer type before reading it
-	    // (drum tracks use lay_const differently; gate event_mode first).
+	    // (kept u8 — the event struct sizes the [83] stack arrays on tight
+	    // task stacks, 2026-07-12 postmortem); the effective ticks-per-rank
+	    // is composed HERE from the dial + the per-step VStrm offset layer.
+	    // Same tcc/mirror reads the expansion used in this same tick, so the
+	    // rank direction and the magnitude stay consistent. ONLY chord par
+	    // layers ever set e->strum — every other producer leaves it undefined
+	    // — so gate on the layer type before reading it (drum tracks use
+	    // lay_const differently; gate event_mode first).
 	    u32 strum_ofs = 0;
-	    if( tcc->voice_strum != 64 && !(tcc->voice_spread & 0x80)
+	    if( (tcc->voice_strum != 64 || tcc->link_par_layer_vstrm >= 0)
+		&& !(tcc->voice_spread & 0x80)
 		&& p->type == NoteOn && tcc->event_mode != SEQ_EVENT_MODE_Drum ) {
 	      seq_par_layer_type_t lt = (seq_par_layer_type_t)tcc->lay_const[e->layer_tag & 0x0f];
 	      if( lt == SEQ_PAR_Type_Chord1 || lt == SEQ_PAR_Type_Chord2 || lt == SEQ_PAR_Type_Chord3 ) {
-		u8 mag = (tcc->voice_strum > 64) ? (tcc->voice_strum - 64) : (64 - tcc->voice_strum);
-		strum_ofs = (u32)e->strum * mag;
+		s16 eff = (s16)tcc->voice_strum;
+		s8 vl = tcc->link_par_layer_vstrm;
+		if( vl >= 0 && !((t->layer_muted | t->layer_muted_from_midi) & (1 << vl)) ) {
+		  u8 vval = SEQ_PAR_Get(track, t->step, vl, 0);
+		  if( vval )
+		    eff += (s16)vval - 64;
+		}
+		if( eff < 0 ) eff = 0; else if( eff > 127 ) eff = 127;
+		if( eff != 64 ) {
+		  u8 mag = (eff > 64) ? (u8)(eff - 64) : (u8)(64 - eff);
+		  strum_ofs = (u32)e->strum * mag;
+		}
 	      }
 	    }
 

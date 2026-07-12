@@ -75,6 +75,10 @@ static const char seq_par_type_names[SEQ_PAR_NUM_TYPES][6] = {
   "Chrd3", // 18
   "Ctrl ",  // 19
   "WayPt", // 20
+  "VSprd", // 21
+  "VInv ", // 22
+  "VStrm", // 23
+  "VTilt", // 24
 };
 
 static const u8 seq_par_map[SEQ_PAR_NUM_TYPES] = { // allows to change the order for the UI selection
@@ -99,6 +103,10 @@ static const u8 seq_par_map[SEQ_PAR_NUM_TYPES] = { // allows to change the order
   SEQ_PAR_Type_Scale,
   SEQ_PAR_Type_Ctrl,
   SEQ_PAR_Type_Waypoint,
+  SEQ_PAR_Type_VSprd,
+  SEQ_PAR_Type_VInv,
+  SEQ_PAR_Type_VStrm,
+  SEQ_PAR_Type_VTilt,
 };
 
 static const u8 seq_par_default_value[SEQ_PAR_NUM_TYPES] = {
@@ -123,6 +131,10 @@ static const u8 seq_par_default_value[SEQ_PAR_NUM_TYPES] = {
   0x01, // Chord3: 1
   0x00, // Ctrl
   0x00, // Waypoint: off (0 = not on the path)
+  64,   // VSprd: neutral offset (bipolar center detent)
+  64,   // VInv: neutral offset
+  64,   // VStrm: neutral offset
+  64,   // VTilt: neutral offset
 };
 
 static const u8 seq_par_max_value[SEQ_PAR_NUM_TYPES] = {
@@ -147,6 +159,10 @@ static const u8 seq_par_max_value[SEQ_PAR_NUM_TYPES] = {
   0x7f, // Chord3
   0x80, // Ctrl
   0x7f, // Waypoint: visit-order 0..127
+  0x7f, // VSprd: 64-biased offset
+  0x7f, // VInv: 64-biased offset
+  0x7f, // VStrm: 64-biased offset
+  0x7f, // VTilt: 64-biased offset
 };
 
 

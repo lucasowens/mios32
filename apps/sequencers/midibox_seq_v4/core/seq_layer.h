@@ -31,8 +31,17 @@ typedef struct {
   // its chord, 0 = first to sound). ONLY set by the chord-layer expansion; every
   // other producer leaves it undefined — consumers must gate on the layer type
   // (SEQ_PAR_Type_Chord1/2/3) before reading it. Fits the struct's padding byte.
+  // MUST STAY u8: this struct sizes the [83] layer_events stack arrays on tight
+  // task stacks — widening it to u16 inflated them by 332 bytes and blew the
+  // emission/UI/record task stacks (2026-07-12 boot hard-fault postmortem). The
+  // effective ticks-per-rank (dial + per-step VStrm offset) is composed at
+  // emission instead, from the same tick's tcc/mirror state.
   u8                    strum;
 } seq_layer_evnt_t;
+
+// Loud guard for the constraint above: the [83] layer_events stack arrays make
+// every byte of this struct cost 83 bytes of task stack per call frame.
+typedef u8 _seq_layer_evnt_size_guard[(sizeof(seq_layer_evnt_t) == 8) ? 1 : -1];
 
 
 typedef enum {

@@ -360,6 +360,10 @@ typedef struct {
   s8 link_par_layer_nth2;        // parameter layer which stores nth2 value (-1 if not assigned)
   s8 link_par_layer_root;        // parameter layer which stores root value (-1 if not assigned)
   s8 link_par_layer_scale;       // parameter layer which stores scale value (-1 if not assigned)
+  s8 link_par_layer_vsprd;       // parameter layer which stores the voicing spread offset (-1 if not assigned)
+  s8 link_par_layer_vinv;        // parameter layer which stores the voicing inversion offset (-1 if not assigned)
+  s8 link_par_layer_vstrm;       // parameter layer which stores the voicing strum offset (-1 if not assigned)
+  s8 link_par_layer_vtilt;       // parameter layer which stores the voicing tilt offset (-1 if not assigned)
 } seq_cc_trk_t;
 
 

@@ -43,8 +43,15 @@ PROVIDE ( _Stack_Init = __Stack_Init ) ;
 
 /*
 There will be a link error if there is not this amount of RAM free at the end.
+
+Raised 0x100 -> 0x400 (2026-07-12): this tail IS the MSP/ISR stack (_estack =
+top of RAM grows down into it). At a ~408-byte margin the ISR stack overran
+the top of .bss at boot (corrupted __sf's stdio function pointers -> hard
+fault at PC=0, plus sysex_buffer/xUIPSemaphore -> "SD Card not found" and
+freezes). 0x400 makes any build that squeezes the margin below 1 KB fail at
+link time instead of corrupting RAM at runtime.
 */
-_Minimum_Stack_Size = 0x100 ;
+_Minimum_Stack_Size = 0x400 ;
 
 
 /******************************************************************************/

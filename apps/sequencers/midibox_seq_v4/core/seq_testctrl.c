@@ -1023,9 +1023,13 @@ static void cmd_track_par_set(mios32_midi_port_t port, const u8 *payload, u8 ple
   reply[2] = instr;
   reply[3] = step;
   reply[4] = value;
-  SEQ_PAR_Set(track, step, layer, instr, value);
+  // Propagate SEQ_PAR_Set's verdict (2026-07-12): the always-OK reply masked
+  // out-of-geometry writes (layer >= num_p_layers silently no-ops) and cost a
+  // hardware debug session — the rung-2 pins painted a V* layer A3's 1-layer
+  // par geometry doesn't have and every reply said "set".
+  s32 rc = SEQ_PAR_Set(track, step, layer, instr, value);
   seq_ui_display_update_req = 1;
-  reply[5] = 0x01;
+  reply[5] = (rc >= 0) ? 0x01 : 0x02;
   send_reply(port, CMD_TRACK_PAR_SET, reply, sizeof(reply));
 }
 

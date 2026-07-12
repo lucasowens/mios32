@@ -929,6 +929,16 @@ s32 SEQ_LCD_PrintLayerValue(u8 track, u8 par_layer, u8 par_value)
       SEQ_LCD_PrintFormattedString("%3d ", par_value);
     break;
 
+  case SEQ_PAR_Type_VSprd: // per-step voicing offsets: 64-biased bipolar,
+  case SEQ_PAR_Type_VInv:  // 0 = unpainted (neutral, shown as a dot)
+  case SEQ_PAR_Type_VStrm:
+  case SEQ_PAR_Type_VTilt:
+    if( par_value == 0 )
+      SEQ_LCD_PrintString(" .  ");
+    else
+      SEQ_LCD_PrintSigned((s32)par_value - 64); // no '+' flag in the LCD vsprintf!
+    break;
+
   default:
     SEQ_LCD_PrintString("????");
     break;
@@ -1117,6 +1127,18 @@ s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 s
       SEQ_LCD_PrintFormattedString("%3d", value);
       SEQ_LCD_PrintVBar(value >> 4);
     }
+  } break;
+
+  case SEQ_PAR_Type_VSprd:
+  case SEQ_PAR_Type_VInv:
+  case SEQ_PAR_Type_VStrm:
+  case SEQ_PAR_Type_VTilt: {
+    // per-step voicing offsets: 64-biased bipolar, 0 = unpainted (neutral)
+    u8 value = SEQ_PAR_Get(track, step, par_layer, instrument);
+    if( value == 0 )
+      SEQ_LCD_PrintString("  . ");
+    else
+      SEQ_LCD_PrintSigned((s32)value - 64); // no '+' flag in the LCD vsprintf!
   } break;
 
   default:

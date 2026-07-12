@@ -435,7 +435,7 @@ better satisfies the band. Grip the track and sweep:
   DRONE away from the field root collapses as far as the table allows.)
 
 The substituted chord's **name shows on the EDIT page** (the mirror holds what
-sounds), captures re-expand it faithfully, and the [Chord Voicing](#chord-voicing-sprd--inv--strm)
+sounds), captures re-expand it faithfully, and the [Chord Voicing](#chord-voicing-sprd--inv--drop--strm--tilt)
 dials shape whatever chord the field chose — sweep GRAVITY and Sprd together for
 harmony and register moving on one gesture.
 
@@ -765,7 +765,7 @@ the path, in step order — handy for a quick try.)*
 
 ---
 
-## Chord Voicing (Sprd · Inv · Strm)
+## Chord Voicing (Sprd · Inv · Drop · Strm · Tilt)
 
 The **Voicing** rack row (LIVE → PROC, 13th B-row key) re-voices the **internal chord
 mode** — tracks whose steps hold a chord from the built-in tables (a **Chord1/2/3
@@ -795,12 +795,34 @@ dial to its detent.
 - **Transpose / force-to-scale still apply** after voicing; octave moves are
   scale-neutral, so FTS never fights the spread.
 - **Phrase morph** lerps Strm smoothly and snaps Sprd (it carries the bypass flag).
-- **Per-step modulation, today:** the dials are ordinary track CCs (`0x9F/0xA0/0xA1`), so
-  a self-bus **Ctrl layer** can paint spread or inversion per step (raw values — no unit
-  decode yet).
 - **GRAVITY composes upstream:** on a gripped chord track the Tension field substitutes
   the chord itself (see the Tension section's *quality substitution*); the voicing dials
   then shape whatever chord the field chose.
+
+### Per-step voicing (VSprd · VInv · VStrm · VTilt layers)
+
+Any of the four sweepable dials can also be **painted per step**: assign a parameter
+layer (EVENT page, like any layer type) to **VSprd**, **VInv**, **VStrm** or **VTilt**
+and each step now carries a bipolar **offset on the dial** —
+`effective = dial + step`, clamped to the dial's range. The dial stays the
+performance macro (sweeping it still moves the whole track); the layer adds the
+per-step contour on top. A step showing `.` is **unpainted** (pure pass-through);
+painted steps read `+2` / `-3` on the EDIT page. Newly assigned layers preset to
+` 0` (painted-neutral — nudge from there).
+
+Musical sketches: widen only the downbeat (`VSprd +3` on step 1), walk the bass
+under a static chord byte (`VInv` −1/−2 across the bar), strum only the phrase
+ends (`VStrm` on the last step), accent-shape inside the chord (`VTilt`).
+
+- The layers emit **no MIDI** of their own and are ignored by everything except the
+  chord expansion; muting the layer (MUTE page) silences its offsets.
+- **Capture/bounce-safe by construction:** the offsets are step data in the pattern —
+  preserved on bounce like the dials, and because they live in the render buffer,
+  future render processors (GRAVITY register-collapse, LFO→spread) can write them
+  and stay mirror-faithful.
+- Per-step values persist with the pattern like any parameter layer — no V5-session
+  caveat here.
+- Double-tap row bypass kills the offsets along with the dials.
 
 ### Caveats (POC)
 

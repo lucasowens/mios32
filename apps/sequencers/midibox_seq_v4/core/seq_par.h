@@ -55,6 +55,15 @@ typedef enum {
   SEQ_PAR_Type_Chord3=18,
   SEQ_PAR_Type_Ctrl=19,
   SEQ_PAR_Type_Waypoint=20, // POC: per-step value = visit-order for Waypoint direction modes (0 = not on the path); emits no MIDI
+  // per-step voicing OFFSET layers (expressiveness ladder rung 2): 64-biased
+  // bipolar, composed onto the track voicing dial at chord expansion
+  // (eff = clamp(dial + step - 64)). 0 = unpainted (treated as neutral, shown
+  // as a dot). Emit no MIDI; live in the render mirror, so render processors
+  // may write them (bounce-faithful by construction).
+  SEQ_PAR_Type_VSprd=21,
+  SEQ_PAR_Type_VInv=22,
+  SEQ_PAR_Type_VStrm=23,
+  SEQ_PAR_Type_VTilt=24,
   SEQ_PAR_NUM_TYPES
 } seq_par_layer_type_t;
 

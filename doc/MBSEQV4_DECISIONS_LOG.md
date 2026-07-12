@@ -2216,3 +2216,121 @@ push expressiveness.
   list), `seq_cc.h` (comment), `tests/harness/sysex.py` (CC.VOICE_*),
   `tests/harness/board.py` (docstring), `tests/apps/seq_v4/test_voicing_persist.py`
   (new).
+
+**2026-07-11 (cont. 7) — Ladder rung 2: per-step voicing par layers (BUILT, zero-warning; flash + HIL + by-ear pending)**
+- **What:** the four sweepable voicing dials become paintable per step via four new
+  thin par-layer types `SEQ_PAR_Type_VSprd/VInv/VStrm/VTilt` (21..24) — one
+  64-biased bipolar byte/step, **0 = unpainted (neutral, shown as `.`)**, composed
+  onto the dial at chord expansion: `eff = clamp(dial + step − 64)` (Sprd 0..12,
+  Inv −8..+7, Strm/Tilt 0..127). Emit no MIDI (Waypoint precedent, no `default:` in
+  the GetEvents switch = silent for free); muted offset layer reads neutral;
+  Drop stays dial-only (discrete selector, not a ramp).
+- **Forks settled (user decision, AskUserQuestion):** thin layers over the packed
+  spread-nibble+inv-nibble byte (encoder inc/dec would carry across nibbles, display
+  would need a 2-field decode, rung-3 scalar writes would be nibble RMW); **OFFSET
+  over OVERRIDE** (dial stays the performance macro, layer = automation contour —
+  override would kill the macro sweep wherever painted); **all four params** get a
+  layer (not just the Sprd+Inv core pair).
+- **The rung-3 unlock, now real:** the layers are ordinary par bytes in the render
+  mirror — a render pass (GRAVITY register-collapse, LFO→spread) can WRITE them and
+  the result is bounce-faithful by construction. That was the whole point of making
+  voicing a PAR LAYER instead of more emission coupling.
+- **Mechanical consequence worth remembering:** emission used to compute the strum
+  stagger as `e->strum(rank) × |dial−64|` — a per-step VStrm offset can't reach that
+  without riding the event. `seq_layer_evnt_t.strum` widened u8→u16 and now carries
+  the **precomputed tick offset** (direction-resolved rank × eff ticks/rank); the
+  emission block gates on `e->strum != 0` + the existing chord-layer-type check and
+  no longer re-reads the dial. Only two touch points existed (producer
+  seq_layer.c chord case, consumer seq_core.c pre-ScheduleEvent block).
+- **Grammar note:** 64-biased-bipolar-at-center-detent IS the processor-dial rule
+  applied to a layer; preset-fill on EVENT-page type confirm = painted-neutral 64,
+  raw/foreign 0 bytes = unpainted pass-through (defensive: fresh par memory is
+  memset-0). Bounce: V* layers PRESERVED by ResetGenerativeForBounce (deterministic
+  SHAPING like the dials — same byte+dials+offsets re-expand identically). Persistence
+  free (ordinary par layers in the bank file — none of the V5 ext-block ceremony).
+- **Encoder speed:** V* deliberately NOT in the fast-encoder type list (useful range
+  is ±12; slow default is right).
+- **Validation so far:** zero-warning build; new `test_voicing_steps.py` (6 pins:
+  VSprd dial≡layer set-equivalence, offset-composes-not-overrides (dial 2 + layer +1
+  ≡ dial 3), unpainted=pass-through + big-offset clamps to dial ceiling, VInv
+  dial≡layer, VStrm staggers via dial-only (guards the emission refactor) AND
+  layer-only, VTilt velocity ramp). **Firmware not yet flashed** — suite run and
+  by-ear GO happen after upload; ladder plan doc updated (rung 2 BUILT, rung 4
+  SUPERSEDED — the V* layers are the legible per-step surface).
+- Files: `seq_par.h/.c` (types, names, UI map, defaults/max), `seq_cc.h/.c` (4 link
+  fields + LinkUpdate + bounce-preserve comment), `seq_layer.h` (strum u16),
+  `seq_layer.c` (offset read + eff composition + precomputed strum), `seq_core.c`
+  (emission strum block), `seq_lcd.c` (2 display cases), MANUAL_FORK (per-step
+  voicing section, heading now names all 5 dials), ladder plan doc,
+  `tests/apps/seq_v4/test_voicing_steps.py` (new).
+
+**2026-07-12 — Rung-2 boot hard-fault postmortem: task-stack overflow via event-struct widening (FIXED, rebuilt; flash pending)**
+- **Symptom:** first flash of rung 2 hard-faulted at boot with PC=0x00000000 during
+  the SD phase ("SD Card not found" in the debug stream, garbage on the right LCD);
+  a second boot loaded fully then froze. Reproduced identically after a clean
+  re-upload → not transit corruption (the 2026-06-11 md5 trick proved the hex fine).
+- **Root cause:** cont. 7 widened `seq_layer_evnt_t.strum` u8→u16 so the strum tick
+  offset could ride the event. That grew the struct 8→12 bytes (alignment), and the
+  struct sizes the **`layer_events[83]` stack arrays** (MBSEQV4P `GetEventsPlus`
+  emission path, `GetEvntOfLayer` UI/LCD path, seq_record) — **+332 bytes of stack
+  per frame** on task stacks tuned to 1000–2100 bytes. FreeRTOS task stacks live in
+  `ucHeap`, so the overflow smashed neighboring TCBs/semaphores → context switch
+  into garbage (PC=0), file task death ("SD Card not found"), boot-to-boot symptom
+  roulette. Dead-end theories worth remembering: transit corruption (ruled out by
+  clean re-flash), stale incremental objects (.d deps were fine), MSP/ISR-stack
+  starvation (the top-of-RAM gap was ~8.6 KB — arithmetic said no).
+- **Fix (three parts):**
+  1. `strum` reverted to **u8 rank** + compile-time size guard
+     (`_seq_layer_evnt_size_guard` pins sizeof==8; every byte of that struct costs
+     83 bytes of task stack per frame). The effective ticks-per-rank (dial +
+     per-step VStrm offset, muted layer = neutral) is now composed **at emission**
+     from the same tick's tcc/mirror state — semantics identical to the u16 design,
+     zero footprint anywhere. Cheap gate: `voice_strum != 64 || link vstrm >= 0`.
+  2. `seq_core_cap_snap` (~5.6 KB re-sim snapshot, pure task-context memcpy state,
+     never DMA) moved to **CCM** — main-RAM tail gap grows 8.8 KB → 14.3 KB; CCM
+     headroom left: 1464 bytes (watch it: next CCM tenant needs to check).
+  3. Linker `_Minimum_Stack_Size` 0x100 → **0x400**: the `._usrstack` check section
+     is the only fence between bss growth and the MSP region — now a sub-1 KB tail
+     fails at link time instead of corrupting at runtime. (Guards the *main* stack
+     tail, NOT the FreeRTOS task stacks that actually blew here — those have no
+     static guard; the sizeof pin is the defense for this class.)
+- **Durable rule:** anything that grows `seq_layer_evnt_t`, adds big locals to the
+  GetEvents/GetEventsPlus call chain, or fattens hot-path stack frames is a
+  task-stack budget change on a ~1.4 KB budget — treat like an ISR-context change,
+  not an ordinary struct edit.
+- **Validation:** zero-warning rebuild (uip pair aside), hex 63b06a25…; RAM map
+  verified (__ram_end 0x2001cc48, __ram_end_ccm 0x1000fa48). Flash + HIL + by-ear
+  still pending (cont. 7 gates unchanged). Known-good V5 hex staged from 5d8ca867
+  as fallback during diagnosis.
+- Files: `seq_layer.h` (u8 + guard), `seq_layer.c` (rank, comments), `seq_core.c`
+  (emission-side eff composition; cap_snap → CCM_SECTION),
+  `etc/ld/STM32F4xx/STM32F407VG.ld` (stack fence 0x400).
+
+**2026-07-12 (cont.) — Rung-2 pins: 6/6 red → geometry, not firmware (FIXED, 6/6 green)**
+- After the hard-fault fix flashed clean: baseline 256/256 green, all 6 new
+  voicing-steps pins red with a total per-step no-op. Live probe: layer types
+  stored (cc readback 21), chord byte reached the mirror, painted VSprd byte
+  read 0 even post-render.
+- **Root cause — the test, not the feature:** AUTOTEST A3 track 0 has a
+  **1-par-layer geometry**. Painting "layer B" hit SEQ_PAR_Set's bounds reject;
+  `SEQ_CC_LinkUpdate` correctly scans only real layers (the type in
+  `lay_const[1]` is inert config debris), so `link_par_layer_v*` stayed −1. The
+  on-device UX has no such trap (EVENT page bounds layer selection to the
+  geometry).
+- **Accomplice:** `cmd_track_par_set` discarded SEQ_PAR_Set's return code and
+  always replied OK — the harness had no way to see the rejected writes. FIXED:
+  the verb now propagates the verdict (status 0x02 on rc<0; hex a107764d, flash
+  with the next upload).
+- **Test fix:** pins provision their own geometry via the existing
+  `track_note_init` verb (16 steps × 4 par layers) + trg gate fill; restore =
+  `pattern_load(A3)` + explicit 0xA0..0xA3 dial neutralization (old-format
+  AUTOTEST slots keep those dials in-RAM across a load). **6/6 green (38s)**
+  against the already-flashed firmware — the feature worked all along.
+- New baseline after next flash + full run: expected 262. By-ear GO still open.
+- **Display fix (same session, caught by eye on device):** the V* EDIT cells used
+  `"%+3d "` — the LCD vsprintf has NO '+' flag (documented at SEQ_LCD_PrintSigned
+  and in seq_ui.c — third strike for this trap), so cells rendered a literal "3d"
+  and underprinted, leaving the last ~3 step cells stale. Both cases now use
+  SEQ_LCD_PrintSigned (hand-emitted sign, fixed 4-char cell). Hex 20f1492c.
+- **OUTCOME: by-ear GO 2026-07-12** (dials + painted offsets + display verified on
+  device) — **full suite 262/262 single-pass on hex 20f1492c = the new baseline.**

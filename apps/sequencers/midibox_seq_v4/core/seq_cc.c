@@ -311,6 +311,9 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
         // dir_mode was reset to Forward above, and the path only drives the
         // Wp* traversal modes — but re-arming a Wp mode re-uses the painted
         // path instead of finding it silently erased.
+        // SEQ_PAR_Type_VSprd/VInv/VStrm/VTilt: PRESERVED for the same reason —
+        // deterministic SHAPING like the voicing dials themselves (same
+        // byte + dials + offsets always re-expand to the same voices).
         default:
           break;
       }
@@ -838,6 +841,10 @@ s32 SEQ_CC_LinkUpdate(u8 track)
   tcc->link_par_layer_nth2 = -1;
   tcc->link_par_layer_root = -1;
   tcc->link_par_layer_scale = -1;
+  tcc->link_par_layer_vsprd = -1;
+  tcc->link_par_layer_vinv = -1;
+  tcc->link_par_layer_vstrm = -1;
+  tcc->link_par_layer_vtilt = -1;
 
   u8 num_layers = SEQ_PAR_NumLayersGet(track);
   if( num_layers ) {
@@ -859,6 +866,10 @@ s32 SEQ_CC_LinkUpdate(u8 track)
         case SEQ_PAR_Type_Nth2: tcc->link_par_layer_nth2 = layer; break;
         case SEQ_PAR_Type_Root: tcc->link_par_layer_root = layer; break;
         case SEQ_PAR_Type_Scale: tcc->link_par_layer_scale = layer; break;
+        case SEQ_PAR_Type_VSprd: tcc->link_par_layer_vsprd = layer; break;
+        case SEQ_PAR_Type_VInv: tcc->link_par_layer_vinv = layer; break;
+        case SEQ_PAR_Type_VStrm: tcc->link_par_layer_vstrm = layer; break;
+        case SEQ_PAR_Type_VTilt: tcc->link_par_layer_vtilt = layer; break;
       }
     }
   }

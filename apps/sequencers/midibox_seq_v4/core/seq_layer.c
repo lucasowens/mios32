@@ -815,10 +815,38 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	    // by SEQ_CC_ResetGenerativeForBounce). All-neutral or bypassed (spread
 	    // bit 7) = byte-identical stock expansion. Muted layers skip (all-0 notes).
 	    u8 voicing_off = (tcc->voice_spread & 0x80) || chord_muted || nvoices < 2;
+
+	    // per-step voicing OFFSETS (rung 2): thin 64-biased par layers composed
+	    // onto the dials (eff = clamp(dial + step - 64)). 0 = unpainted = neutral;
+	    // muted offset layers read neutral. Read through SEQ_PAR_Get (the render
+	    // mirror) like the chord byte itself, so render processors may write them
+	    // and stay bounce-faithful (rung 3).
+	    s16 voff_sprd = 0, voff_inv = 0, voff_strm = 0, voff_tilt = 0;
 	    if( !voicing_off ) {
-	      u8 spread = tcc->voice_spread & 0x0f;
+	      const s8 voff_layer[4] = { tcc->link_par_layer_vsprd, tcc->link_par_layer_vinv,
+					 tcc->link_par_layer_vstrm, tcc->link_par_layer_vtilt };
+	      s16 *voff_dst[4] = { &voff_sprd, &voff_inv, &voff_strm, &voff_tilt };
+	      int v;
+	      for(v=0; v<4; ++v) {
+		s8 vl = voff_layer[v];
+		if( vl >= 0 && (insert_empty_notes || !(layer_muted & (1 << vl))) ) {
+		  u8 vval = SEQ_PAR_Get(track, step, vl, instrument);
+		  if( vval )
+		    *voff_dst[v] = (s16)vval - 64;
+		}
+	      }
+	    }
+	    s16 eff_strum = (s16)tcc->voice_strum + voff_strm;
+	    s16 eff_tilt  = (s16)tcc->voice_tilt + voff_tilt;
+	    if( eff_strum < 0 ) eff_strum = 0; else if( eff_strum > 127 ) eff_strum = 127;
+	    if( eff_tilt < 0 )  eff_tilt = 0;  else if( eff_tilt > 127 )  eff_tilt = 127;
+
+	    if( !voicing_off ) {
+	      s16 spread = (s16)(tcc->voice_spread & 0x0f) + voff_sprd;
+	      if( spread < 0 ) spread = 0; else if( spread > 12 ) spread = 12;
+	      s16 inv = ((tcc->voice_inv < 8) ? (s16)tcc->voice_inv : (s16)tcc->voice_inv - 16) + voff_inv;
+	      if( inv < -8 ) inv = -8; else if( inv > 7 ) inv = 7;
 	      u8 vdrop = tcc->voice_drop;
-	      s8 inv = (tcc->voice_inv < 8) ? (s8)tcc->voice_inv : (s8)tcc->voice_inv - 16;
 	      if( spread || inv || vdrop ) {
 		int k, j;
 		// inversion: each + click lifts the lowest-sounding voice an octave
@@ -866,14 +894,15 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	      }
 	    }
 
-	    // Per-voice pitch order (ascending), shared by STRUM (timing rank —
-	    // rides the event; the tick stagger applies at emission where the
-	    // schedule tick exists) and TILT (velocity ramp, applied below).
+	    // Per-voice pitch order (ascending), shared by STRUM (timing — the
+	    // rank rides the event; the tick stagger applies at emission, which
+	    // re-composes the same eff_strum from dial + VStrm layer) and TILT
+	    // (velocity ramp, applied below).
 	    // Strum ranks are direction-resolved: up-strum = ascending, down = reversed.
 	    u8 ranks[6] = { 0, 0, 0, 0, 0, 0 };
 	    u8 asc[6]   = { 0, 0, 0, 0, 0, 0 };
-	    u8 tilt_on  = (!voicing_off && tcc->voice_tilt != 64);
-	    if( tilt_on || (!voicing_off && tcc->voice_strum != 64) ) {
+	    u8 tilt_on  = (!voicing_off && eff_tilt != 64);
+	    if( tilt_on || (!voicing_off && eff_strum != 64) ) {
 	      int a, b;
 	      for(a=0; a<nvoices; ++a) {
 		u8 rk = 0;
@@ -881,8 +910,8 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 		  if( notes[b] < notes[a] || (notes[b] == notes[a] && b < a) )
 		    ++rk;
 		asc[a] = rk;
-		if( tcc->voice_strum != 64 )
-		  ranks[a] = (tcc->voice_strum > 64) ? rk : (u8)(nvoices - 1 - rk);
+		if( eff_strum != 64 )
+		  ranks[a] = (eff_strum > 64) ? rk : (u8)(nvoices - 1 - rk);
 	      }
 	    }
 
@@ -899,7 +928,7 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	      // Clamped to 1..127: a 0 would turn the voice into the disabled-note
 	      // idiom and rest it.
 	      if( tilt_on && e->midi_package.velocity ) {
-		s16 t = (s16)tcc->voice_tilt - 64;
+		s16 t = eff_tilt - 64;
 		s16 dv = (s16)((t * (s16)(2*(s16)asc[i] - (s16)(nvoices - 1)))
 			       / (s16)(2*(nvoices - 1)));
 		s16 v = (s16)e->midi_package.velocity + dv;
