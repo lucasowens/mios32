@@ -838,9 +838,10 @@ ends (`VStrm` on the last step), accent-shape inside the chord (`VTilt`).
   session/bank is created, so on an older session the save silently degrades and
   Inv/Strm/Drop/Tilt reset to neutral on the next reboot (Sprd sits inside the older
   block and persists everywhere). Recreate the session (SAVE → SESSIONS → NEW) to
-  upgrade its slots. The remaining ladder roadmap (strum in MIDI export) lives in
-  `doc/plans/2026-07-11-chord-mode-expressiveness-ladder.md`.
-- MIDI export ignores the strum stagger.
+  upgrade its slots.
+- MIDI export is voicing-faithful, strum included: the exporter replays the real
+  scheduler, so the per-voice tick stagger lands in the .MID exactly as heard
+  (verified tick-exact 2026-07-12).
 
 ---
 

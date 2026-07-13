@@ -77,11 +77,15 @@ write ladder V5→V4→V3, PhraseReadCCs neutral-extends (strum/tilt=64), snap l
 slots degrade the record). Pins: `test_voicing_persist.py`. Outcome owned by
 DECISIONS_LOG 2026-07-11 cont. 6.
 
-## Rung 6 — Strum in MIDI export
+## Rung 6 — Strum in MIDI export — RESOLVED 2026-07-12: claim was STALE, export already faithful
 
-`seq_midexp` renders unstrummed onsets today (spread/inv/drop ARE exported — they're
-in the expansion). Decide: teach export the per-voice tick offset, or document as
-accepted (tape capture already hears strum). OPEN_ITEMS §4.
+No build. The premise was wrong: strum_ofs is part of the scheduled TIMESTAMP and
+`seq_midexp` replays the real scheduler tick-by-tick, so the stagger lands in the
+.MID tick-exact (echo/groove too; the render mirror is also fresh during export —
+per-step VStrm and the rung-3 collapse export as heard). Proven on hardware via
+`tests/diag_strum_export.py` (Disk-page export UI-walk + MIOS-Filebrowser file
+readback over SysEx). OPEN_ITEMS line removed; manual corrected. Outcome owned by
+DECISIONS_LOG 2026-07-12 cont. 3.
 
 ---
 *Move to archive when the rungs have all shipped or been re-decided; the decisions

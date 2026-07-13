@@ -38,9 +38,6 @@ Fix plans live in [plans/2026-07-02-held-findings-35-46.md](plans/2026-07-02-hel
 
 ## 4. Cleanup queue (code surfaces / repo)
 
-- **`seq_midexp` MIDI export ignores the Voicing strum stagger** — export renders unstrummed
-  onsets (spread/inv ARE rendered — they're in the expansion). Decide: teach export the
-  per-voice offset, or document as accepted (the tape/capture path already hears strum).
 - **Flake trail: `test_as_heard_slot_track_threads_phase`** — failed once in a full-suite
   run 2026-07-11 (rotation match off by ~2 steps + one foreign head byte = capture-vs-
   playhead phase race), passed the same day's other full run + 3/3 isolated re-runs on

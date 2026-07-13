@@ -142,7 +142,8 @@ class Page:
     FX_HUMANIZE = 37
     FX_ROBOTIZE = 38
     ROBOLOOP = 39
-    BPM = 47
+    BPM = 46
+    DISK = 53  # ETH page follows at 54 (uIP still compiled in) — verified on device
     PITCHGEN = 59
     GRAVITY = 60  # Tension Workbench cockpit (enum SEQ_UI_PAGE_GRAVITY)
 

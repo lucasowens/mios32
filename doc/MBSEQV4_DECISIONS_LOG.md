@@ -2382,3 +2382,47 @@ push expressiveness.
   failed correctly, and now pins the tick-prologue mechanism while playing).
 - Files: `seq_core.c` (tension_render_range rung-3 block; render_live_sig fold),
   `tests/apps/seq_v4/test_tension_voicing.py`, ladder plan doc + manual updated.
+
+**2026-07-12 (cont. 3) — Ladder rung 6: strum in MIDI export — claim STALE, export already faithful (ladder COMPLETE, plan archived)**
+
+- **The OPEN_ITEMS §4 item ("`seq_midexp` export renders unstrummed onsets", noted
+  during act 1) is FALSE — no code change needed.** Source: `strum_ofs` is composed
+  into the scheduled **timestamp** at every NoteOn schedule site (`seq_core.c`,
+  `SEQ_CORE_ScheduleEvent(... bpm_tick + t->bpm_tick_delay + strum_ofs ...)`), and
+  `SEQ_MIDEXP_GenerateFile` replays the REAL scheduler tick-by-tick with hooked
+  callbacks — `SEQ_MIDI_OUT_Handler` drains strictly by `timestamp <= export_tick`
+  and the export hook writes the delta from the drain tick. Everything
+  timestamp-shaped (strum, echo trains, groove delay) lands in the file tick-exact.
+  The render mirror is fresh during export too: `SEQ_CORE_RenderTracks()` runs in
+  `SEQ_CORE_Tick`'s prologue, which export drives directly — so per-step VStrm
+  offsets and the rung-3 GRAVITY collapse also export as heard.
+- **Proven on hardware, tick-exact** (`tests/diag_strum_export.py`): chord track
+  (Maj.I, steps 1+9), Disk-page export UI-walked via testctrl, the .MID pulled back
+  over SysEx and parsed. Detent: both chords' 3 voices at identical ticks. Dial
+  64+20: onsets exactly `[0,20,40]` / `[768,788,808]`, low voice first. No firmware
+  delta → 268/268 baseline stands (spot-check `test_voicing_steps` + smoke 11/11
+  post-diag).
+- **New harness capability (no new firmware): SD file readback over SysEx.** The
+  firmware already speaks the MIOS Filebrowser protocol (`FILE_BrowserHandler` via
+  `seq_terminal.c`); the diag's `Filebrowser` class (debug-string SysEx `0x0D 0x01`
+  command / `0x0D 0x41` reply frames; `read` streams `%08X`+hex 32-byte blocks) is
+  importable for any future test that needs to inspect files the firmware wrote.
+- **Trap found while validating (harness, not firmware): `track_note_init` zero-fills
+  the par buffer → the Velocity layer is all-0 → every note emits at velocity 0 =
+  suppressed at emission AND silent in export.** The rung-2 voicing pins never hit it
+  because they reassign layer B away from Velocity (link lost → default 100). Any
+  future fixture that keeps the Velocity layer must paint it.
+- **Environment discovery — a third cause for "broad HIL fails / box looks dead":
+  BPM Auto-mode slave latch.** Found the box with PLAY showing running=TRUE but
+  `bpm_tick` frozen (Auto + MClk-In USB1 enabled; external clock seen at some point
+  latches slave → PLAY arms and waits forever). `CMD_TRANSPORT` start
+  (`SEQ_BPM_CheckAutoMaster` + start) cleared it; PLAY behaves again in Auto. If HIL
+  goes broadly silent with a running transport, check the BPM page mode FIRST.
+- Byproducts: harness `Page.DISK=53` added, `Page.BPM` corrected 47→46 (was unused;
+  the page enum includes ETH — uIP still compiled in).
+- **The expressiveness ladder is COMPLETE** (1 Drop/Tilt, 2 per-step layers,
+  3 GRAVITY×Voicing, 4 superseded, 5 V5 persistence, 6 resolved-stale) — plan moved
+  to `doc/plans/archive/`. Rung-6 line removed from OPEN_ITEMS §4; manual caveat
+  corrected (export follows the strummed onsets).
+- Files: `tests/diag_strum_export.py` (new), `tests/harness/sysex.py`,
+  `doc/OPEN_ITEMS.md`, manual, ladder plan → archive.

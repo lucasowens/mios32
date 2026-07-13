@@ -2240,6 +2240,7 @@ there and add one line to the chronology index at the end of this section.
 - **2026-07-12 — Rung-2 boot hard-fault postmortem** (u16 strum widening inflated the [83] layer_events stack arrays +332 B → task-stack overflow into ucHeap neighbors, PC=0 at boot; strum back to u8 rank + sizeof==8 guard, eff ticks/rank composed at emission; cap_snap → CCM (+5.5 KB main-RAM tail); ld stack fence 0x100→0x400; FIXED, flash pending)
 - **2026-07-12 (cont.) — Rung-2 pins red→green + by-ear GO** (6/6 red = A3 1-par-layer geometry trap, not firmware — pins provision via track_note_init; track_par_set verb now propagates rc; LCD `%+d` strike 3 → SEQ_LCD_PrintSigned; **GO, HIL 262/262 = new baseline**)
 - **2026-07-12 (cont. 2) — Ladder rung 3: GRAVITY × Voicing register collapse** (TENSION render-writes collapsed VSprd offsets through DRONE — mirror-faithful via rung 2, emission route not built; continuous field-wide squeeze, GRIP scales depth not step selection; VSprd layer = per-track opt-in; Sprd dial joins render_live_sig; SHIPPED by-ear GO, HIL 268/268 = new baseline)
+- **2026-07-12 (cont. 3) — Ladder rung 6: strum-in-export claim STALE → ladder COMPLETE** (export replays the real scheduler, strum/echo/groove timestamps land tick-exact — proven on hardware via new SysEx file-readback diag; gotchas: track_note_init velocity-0 silence, BPM Auto slave-latch = box-looks-dead; plan archived, no firmware delta, 268/268 stands)
 
 
 ---
