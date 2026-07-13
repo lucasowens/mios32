@@ -412,6 +412,9 @@ extern s32 SEQ_UI_GRAVITY_Init(u32 mode);
 // row .status hook (seq_ui.c) so both surfaces read the same zone thresholds.
 extern const char *SEQ_UI_GRAVITY_ZoneName(s8 g);
 extern void SEQ_UI_GRAVITY_TensionMeter(s8 g, char *buf); // buf must be >= 28 bytes
+extern s32 SEQ_UI_GRAVITY_ShadePosGet(void);              // 0..6 = Lyd..Loc, -1 = off-ladder
+extern const char *SEQ_UI_GRAVITY_ShadeName(s32 pos);     // 3-char mode name, "---" off-ladder
+extern s32 SEQ_UI_GRAVITY_ShadeSet(s32 pos);              // <0 = no-op (see seq_ui_gravity.c)
 extern s32 SEQ_UI_CAPTURE_Init(u32 mode);
 extern s32 SEQ_UI_PROC_Init(u32 mode);
 extern s32 SEQ_UI_CAPTURE_Enter(void); // repurposed SONG button -> latched Capture page

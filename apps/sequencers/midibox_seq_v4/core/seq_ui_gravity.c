@@ -79,6 +79,40 @@ static const char *shade_label(void)
   return "-- ";  // global scale is off the brightness ladder
 }
 
+// Public SHADE accessors (the PROC rack Tension row's Shade dial reuses this ladder,
+// seq_ui.c — one brightness-ladder source of truth instead of a 2nd copy).
+// Pos: 0..6 = Lyd..Loc; -1 = the global scale is off the ladder.
+s32 SEQ_UI_GRAVITY_ShadePosGet(void)
+{
+  u8 i;
+  for(i=0; i<7; ++i)
+    if( shade_ladder[i] == seq_core_global_scale )
+      return i;
+  return -1;
+}
+
+const char *SEQ_UI_GRAVITY_ShadeName(s32 pos)
+{
+  return (pos >= 0 && pos <= 6) ? shade_names[pos] : "---";
+}
+
+// pos < 0 = the off-ladder sentinel -> NO-OP (never yank the global scale onto the
+// ladder from a reset/push; the rack dial's deflt is -1 for exactly this reason).
+// Else clamp + the page's ITEM_SHADE side effects (store flag + full re-render).
+s32 SEQ_UI_GRAVITY_ShadeSet(s32 pos)
+{
+  if( pos < 0 )
+    return 0;
+  if( pos > 6 )
+    pos = 6;
+  if( shade_ladder[pos] == seq_core_global_scale )
+    return 0;
+  seq_core_global_scale = shade_ladder[pos];
+  ui_store_file_required = 1;       // SHADE is performance state -> config file
+  SEQ_CORE_RenderDirtySetAll();     // scale move re-renders FTS + tension L3
+  return 1;
+}
+
 // Bipolar GRAVITY meter (encoders have no felt detent — this is the positional
 // feedback). 27 cells: center '|' = the detent (home); fill grows LEFT as you
 // pull, RIGHT as you push, length ∝ |GRAVITY|. Zone boundaries are tick marks

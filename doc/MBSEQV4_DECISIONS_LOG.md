@@ -2426,3 +2426,164 @@ push expressiveness.
   corrected (export follows the strummed onsets).
 - Files: `tests/diag_strum_export.py` (new), `tests/harness/sysex.py`,
   `doc/OPEN_ITEMS.md`, manual, ladder plan → archive.
+
+**2026-07-12 (cont. 4) — Ptch merge: Pitch + ChordMask become one row, and the PROC base layout**
+
+- **New working convention: LCD layouts are communicated as tab-per-column grids** —
+  one cell per LCD character, two rows for the 2×40+2×40 panel (pasteable from a
+  spreadsheet). First use: the user mocked the merged pitch page; the mock parsed
+  cleanly onto the 5-col GP-cell grid and drove this whole session.
+- **The rack drops from 13 to 12 rows: the ChordMask row dissolves into Pitch.** The
+  merged **Ptch** row fills all 8 encoder cells — Semi Oct **Str Bus** FTS Scle Root
+  Deg — and carries the mask face (`PROC_FACE_CHORDMASK_SELF`) + both stack slots
+  (RowState ORs PITCH and CHORDMASK: alive when either is, strength = the louder).
+  Decisions (AskUserQuestion, all recommended options): dots for inactive keyboard
+  slots · GP buttons 1-12 keep painting (encoders and GP buttons are separate
+  hardware) · dissolve the row rather than keep both.
+- **PROC base-layout header (all 12 rows):** identity compressed + right-aligned to
+  cols 65–79 — `Ptch  1/12 G1T1` (new per-row `.abbr`, stock `SEQ_LCD_PrintGxTy`),
+  replacing `Pitch     1/13 Trk 1` at col 40. Row-0 left of it now belongs to the
+  row readout; BYP cue moved 61→55, plane cue 75→60; Tension zone name right-
+  justifies to 64 instead of 79.
+- **The mask keyboard is now FIXED-position and always drawn** (row 1 right screen):
+  `M*:`/`M: ` + one 3-col cell per PC C..B — active = note name, inactive = dot.
+  Gate change: paint/LEDs read the **CC** Self bit, not the live slot (`visible ==
+  paintable`) — painting a parked mask is harmless (engage reads the CCs) and it
+  unblocks Arp-Self painting when ChordMask is not engaged. Scale name promoted to
+  row 0 (trimmed, may run to col 60 — deliberate); Deg landing note (`>E`) follows
+  it when Deg≠0 and it fits under col 65.
+- **Row==slot identity is GONE** (was: first 5 rows == slot indices). Fallout fixed:
+  focus init + LIVE landing → `PROC_ROW_PTCH` (0); the B-row dbl-tap ChordMask
+  branch folded into the stack-row reset — **Ptch dbl-tap = SlotReset (all 8 dials,
+  globals included, as Pitch always did) + drop the ChordMask playmode to Normal;
+  painted mask CCs survive** (the FX-bypass spirit).
+- **No CC/persistence delta** — pure UI-layer merge: same CCs, same slots, same DSP.
+  HIL drives CCs/testctrl (no row-index deps found in tests/).
+- Validation: zero-warning rebuild, RAM map unchanged (`__ram_end 0x2001cc50` /
+  `__ram_end_ccm 0x1000fa48`, CCM tail 1464 B). **Flash + HIL + by-ear PENDING.**
+- Files: `seq_ui.c` only (+ surface map §5a/§5/header, this log, §9 chronology).
+
+**2026-07-12 (cont. 5) — Voic merge: Voicing + Limit become one row at rack position 2**
+
+- Second tab-grid mock of the day. **The rack drops 12→11: the Limit row dissolves
+  into Voicing**, and the merged **Voic** row MOVES to position 2, right after Ptch —
+  the pitch-SPACE rows cluster at the top (Ptch = what the notes are, Voic = where
+  they sit). New rack order: Ptch · Voic · Arp · Tension · Echo · Groove · LFO ·
+  Robotize · PitchGen · TrigGen · Humanize.
+- **Dial bank: Sprd Inv Drop Strm Tilt · [gap] · Lo Hi** — the mock deliberately
+  leaves cell 6 empty as a GROUP SEPARATOR. New `PROC_KIND_SPACER`: a blank grid
+  cell inside one row (label "", read=0, write/push no-op — its cc slot is 0 and
+  must never reach SEQ_CC_Get/Set). First cross-rowkind merge: Voicing is EMISSION,
+  Limit was STACK — the row keeps rowkind EMISSION and its custom RowState arm now
+  ORs the LIMIT stack slot (the Ptch/CHORDMASK pattern).
+- **Double-tap (user decision): bypass + limit off** — flips the SPREAD 0x80 bypass
+  (voicing dials preserved) AND resets Lo/Hi→0 on the OFF edge only (no spare bypass
+  bit in the full-range Lo/Hi CCs; two knobs to re-dial). Re-enable restores voicing,
+  not the discarded range.
+- **Status (user decision): keep + add range** — the chord-layer warning / strum
+  direction stays on row 1; row 0 (the base-layout readout zone, col 41) gains
+  `Rng <lo>..<hi>` as NOTE NAMES via stock `SEQ_LCD_PrintNote`, only when the clamp
+  is active — PrintNote prints `---` for 0, which is exactly Limit's open-side
+  semantics (hi=0 = open top). Range prints even on non-chord tracks (Limit clamps
+  any track; the voicing warning only covers the dials).
+- Mock said `2/12` = current-firmware count again (the 1/13 pattern) → ships as
+  `Voic  2/11 G1T1`.
+- **No CC/persistence/DSP delta** — same CCs, same LIMIT slot, UI-layer only.
+- Validation: zero-warning rebuild (+128 B flash), RAM map unchanged. **Flash + HIL
+  + by-ear PENDING** (stacked on the unflashed cont. 4 build — flash once, test both).
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-12 (cont. 6) — Voic clamp decoupled from the bypass + Hi rests at 127**
+
+- **Reverses cont. 5's "bypass + limit off" double-tap draft (user call, same session,
+  pre-flash): the range clamp is INDEPENDENT of the row bypass.** The 0x80 SPREAD bit
+  only ever gated the voicing dials in the DSP — the coupling was UI-only, now removed.
+  Double-tap = voicing bypass alone; an active clamp keeps applying and (correctly)
+  keeps the row enabled/green via the RowState arm. Kill the clamp by pushing the
+  Lo/Hi encoders to their detents.
+- **Lo/Hi default to 0/127 — the resting range reads as the full keyboard.** New
+  `PROC_KIND_LIMIT_HI`: the CC keeps the STOCK encoding (0 = open top, DSP
+  substitutes 127) but the dial presents it honestly — read 0→127, write 127→0,
+  logical range 1..127, deflt/push detent = 127. Pass-through sits at the TOP of
+  the sweep (the bipolar-center-detent idea, at the ceiling). Zero seq_core /
+  persistence delta; fresh tracks, old sessions, and bounce resets (raw 0) all
+  read Hi=127; a legacy stored 127 is display-normalized to open in the Rng readout.
+- Inherently seed-safe: even if engage-seeding ever reached the row, seeding Hi=127
+  writes raw 0 — a no-op.
+- Validation: zero-warning rebuild, RAM unchanged. Flash/HIL/by-ear still pending
+  (one hex carries cont. 4-6).
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-12 (cont. 7) — Tension row expansion: Shade + doubled FTS, position 3**
+
+- Third tab-grid mock. No merge this time — the Tension row GROWS: dial bank
+  **Grip · Grav · Shade · [spacer] · FTS**, and the row moves to **position 3**
+  (ahead of Arp): the pitch-space cluster is now Ptch(1) Voic(2) Tens(3).
+- **Shade joins the rack from the GRAVITY page** — the brightness ladder (7 parallel
+  modes Lyd..Loc) as a dial. It is a VIEW on the GLOBAL scale, not a CC: new
+  `PROC_KIND_SHADE` reads the ladder position (-1 = off-ladder, shows "---"), write
+  goes through new exports `SEQ_UI_GRAVITY_ShadePosGet/ShadeName/ShadeSet` (one
+  ladder source of truth; same side effects as the page — store flag + full
+  re-render). **Guard: write<0 = NO-OP, and the dial's deflt is -1** — encoder-push
+  and the double-tap SlotReset must never yank the global scale onto the ladder
+  mid-jam. Accepted divergence: CCW from off-ladder does nothing (the page jumps to
+  Loc); you enter the ladder CW.
+- **FTS is DOUBLED from Ptch** (user: "for convenience") — same per-track
+  trkmode_flags.FORCE_SCALE, two homes; GRAVITY and force-to-scale play as one
+  instrument. First deliberately-duplicated dial on the rack.
+- **Status rework:** zone name + signed value LEFT-anchored at col 41 (the
+  base-layout row-readout home; was right-justified); the 16-track grip bar KEPT
+  (user decision vs the mock's blank cells) but UNLABELED at cols 24-39 — the 16
+  tracks fit the dead cells right of FTS exactly. Zone strip + GP9-16 face
+  unchanged.
+- Mock said `3/12` = the running-count pattern again → ships as `Tens  3/11 G1T1`.
+- Validation: zero-warning rebuild (+184 B flash), RAM unchanged. Flash/HIL/by-ear
+  pending (one hex now carries cont. 4-7).
+- Files: `seq_ui.c`, `seq_ui_gravity.c` (Shade exports), `seq_ui.h` (+ surface map,
+  this log, §9 chronology).
+
+**2026-07-12 (cont. 8) — PGen/TGen two-screen sets: Roll on cell 8 of both planes + the plane cue becomes the row readout**
+
+- Fourth tab-grid mock ("2 screen sets for the two modes" — the OPER and STEP planes
+  of PitchGen). **Roll moves to cell 8 and is DOUBLED onto both planes** (the FTS
+  idiom): one physical "dice" encoder, reachable without a plane flip. Spacers pad
+  the gap — OPER = Lo Hi Rate Dpth Cont ··· Roll, STEP = Win Anc Snp Bnc ··· Roll.
+- **TrigGen mirrored** (not in the mock, but the siblings share one grammar — same
+  status hook, same idiom): Dens Rate Dpth ···· Roll / Win Anc Snp Bnc ··· Roll.
+  Encoder 8 = reroll on all four gen plane-screens.
+- **PGen moves to position 4** (the mock's `4/12` identity — the mock-by-mock rack
+  rebuild continues: Ptch 1, Voic 2, Tens 3, PGen 4). TGen stays in the tail
+  pending its own mock. Order now: Ptch · Voic · Tens · PGen · Arp · Echo · Groove
+  · LFO · Robotize · TrigGen · Humanize.
+- **The plane cue grew into the row-0 readout**: `OPER 1/2` / `STEP 2/2` (and
+  Robotize's `LOOP 2/2`) at col 41 — the plane rows' answer to Ptch's scale name /
+  Tens's zone. Replaces the bare 4-char cue at col 60. With planes now named and
+  numbered on row 0, Status_Gen's "Up/Dn=STEPS" hint is gone; status text moved
+  40→41 (Steps window + lock count / ENGAGED / dbl-tap hints unchanged otherwise).
+  Robotize's own row-1 "Up/Dn=LOOP" hint left as-is (out of mock scope; now
+  redundant — candidate for a later trim).
+- Validation: zero-warning rebuild (+136 B flash), RAM unchanged. Flash/HIL/by-ear
+  pending (one hex carries cont. 4-8).
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-12 (cont. 9) — TGen screen set + the ARP row dissolves into it (rack 11→10, TGen to position 5)**
+
+- Fifth tab-grid mock ("lets do the Trig gen this time as well and im added the arp
+  to this page, figure it fit well enough"). **The ARP row dissolves into TGen's
+  OPER plane**: cells 6-7 = **Arp** (the old Mode headline, prints Off/Up/Dn/U-D/Rnd)
+  + **Bus** (Self / A..D) — rhythm generator and arpeggiator share one page. OPER =
+  Dens Rate Dpth ·· Arp Bus Roll; STEP unchanged from cont. 8.
+- Fourth cross-tenant fronting: the TGen row (GENERATOR rowkind) ORs the **ARP stack
+  slot** into RowState — alive when either tenant is. **Double-tap stays the
+  generator's ENGAGE⇄DISENGAGE; an armed arp keeps playing** (the Voic-clamp
+  pattern: secondary halves are dial-controlled — kill via Arp cell → Off, one click
+  or an encoder-push). Arp CCs write through SEQ_CC_Set → ArpSlotSync, same as the
+  old row.
+- **TGen moves to position 5** (mock `5/12` = position assignment). Rack now **10
+  rows**: Ptch · Voic · Tens · PGen · TGen · Echo · Groove · LFO · Robotize ·
+  Humanize — the entire pitch/generative cluster leads the B-row.
+- Mock slip noted: set 2's plane cue read "OPER 2/2" — shipped as `STEP 2/2` (it is
+  the steps face; matches the PGen mock and the generic plane2 naming).
+- Validation: zero-warning rebuild (-8 B flash), RAM unchanged. Flash/HIL/by-ear
+  pending (one hex carries cont. 4-9).
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).

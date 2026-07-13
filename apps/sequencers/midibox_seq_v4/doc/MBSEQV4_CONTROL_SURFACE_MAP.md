@@ -11,8 +11,9 @@ This is the **UX-design companion** to `MBSEQV4_HARDWARE_GLOSSARY.md`:
 
 Use the **bold glossary terms** here. Lines marked **[fork]** are repurposed away from
 stock MBSEQ. Everything below was verified against source (symbol names, not line numbers —
-line numbers drift in this fork). Last verified: 2026-07-11 (PROC rack pass — LIVE button,
-the 13-row rack + planes/faces, Capture Phase encoder, waypoint direction modes, Voicing row).
+line numbers drift in this fork). Last verified: 2026-07-12 (merge passes — the rack is
+now 10 rows: ChordMask dissolved into Ptch, Limit into Voic, Arp into TGen; the
+pitch/generative cluster leads — Ptch/Voic/Tens/PGen/TGen; PROC base-layout header).
 
 ---
 
@@ -191,7 +192,7 @@ Every non-trivial combo. "✓" = shipped/committed.
 | **B-row held + GP** (TRACKS) | **[fork]** PULL a stored track onto the held live track (GP1–8 letter, GP9–16 commit) | `SEQ_UI_Button_DirectTrack` | ✓ |
 | **CAPTURE (Song) tap** | **[fork]** open/close unified Capture page | `SEQ_UI_Button_Song` → PAGE_CAPTURE | ✓ |
 | **LIVE tap** | **[fork]** toggle the PROC rack page (§5a); LED = in-PROC | `SEQ_UI_Button_Live` → PAGE_PROC | ✓ |
-| **PROC: B-row tap / double-tap** | **[fork]** focus a rack row / row on-off (bypass, ENGAGE⇄DISENGAGE, ChordMask add-remove) | `SEQ_UI_SEL_VIEW_PROC` B-row dispatch | ✓ |
+| **PROC: B-row tap / double-tap** | **[fork]** focus a rack row / row on-off (bypass, ENGAGE⇄DISENGAGE; Ptch dbl-tap also drops the ChordMask playmode) | `SEQ_UI_SEL_VIEW_PROC` B-row dispatch | ✓ |
 | **PROC: `<` `>` (or Up/Down)** | **[fork]** flip the focused row's plane (Robotize OPERATE⇄LOOP, PitchGen/TrigGen OPERATE⇄STEPS) | `SEQ_UI_PROC_page_Button` | ✓ |
 | **PROC: GP-encoder push** | **[fork]** snap dial to its pass-through detent; ACTION dials execute (Reseed/Freeze/Roll/Anchor/Snap/Bounce) | `PROC_KIND_ACTION` / default-snap | ✓ |
 | **PHRASE → B-row waypoint** tap | **[fork]** RECALL phrase (whole-organism snapshot) | B-row dispatch (PHRASE sel-view) | ✓ |
@@ -271,24 +272,54 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
 
 **The three rows in PROC mode:**
 - **B-row** = the rack: one key per row, in order
-  **Pitch · ChordMask · Arp · Tension · Limit · Echo · Groove · LFO · Robotize · PitchGen · TrigGen · Humanize · Voicing**.
+  **Ptch · Voic · Tens · PGen · TGen · Echo · Groove · LFO · Robotize · Humanize**
+  (10 rows after the 2026-07-12 merges — the pitch/generative rows cluster at the top:
+  **Ptch** = the merged pitch-domain cockpit (old Pitch's Semi/Oct/FTS/Scle/Root/Deg +
+  the dissolved ChordMask row's Str/Bus + mask face; fronts BOTH stack slots; where LIVE
+  lands you); **Voic** = voicing + the dissolved Limit row (Sprd/Inv/Drop/Strm/Tilt ·
+  spacer cell · Lo/Hi range clamp; fronts the LIMIT stack slot alongside its emission CCs.
+  At rest the range reads as the full keyboard — Lo 0 / Hi 127, both = open; Hi's
+  pass-through detent is the TOP of its sweep, stored as the stock "off" 0);
+  **Tens** (position 3, 2026-07-12) = Grip/Grav/**Shade** (the GRAVITY page's
+  brightness ladder joins the rack — a view on the GLOBAL scale, "---" when
+  off-ladder; push/reset = no-op so the scale is never yanked onto the ladder) ·
+  spacer · **FTS** (doubled from Ptch for convenience — same per-track flag); the
+  16-track grip bar rides unlabeled in the dead cells (cols 24-39), zone name at
+  the row-readout home (col 41)).
   Tap = focus (always lands on the row's primary plane). **Double-tap (<350 ms) = the row's
-  on/off gesture**: emission rows flip their native bypass bit (config preserved); generator
-  rows ENGAGE⇄DISENGAGE (loop preserved); ChordMask adds/removes its playmode; param rows
-  (Pitch/Tension/Limit) reset to pass-through.
+  on/off gesture**: emission rows flip their native bypass bit (config preserved — on Voic
+  the bypass only gates the voicing dials; **an active range clamp keeps applying**, kill
+  it by pushing the Lo/Hi encoders to their detents); generator rows ENGAGE⇄DISENGAGE
+  (loop preserved — on TGen, which absorbed the ARP row into its OPER cells 6-7, the
+  double-tap stays the generator's gesture: an armed arp keeps playing, kill it by
+  dialling/pushing its Arp cell to Off); param rows (Ptch/Tension) reset to
+  pass-through — Ptch also returns a ChordMask-playmode track to Normal (the painted
+  mask CCs survive).
   LEDs: **green = occupied** (winks when bypassed / at true pass-through), **red = focused**
   (reads amber on the focused occupied row).
 - **GP encoders** = the focused row's dials on the current **plane** (labels on the LCD).
   **Push = snap to the pass-through detent**; ACTION dials execute instead
   (Robotize Rsd/Frz; PitchGen/TrigGen Roll/Anc/Snp/Bnc).
 - **GP row** = the plane's **face** (bespoke surface, where the row declares one):
-  ChordMask **Self mask** (GP1–12 = pitch classes, Self bus mode only) · Groove **paint**
+  Ptch **Self mask** (GP1–12 = pitch classes, Self bus mode only; the LCD keyboard + LEDs
+  show the mask ALWAYS — engaged or not — and visible == paintable) · Groove **paint**
   (16-step shape of the selected lane, custom templates) · LFO **waveform palette** (tap to
   pick) · Tension **zone jump** (GP9–15 = DRONE…SLIP, GP16 = RESOLVE) · Robotize LOOP plane
   **bar anchors** (tap = reroll) · PitchGen/TrigGen STEPS plane **LOCK toggles** (16-step
   window into the 64-step loop, Win dial picks the quarter).
 - **`<` / `>` (or Up/Down)** = plane flip on two-plane rows (Robotize OPERATE⇄LOOP,
   PitchGen/TrigGen OPERATE⇄STEPS).
+
+**Page LCD (base layout, 2026-07-12):** left screen = the 8-cell dial grid (label over
+value, one 5-col cell per GP encoder; SPACER cells group dials — Voic/Tens — and pad
+doubled dials to a fixed physical position — Roll on cell 8 of BOTH gen planes).
+Right screen row 0 = the row's own readout at col 41 (Ptch: scale name + Deg landing
+note; Voic: `Rng` when clamped; Tension: zone name; two-plane rows: the plane cue
+`OPER 1/2` / `STEP 2/2` / `LOOP 2/2`) with the identity compressed and right-aligned —
+`Ptch  1/11 G1T1` at cols 65–79 (row abbr · rack position · GxTy); BYP cue at col 55.
+Row 1 = the row's custom status — on Ptch the **fixed 12-slot mask keyboard**: `M*:`
+(Self, editable) / `M: ` (live bus, read-only), then one 3-col cell per pitch class
+C…B — active PCs read as note names, inactive as dots.
 
 **Grammar invariants** (why the rack stays predictable): every headline dial's 0 = true
 pass-through (dark row); a 0→on turn engage-seeds the row so it is audible at once; bypass
@@ -314,7 +345,7 @@ unless the page or sel-view overrides.)
 | **CAPTURE** (Song) | dst pattern (letter\|num) | dst track | datawheel=GRAB; GP1-enc=FILL⇄LOOP |
 | **PHRASE** | morph coarse bar (when armed) | 16 snapshot waypoints | datawheel=morph ride |
 | **INS sel-view** (drum/kbd on) | *(page's own)* | drum pads / keyboard (green=in-scale, amber=root) | INSTR re-tap toggles play⇄select; RECORD arms rec-vs-preview; GP1-enc=Jump; ‹/›+datawheel=scroll; SELECT+key1/16=octave |
-| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (13 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane (§5a) |
+| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (10 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane (§5a) |
 | **GRAVITY** *(legacy — Tension row covers it)* | item hints; GP8=RESOLVE, GP16=→FX_SCALE | track-select | GP1-enc=GRAVITY, GP2=SHADE, GP3=GRIP, GP4=track |
 | **ROBOLOOP** *(legacy — Robotize LOOP plane covers it)* | GP6=reseed, GP7=freeze, GP8=freeze-q; **SELECT+GP1–16 reroll measure anchor** | track-select | GP1-enc=track, GP2=palette len, GP3=loop start, GP4=cycles, GP5=rotate |
 | **TRKEUCLID** (stock, menu "GENERATE") | Euclidean trigger preview | track-select | per trigger-layer params; one-shot destructive fills — the LIVING generators are the rack's PitchGen/TrigGen rows |
