@@ -29,7 +29,7 @@ MBSEQ V4 behavior; "Fork role" = what this build does with it.
 | **GP encoders** (row A) | 16 | `SEQ_UI_ENCODER_GP1..16` | Value edit per page; push = FAST | Per-page repurposable; push has no LED. First repurposed pushes: Capture GP1 (FILL⇄LOOP). |
 | **GP row** (row B) | 16 | `SEQ_UI_BUTTON_GP1..16` | EDIT = the 16 steps; menu page = value-picker | The universal **value-picker / step row**; tri-colour LEDs (`ui_gp_leds`). |
 | **B-row** (row C) | 16 | `BUTTON_DIRECT_TRACK1..16` | Direct track-select 1–16 | **Context row** — meaning follows **sel-view** (§2.4). This is the "two things at once" row. |
-| **datawheel** | 1 | `SEQ_UI_ENCODER_Datawheel` | Master value wheel (+push) | Also the **morph ride** and the **Capture GRAB dial**. |
+| **datawheel** | 1 | `SEQ_UI_ENCODER_Datawheel` | Master value wheel (+push) | Also the **morph ride**, the **Capture GRAB dial**, and **[fork]** in PROC mode the **track walker** (turn = track ±1, push = jump a group — §5a). |
 
 ### 1.2 Selection-mode cluster (sets the **sel-view** — what the B-row means)
 
@@ -272,8 +272,9 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
 
 **The three rows in PROC mode:**
 - **B-row** = the rack: one key per row, in order
-  **Ptch · Voic · Tens · PGen · TGen · Echo · Groove · LFO · Robotize · Humanize**
-  (10 rows after the 2026-07-12 merges — the pitch/generative rows cluster at the top:
+  **Ptch · Voic · Tens · PGen · TGen · Grve · Humn · Robo · Echo · LFO**
+  (10 rows after the 2026-07-12/13 merges — pitch/generative cluster, the feel trio
+  (Grve/Humn/Robo), then the emission tail:
   **Ptch** = the merged pitch-domain cockpit (old Pitch's Semi/Oct/FTS/Scle/Root/Deg +
   the dissolved ChordMask row's Str/Bus + mask face; fronts BOTH stack slots; where LIVE
   lands you); **Voic** = voicing + the dissolved Limit row (Sprd/Inv/Drop/Strm/Tilt ·
@@ -299,16 +300,42 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
   (reads amber on the focused occupied row).
 - **GP encoders** = the focused row's dials on the current **plane** (labels on the LCD).
   **Push = snap to the pass-through detent**; ACTION dials execute instead
-  (Robotize Rsd/Frz; PitchGen/TrigGen Roll/Anc/Snp/Bnc).
+  (Robotize Rsd/Frz; PitchGen/TrigGen Roll/Anc/Snp/Bnc; Grve Clr).
+- **Datawheel** = the **track walker** (2026-07-13 — the B-row is claimed by the rack,
+  so the wheel is how you move through the matrix): **turn = track ±1**, **push =
+  jump a group** (G1→G2→G3→G4→G1, same track position). Focused row + plane survive
+  the switch — sit on one processor and compare it across tracks; GxTy top-right is
+  the feedback. (Replaces the wheel's old duplicate ride on the headline dial.)
 - **GP row** = the plane's **face** (bespoke surface, where the row declares one):
   Ptch **Self mask** (GP1–12 = pitch classes, Self bus mode only; the LCD keyboard + LEDs
-  show the mask ALWAYS — engaged or not — and visible == paintable) · Groove **paint**
-  (16-step shape of the selected lane, custom templates) · LFO **waveform palette** (tap to
-  pick) · Tension **zone jump** (GP9–15 = DRONE…SLIP, GP16 = RESOLVE) · Robotize LOOP plane
-  **bar anchors** (tap = reroll) · PitchGen/TrigGen STEPS plane **LOCK toggles** (16-step
-  window into the 64-step loop, Win dial picks the quarter).
-- **`<` / `>` (or Up/Down)** = plane flip on two-plane rows (Robotize OPERATE⇄LOOP,
-  PitchGen/TrigGen OPERATE⇄STEPS).
+  show the mask ALWAYS — engaged or not — and visible == paintable) · Grve **paint**
+  (16-step shape of the selected lane, custom templates — **quick tap (<350 ms) =
+  toggle**: off SHADOWS the step's value, back on RESTORES it (only shadowless cells
+  paint the Val brush — 0 = intensity-follow, else a literal signed offset); **hold =
+  PEEK**: the Val cell reads out the held step (`+Int`/`-Int` for sentinel cells), a
+  long release changes nothing; **hold + turn Val = dial that step's exact cell**;
+  hold + push Val = erase (shadowed, re-tap restores). The shadow follows one template,
+  cleared on style switch / Clr. Grve's Glob cell = the stock global-groove flag — on,
+  Styl/Intn/Sync broadcast to every global track; Stps = template length; Clr =
+  whole-template reset) · LFO **waveform palette**
+  (tap to pick) · Tension **zone jump** (GP9–15 = DRONE…SLIP, GP16 = RESOLVE) · Robotize
+  LOOP plane **bar anchors** (tap = reroll) · PitchGen/TrigGen STEPS plane **LOCK
+  toggles** (16-step window into the 64-step loop, Win dial picks the quarter; since
+  2026-07-13 the plane shows the window's TRUTH twice over — the LCD **activity
+  strip** at row 1 right (`o` = sounding/unlocked "yours to lock", `#` =
+  sounding+locked, `-` = locked silence, `.` = empty) and the **duo-color GP LEDs**:
+  color 1 = triggered steps (visible pre-ENGAGE, so a punched-in phrase shows before
+  the generator exists), color 2 = locks, both = the blend, playhead inverts as it
+  sweeps. **Locks work pre-ENGAGE** (2026-07-13): the first lock tap ADOPTS a
+  disengaged slot whose loop copies your source — nothing is written or randomized —
+  and the later ENGAGE re-adopts the then-current source, arms the undo net, and
+  mutates around your locks. Punch a phrase in, lock it BY SIGHT, then engage and
+  let the generator fill around it).
+- **`<` / `>` (or Up/Down)** = plane flip on two-plane rows (Robotize OPER⇄LOOP,
+  PitchGen/TrigGen OPER⇄STEP, **LFO CONF⇄DEST** — the LFO carries the FULL stock
+  parameter set since 2026-07-13: CONF = Wave/Amp/Phas/Step/Rst/1Sht/ClkD (+ the
+  waveform-palette face), DEST = Note/Vel/Len/CC enable flags + the extra-CC stream
+  (xCC#/xCC/Offs/PPQN); the old single-select Targ router is retired).
 
 **Page LCD (base layout, 2026-07-12):** left screen = the 8-cell dial grid (label over
 value, one 5-col cell per GP encoder; SPACER cells group dials — Voic/Tens — and pad
@@ -345,7 +372,7 @@ unless the page or sel-view overrides.)
 | **CAPTURE** (Song) | dst pattern (letter\|num) | dst track | datawheel=GRAB; GP1-enc=FILL⇄LOOP |
 | **PHRASE** | morph coarse bar (when armed) | 16 snapshot waypoints | datawheel=morph ride |
 | **INS sel-view** (drum/kbd on) | *(page's own)* | drum pads / keyboard (green=in-scale, amber=root) | INSTR re-tap toggles play⇄select; RECORD arms rec-vs-preview; GP1-enc=Jump; ‹/›+datawheel=scroll; SELECT+key1/16=octave |
-| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (10 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane (§5a) |
+| **PROC** (LIVE) | the focused row's **face** (mask/paint/palette/zones/anchors/locks) | the **rack** (10 rows; tap=focus, dbl-tap=on/off) | GP-encs = row dials; push=detent/ACTION; ‹/›=plane; datawheel=track walker, push=group jump (§5a) |
 | **GRAVITY** *(legacy — Tension row covers it)* | item hints; GP8=RESOLVE, GP16=→FX_SCALE | track-select | GP1-enc=GRAVITY, GP2=SHADE, GP3=GRIP, GP4=track |
 | **ROBOLOOP** *(legacy — Robotize LOOP plane covers it)* | GP6=reseed, GP7=freeze, GP8=freeze-q; **SELECT+GP1–16 reroll measure anchor** | track-select | GP1-enc=track, GP2=palette len, GP3=loop start, GP4=cycles, GP5=rotate |
 | **TRKEUCLID** (stock, menu "GENERATE") | Euclidean trigger preview | track-select | per trigger-layer params; one-shot destructive fills — the LIVING generators are the rack's PitchGen/TrigGen rows |
@@ -362,7 +389,8 @@ The forward-looking layer — where new gestures can land, and what's already sa
   (detent-snap + ACTION exec, §5a) and Capture GP1; still free elsewhere.
 - **`<` / `>`** are value-nudge on most pages — but claimed on PROC (plane flip) and in
   INS sel-view (keyboard scroll); check §5a/§4 before reusing.
-- **datawheel push** — used sparsely; a free per-page confirm/toggle.
+- **datawheel push** — used sparsely; a free per-page confirm/toggle. **[fork]** taken
+  in PROC mode (group jump, §5a); still free elsewhere.
 - **LEFT / RIGHT firmware functions** — physically dead, but the *firmware handlers* exist
   if ever re-wired.
 - **SOLO, LOOP** — single-purpose; available as modifiers if a combo needs a fresh latch.

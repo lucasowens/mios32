@@ -231,6 +231,13 @@ extern s32 SEQ_GENERATOR_Init(u32 mode);
 // re-snapshotting.
 extern s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer);
 
+// Pre-ENGAGE lock access (2026-07-13): allocate a DISENGAGED slot whose loop ADOPTS
+// the current source (not a seed line) so locks can be set before the first engage;
+// that engage re-adopts from the then-current source and arms the undo net. No-op
+// when a slot exists. Same failure codes as Engage/EngageTrigger.
+extern s32 SEQ_GENERATOR_Adopt(u8 track, u8 instrument, u8 par_layer);
+extern s32 SEQ_GENERATOR_TrgAdopt(u8 track, u8 instrument, u8 trg_layer, u8 density);
+
 // Stop mutating; source stays as last written. Slot remains allocated so the
 // loop survives DISENGAGE→ENGAGE without re-snapshotting undo.
 extern s32 SEQ_GENERATOR_Disengage(u8 track, u8 instrument);

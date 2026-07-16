@@ -62,6 +62,15 @@ static u8 CCM_SECTION pool_index[SEQ_CORE_NUM_TRACKS][SEQ_GENERATOR_INSTRUMENTS]
 // highest-value case (one track, decoupled pitch + rhythm).
 static u8 CCM_SECTION pool_index_trg[SEQ_CORE_NUM_TRACKS][SEQ_GENERATOR_INSTRUMENTS];
 
+// Pre-ENGAGE ADOPT flag per pool slot (2026-07-13): 1 = the slot was allocated by
+// SEQ_GENERATOR_(Trg)Adopt — disengaged, loop = a copy of the user's source — so
+// locks could be set BEFORE the first engage. The engage of such a slot re-adopts
+// from the CURRENT source (material added after the adopt must not be clobbered by
+// the stale copy) and arms the undo net at that first destructive moment.
+// Deliberately a PARALLEL array, not a struct field: seq_generator_t's size is
+// frozen (the gen-state V4 block and SlotSet copy whole structs). RAM-only.
+static u8 CCM_SECTION slot_adopted[SEQ_GENERATOR_POOL_SIZE];
+
 // The generator one-deep auto-undo is now part of the unified action journal
 // (seq_core.c, §10(a2)): ENGAGE arms it via SEQ_CORE_JournalArm and the GP2
 // UNDO / disk-load invalidate route through SEQ_CORE_JournalUndo /
@@ -329,6 +338,35 @@ static void seed_loop(seq_generator_t *g)
 }
 
 
+// The ADOPT inverse of write_loop_to_source (2026-07-13): copy the user's SOURCE
+// into loop[] (PITCH: the target Note par-layer via SEQ_PAR_GetSource — NOT the
+// render mirror; TRIGGER: the target trg layer) and re-anchor it as the frozen
+// identity. The generator then starts from the user's material, not a seed line.
+static void adopt_loop_from_source(seq_generator_t *g)
+{
+  u16 num;
+  u8 i;
+  if( g->trg_layer_p1 ) {
+    u8 trg_layer = g->trg_layer_p1 - 1;
+    s32 n = SEQ_TRG_NumStepsGet(g->track);
+    num = (n > 0) ? (u16)n : 1;
+    for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i) {
+      s32 v = SEQ_TRG_Get(g->track, i % num, trg_layer, g->instrument);
+      g->loop[i] = (v > 0) ? 1 : 0;
+    }
+  } else {
+    s32 n = SEQ_PAR_NumStepsGet(g->track);
+    num = (n > 0) ? (u16)n : 1;
+    for(i=0; i<SEQ_GENERATOR_LOOP_LEN; ++i) {
+      s32 v = SEQ_PAR_GetSource(g->track, i % num, g->par_layer, g->instrument);
+      g->loop[i] = (v < 0) ? 0 : (u8)v;
+    }
+  }
+  memcpy(g->anchor, g->loop, SEQ_GENERATOR_LOOP_LEN);
+  g->anchor_valid = 1;
+}
+
+
 // Allocate a fresh pool slot or return NULL. Does NOT set in_use — the caller
 // initializes the slot fields and then sets in_use, keeping the pool walk
 // simple and the slot in a sane state by the time anyone could read it.
@@ -355,6 +393,7 @@ s32 SEQ_GENERATOR_Init(u32 mode)
   memset(pool_index, 0xFF, sizeof(pool_index));
   memset(pool_index_trg, 0xFF, sizeof(pool_index_trg));
   memset(last_seen_step, 0xFF, sizeof(last_seen_step));
+  memset(slot_adopted, 0, sizeof(slot_adopted));
   return 0;
 }
 
@@ -539,6 +578,17 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
 
   u8 ix = pool_index[track][instrument];
   if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
+    // ADOPTED-but-never-engaged slot (pre-ENGAGE locks, 2026-07-13): refresh the
+    // loop from the CURRENT source first — the user may have punched in more
+    // material since the locks were set, and the stale adopted copy must not
+    // clobber it — and arm the undo net now, at the first genuinely destructive
+    // moment (mutation starts with this engage).
+    if( slot_adopted[ix] ) {
+      SEQ_CORE_JournalArm(track);
+      pool[ix].par_layer = par_layer; // adopt reads the (possibly new) target
+      adopt_loop_from_source(&pool[ix]);
+      slot_adopted[ix] = 0;
+    }
     // Re-engage: keep loop content; adopt the (possibly new) cursor target so
     // cursor still wins; flip engaged on; force a rewrite so the current
     // (possibly UNDO-restored or paused-out-of-sync) source matches. NOT armed:
@@ -597,6 +647,7 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
 
   pool_index[track][instrument] = (u8)(g - pool);
+  slot_adopted[g - pool] = 0; // fresh ENGAGE = seeded, not adopted
 
   write_loop_to_source(g);
 
@@ -605,6 +656,54 @@ s32 SEQ_GENERATOR_Engage(u8 track, u8 instrument, u8 par_layer)
   // above can't be reordered past the publish) (#15)
   portENTER_CRITICAL();
   g->engaged = 1;
+  g->in_use  = 1;
+  portEXIT_CRITICAL();
+  return 0;
+}
+
+
+// Pre-ENGAGE lock access (2026-07-13, "set some stuff up that's locked, know what
+// to expect, then enable it and add to it"): allocate a DISENGAGED slot whose loop
+// ADOPTS the current source — the user's hand-placed material — so LockToggle has
+// a home before the first engage. Nothing is written to the track and no undo is
+// armed (nothing destructive happened yet); the later ENGAGE re-adopts from the
+// then-current source, arms the undo net, and starts mutating around the locks.
+// No-op (0) when a slot already exists. Same validation/failure codes as Engage.
+s32 SEQ_GENERATOR_Adopt(u8 track, u8 instrument, u8 par_layer)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -2;
+  if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
+
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  if( tcc->link_par_layer_note < 0 ) return -3;
+  if( par_layer >= SEQ_PAR_NumLayersGet(track) )
+    par_layer = (u8)tcc->link_par_layer_note;
+
+  u8 ix = pool_index[track][instrument];
+  if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use )
+    return 0; // slot exists — locks already have a home
+
+  seq_generator_t *g = alloc_slot();
+  if( g == NULL ) return -1;
+
+  g->track          = track;
+  g->instrument     = instrument;
+  g->par_layer      = par_layer;
+  g->trg_layer_p1   = 0;
+  g->range_min      = SEQ_GENERATOR_DEFAULT_RANGE_MIN;
+  g->range_max      = SEQ_GENERATOR_DEFAULT_RANGE_MAX;
+  g->mutation_rate  = SEQ_GENERATOR_DEFAULT_RATE;
+  g->mutation_depth = SEQ_GENERATOR_DEFAULT_DEPTH;
+  g->contour_shape  = SEQ_GENERATOR_DEFAULT_CONTOUR;
+  g->seed = SEQ_RANDOM_Gen(0) | 1;
+  adopt_loop_from_source(g); // loop + anchor = the user's source, NOT a seed line
+  memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
+
+  pool_index[track][instrument] = (u8)(g - pool);
+  slot_adopted[g - pool] = 1;
+
+  portENTER_CRITICAL();
+  g->engaged = 0; // DISENGAGED — nothing writes to the track until the user engages
   g->in_use  = 1;
   portEXIT_CRITICAL();
   return 0;
@@ -624,6 +723,14 @@ s32 SEQ_GENERATOR_EngageTrigger(u8 track, u8 instrument, u8 trg_layer, u8 densit
 
   u8 ix = pool_index_trg[track][instrument];
   if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use ) {
+    // Adopted-but-never-engaged: refresh from the CURRENT source + arm the undo
+    // net — the pitch re-engage's twin (see SEQ_GENERATOR_Engage).
+    if( slot_adopted[ix] ) {
+      SEQ_CORE_JournalArm(track);
+      pool[ix].trg_layer_p1 = trg_layer + 1;
+      adopt_loop_from_source(&pool[ix]);
+      slot_adopted[ix] = 0;
+    }
     // Re-engage: keep loop + density, adopt the (possibly new) trigger-layer
     // target, flip engaged on, force a rewrite. Same fence as pitch's re-engage.
     portENTER_CRITICAL();
@@ -653,11 +760,48 @@ s32 SEQ_GENERATOR_EngageTrigger(u8 track, u8 instrument, u8 trg_layer, u8 densit
   memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
 
   pool_index_trg[track][instrument] = (u8)(g - pool);
+  slot_adopted[g - pool] = 0; // fresh ENGAGE = seeded, not adopted
 
   write_loop_to_source(g);
 
   portENTER_CRITICAL();
   g->engaged = 1;
+  g->in_use  = 1;
+  portEXIT_CRITICAL();
+  return 0;
+}
+
+
+// TRIGGER-mode twin of SEQ_GENERATOR_Adopt (see there) — the loop adopts the
+// target trigger layer's current gates; separate pool_index_trg key space.
+s32 SEQ_GENERATOR_TrgAdopt(u8 track, u8 instrument, u8 trg_layer, u8 density)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS ) return -2;
+  if( instrument >= SEQ_GENERATOR_INSTRUMENTS ) return -2;
+  if( trg_layer >= SEQ_TRG_NumLayersGet(track) ) return -3;
+
+  u8 ix = pool_index_trg[track][instrument];
+  if( ix != 0xFF && ix < SEQ_GENERATOR_POOL_SIZE && pool[ix].in_use )
+    return 0; // slot exists — locks already have a home
+
+  seq_generator_t *g = alloc_slot();
+  if( g == NULL ) return -1;
+
+  g->track          = track;
+  g->instrument     = instrument;
+  g->trg_layer_p1   = trg_layer + 1;
+  g->range_min      = density; // doubles as density in TRIGGER mode
+  g->mutation_rate  = SEQ_GENERATOR_DEFAULT_RATE;
+  g->mutation_depth = SEQ_GENERATOR_DEFAULT_DEPTH;
+  g->seed = SEQ_RANDOM_Gen(0) | 1;
+  adopt_loop_from_source(g);
+  memset(g->mult, SEQ_GENERATOR_MULT_PACKED_DEFAULT, SEQ_GENERATOR_MULT_BYTES);
+
+  pool_index_trg[track][instrument] = (u8)(g - pool);
+  slot_adopted[g - pool] = 1;
+
+  portENTER_CRITICAL();
+  g->engaged = 0;
   g->in_use  = 1;
   portEXIT_CRITICAL();
   return 0;
@@ -762,6 +906,7 @@ s32 SEQ_GENERATOR_SlotSet(u8 track, u8 instrument, const seq_generator_t *src)
     g->in_use     = 1;
     g->track      = track;
     g->instrument = instrument;
+    slot_adopted[g - pool] = 0; // a restored slot is real state, never pre-engage
     if( !g->seed )
       g->seed = SEQ_RANDOM_Gen(0) | 1;
     return 0;
@@ -791,6 +936,7 @@ s32 SEQ_GENERATOR_SlotSet(u8 track, u8 instrument, const seq_generator_t *src)
   g->track      = track;
   g->instrument = instrument;
   g->par_layer  = par_layer;
+  slot_adopted[g - pool] = 0; // a restored slot is real state, never pre-engage
   // Per-track-RNG keystone: a slot loaded from a bank file carries seed==0 (the
   // on-disk format predates the seed field), which would alias every loaded
   // generator onto the single 0xdeadbabe stream. Mint a fresh non-zero seed in

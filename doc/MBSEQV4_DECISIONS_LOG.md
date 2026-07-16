@@ -2587,3 +2587,161 @@ push expressiveness.
 - Validation: zero-warning rebuild (-8 B flash), RAM unchanged. Flash/HIL/by-ear
   pending (one hex carries cont. 4-9).
 - Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-13 (cont. 10) — Grve: the full-page groove cockpit + hold-step value editing (position 6)**
+
+- Sixth tab-grid mock — the first to fill all 8 cells: **Styl Intn Glob Sync Stps
+  Lane Val Clr**, abbr Grv→Grve, row moves to position 6 (the timing/feel row leads
+  the emission tail). Rack: Ptch · Voic · Tens · PGen · TGen · Grve · Echo · LFO ·
+  Robo · Hum.
+- **Glob = the stock TRKGRV global-groove flag ON the rack** (inverted bit of
+  `seq_groove_ui_local_selection`, config-file state): with Glob on, **Styl/Intn/
+  Sync edits BROADCAST to every global track** (GrooveEditMask — the whole kit
+  grooves as one); a local track edits itself alone. Stock semantics, now operable
+  live.
+- **Stps** = the selected template's num_steps (1..16, custom-editable, presets
+  read-only, push=16). **Clr** = whole-template reset via stock `SEQ_GROOVE_Clear`
+  (presets refuse; num_steps back to 2, next paint re-expands).
+- **Val + hold-step (user picked option 1 over an EDIT plane):** Val is the paint
+  BRUSH — at the ±0 detent taps paint the legacy intensity-follow VPOS sentinel;
+  off-zero they paint that literal signed offset (bipolar painting). **Hold a GP
+  step + turn Val = dial that step's exact cell** (the EDIT-page hold-step idiom):
+  press arms, a turn converts the hold to a value edit (release skips the toggle),
+  plain release = the tap/toggle. While held the Val cell reads out the step
+  (`+Int`/`-Int` for sentinels); hold+push = erase. Paint toggle moved press→release.
+- **Design gap caught by the user:** the original mock had no per-step access ("i
+  cant see a way to add per step values for the Lane") — options were hold-step /
+  a 2nd EDIT plane (16 encoders = 16 steps, costs the identity block) / cursor+Val;
+  hold-step chosen (no new plane, no mode, matches the learn-gesture grammar).
+- **Broadcast×seed bug caught in self-review:** Styl's per-track engage-seed writes
+  Intn through the new broadcasting GRV_INTN case → one track's 0→on would stomp
+  every global track's shaped intensity with the 32 seed. Fixed: `proc_in_seed`
+  flag — seeds are single-track. Also SeedRowDefaults now SKIPS UI-state kinds
+  (Lane/Glob/Stps/Val + SPACER — several have cc slot 0; the untouched-guard would
+  misread CC 0).
+- Validation: zero-warning rebuild, RAM unchanged. Flash/HIL/by-ear pending —
+  NOTE: the cont. 4-9 batch got its **by-ear GO 2026-07-13** ("Go") but HIL was
+  deferred at the user's request to fold this Grve pass into the same run.
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-13 (cont. 11) — Grve hold-step refined: peek without disturbing + toggle-off shadow**
+
+- First-touch feedback on cont. 10 ("i need a way to check what a step is set to…
+  turning it back on erases the step, maybe we just persist the value that was
+  there?"). Two fixes:
+- **Tap-vs-PEEK split**: the toggle only fires on a QUICK release (<350 ms, the
+  B-row double-tap threshold). Holding to read the Val cell then releasing changes
+  nothing — inspection is free; no more sacrificial turn to protect the step.
+- **Toggle-off SHADOW**: a step's crafted value survives toggle-off AND hold+push
+  erase; a re-tap RESTORES it (shadow beats brush; only shadowless cells paint the
+  brush). 3 lanes × 16 steps (48 B UI state, +56 B bss w/ trackers), keyed to ONE
+  template — invalidated on style switch and on Clr (a cleared template must not
+  resurrect old cells). Not persisted (SD/session untouched).
+- Gesture matrix now: quick tap = toggle(shadow/restore) · hold = peek · hold+turn
+  = exact value · hold+push = erase(shadowed).
+- Validation: zero-warning rebuild. Flash/HIL/by-ear pending with cont. 10.
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-13 (cont. 12) — Humn to position 7** (page already right — Int Note Vel Len; abbr Hum→Humn; status → col 41; the FEEL pair Grve+Humn now sits together. Rack: Ptch · Voic · Tens · PGen · TGen · Grve · Humn · Echo · LFO · Robo. BUILT clean.)
+
+**2026-07-13 (cont. 13) — Robo to position 8** (both planes already matched the mock exactly — OPER Prob/Note/Vel/Len/Oct/Skip, LOOP Cyc/Pal/Strt/Rot/Rsd/Frz; the Up/Dn=LOOP hint KEPT per the mock; status → col 41. Rack: Ptch · Voic · Tens · PGen · TGen · Grve · Humn · Robo · Echo · LFO. BUILT clean.)
+
+**2026-07-13 (cont. 14) — Echo confirmed as-is; LFO expands to the full stock set on two named planes**
+
+- **Echo: zero delta.** The mock matched the current page cell-for-cell (Rpt Dly Vel
+  FbV Note Tick Gate; the 75%/±0/100% values = fresh-track stock CC defaults
+  displayed); position 9 already held by elimination; no status line, as mocked.
+- **LFO: the simplified G1.7 row grows to the FULL stock FX_LFO parameter set** on
+  two dial-bank planes: **CONF** (Wave Amp Phas Step Rst 1Sht ClkD — the waveform
+  palette face rides here) and **DEST** (Note/Vel/Len/CC enable flags + the extra-CC
+  stream: xCC# `---`/%03d, xCC enable, Offs, PPQN decoded 1..384). First row with
+  NAMED planes — new proc_row_t.p1name/.p2name (NULL = OPER/face defaults); mock's
+  "DEST 1/2" slip shipped as DEST 2/2.
+- **The single-select Targ router is RETIRED** (it forced EXTRA_CC_OFF and made the
+  flags mutually exclusive) — the DEST flags are independent, stock semantics. New
+  kinds: LFO_FLAG (bit number in the cc slot — added to the seed skip-list, cc 0 is
+  not a CC index), LFO_XCC, LFO_XCC_ON (inverted bit 5; deflt on = raw 0 neutral),
+  LFO_PPQN. Step/Rst now reach the stock 0..255 (the old 127 cap noted as G2
+  friction is gone). Status_LFO deleted — the mock leaves row 1 right blank; the
+  wave name lives in the Wave cell.
+- Display honesty deltas vs the mock's value row (flagged): fresh xCC reads `on`
+  (stock flag, stream silent while xCC#=---), Offs/PPQN read numbers (0 offset and
+  a rate are not "off" states).
+- Validation: zero-warning rebuild, RAM unchanged. Flash/HIL/by-ear pending. **The
+  page-by-page rack redesign is COMPLETE — all 10 rows mocked or confirmed.**
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-13 (cont. 15) — PROC datawheel = the track walker (turn = track ±1, push = group jump)**
+
+- User idea, endorsed: **in PROC mode the datawheel switches tracks** — the B-row is
+  claimed by the rack, so track switching previously meant leaving the page. The
+  wheel turns the rack into a MATRIX: focused row + plane survive the switch, so you
+  sit on one processor and walk it across tracks; the GxTy identity block is the
+  feedback. Costs nothing: the wheel previously just duplicated GP1's headline ride.
+- **Push = group jump** (user follow-up): G1→G2→G3→G4→G1 keeping the track position
+  within the group — fine/coarse navigation on one control. Datawheel-push was
+  documented free real estate; now taken in PROC (still free elsewhere). Falls
+  through to the FAST_ENCODERS tail like every enc press.
+- Groove template shadow is style-keyed (templates are GLOBAL objects), so the
+  hold-step shadow behaves correctly across track walks.
+- Validation: zero-warning rebuild, RAM unchanged. Flash/HIL/by-ear pending —
+  this closes the pre-HIL batch (cont. 10-15).
+- Files: `seq_ui.c` (+ surface map ×4 spots, this log, §9 chronology).
+
+**2026-07-13 (cont. 16) — gen STEPS planes show the window ACTIVITY strip**
+
+- User ask: "if i put something in manually i could go lock it by sight then add
+  more around it." The PGen/TGen STEPS planes now render a 16-cell strip (row 1
+  cols 64-79, exactly the free tail after the Steps/locked text): **o** = gate on,
+  unlocked ("yours to lock") · **#** = gate+locked · **-** = locked silence ·
+  **.** = empty · blank = past track length. Active = the step's GATE (what
+  sounds — TGen's gate layer IS its content; PGen's gated steps play the note
+  layer). GP LEDs stay the pure LOCK state, 1:1 under the buttons.
+- The punch-in→pin→generate loop is now sighted: play a phrase (iso keyboard /
+  EDIT), open the STEP plane, lock the o cells, ENGAGE — the generator mutates
+  only around the pinned phrase.
+- Shared Status_Gen implementation (both key-spaces). Zero-warning rebuild, RAM
+  unchanged. Closes the pre-HIL batch cont. 10-16.
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-13 (cont. 17) — gen STEPS LEDs go duo-color: triggered vs locked**
+
+- User follow-up on the activity strip ("show the triggered steps in both the gens
+  as one color, then another color for one thats locked"). The gen STEPS faces now
+  drive BOTH GP LED colors: **color 1 = the window's triggered steps** (gate on —
+  and visible pre-ENGAGE, so a punched-in phrase lights up before the generator
+  exists), **color 2 = the locks**, both = the blend. The LCD strip stays (the
+  legend with locked-silence/past-length detail).
+- Plumbing: new `ui_gp_leds2` overlay on the pos-marker channel — XORed with the
+  playhead (it inverts sweeping a lock), single-color hardware folds the overlay
+  into channel 1. Cleared every LED pass; only the gen faces set it. Change-detect
+  guard extended (prev2). PGen/TGen LED blocks merged into one duo-color block.
+- Zero-warning rebuild, RAM unchanged. Closes the pre-HIL batch cont. 10-17.
+- Files: `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-13 (cont. 18) — pre-ENGAGE locks: the ADOPT path**
+
+- User ask: "could i have access to locking while the gen is disabled? set some
+  stuff up thats locked, know what to expect, then enable it and add to it."
+  Investigation surfaced the REAL stakes: **a fresh ENGAGE seed_loops a random
+  Turing line and write_loop_to_source()s it over the track immediately** — a
+  hand-punched phrase never survived a first engage at all. Pre-engage locks are
+  the missing safety for the whole punch-in→pin→generate flow.
+- **New `SEQ_GENERATOR_Adopt` / `TrgAdopt`**: allocate a DISENGAGED pool slot whose
+  loop ADOPTS the current source (new `adopt_loop_from_source` — the inverse of
+  write_loop_to_source; PITCH reads `SEQ_PAR_GetSource`, NOT the render mirror;
+  TRIGGER reads the target trg layer) + re-anchors it. Nothing written, no undo
+  armed (nothing destructive yet). The UI's STEPS lock tap auto-adopts when no
+  slot exists; the row honestly reads occupied/disengaged after.
+- **ENGAGE of an adopted slot re-adopts from the THEN-current source first** (material
+  punched in between adopt and engage must not be clobbered by the stale copy),
+  arms the undo net at that first destructive moment, clears the flag, then takes
+  the normal re-engage path (write-back = audibly a no-op; mutation honors locks).
+- **Format-safety**: `adopted` lives in a parallel CCM array (`slot_adopted[]`),
+  NOT in seq_generator_t — the struct's size is frozen (gen-state V4 + SlotSet
+  whole-struct copies; G3 spent the last pad byte). Cleared at Init, fresh engages,
+  and SlotSet restores (a restored slot is real state).
+- Validation: zero-warning rebuild (+64 B CCM, tail 1400 B). Flash/HIL/by-ear
+  pending — closes the pre-HIL batch cont. 10-18. First seq_generator.c delta of
+  the arc (everything prior was seq_ui-layer).
+- Files: `seq_generator.c/h`, `seq_ui.c` (+ surface map, this log, §9 chronology).
