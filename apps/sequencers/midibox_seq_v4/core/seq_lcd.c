@@ -923,6 +923,7 @@ s32 SEQ_LCD_PrintLayerValue(u8 track, u8 par_layer, u8 par_value)
     break;
 
   case SEQ_PAR_Type_Waypoint: // POC (waypoint path): value = visit order; 0 = off
+  case SEQ_PAR_Type_SliceOrd: // slicer painted order: value = source slice 1..16; 0 = unpainted
     if( par_value == 0 )
       SEQ_LCD_PrintString(" .  ");
     else
@@ -1127,6 +1128,15 @@ s32 SEQ_LCD_PrintLayerEvent(u8 track, u8 step, u8 par_layer, u8 instrument, u8 s
       SEQ_LCD_PrintFormattedString("%3d", value);
       SEQ_LCD_PrintVBar(value >> 4);
     }
+  } break;
+
+  case SEQ_PAR_Type_SliceOrd: {
+    // slicer painted order: value = source slice 1..16; 0 = unpainted (dot)
+    u8 value = SEQ_PAR_Get(track, step, par_layer, instrument);
+    if( value == 0 )
+      SEQ_LCD_PrintString("  . ");
+    else
+      SEQ_LCD_PrintFormattedString("%3d ", value);
   } break;
 
   case SEQ_PAR_Type_VSprd:

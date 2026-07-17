@@ -303,6 +303,12 @@ class CC:
     VOICE_STRUM = 0xA1         # Voicing: 64-biased strum (64 = off; |v-64| = ticks/voice)
     VOICE_DROP = 0xA2          # Voicing: 0=off 1=Drop2 2=Drop3 3=Drop2&4
     VOICE_TILT = 0xA3          # Voicing: 64-biased velocity tilt by pitch order (64 = flat)
+    SLICE_GRID = 0xA4          # Slicer: bits 0..2 = grid (0=off, 1..4 = 2/4/8/16-step slices); bit 7 = bypass
+    SLICE_SEED = 0xA5          # Slicer: 0 = identity order, 1..127 = deterministic shuffle seed
+    SLICE_STRENGTH = 0xA6      # Slicer: thermometer over ranked slices (painted lower half, seeded upper)
+    SLICE_REPT = 0xA7          # Slicer: stutter amount (engaged slices repeat the previous output slice)
+    SLICE_REV = 0xA8           # Slicer: reverse amount (engaged slices play their steps backwards)
+    LAY_CONST_A4 = 0x03        # par-layer 3 type assignment (used to hand a test track a SlcOr layer)
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:

@@ -2745,3 +2745,105 @@ push expressiveness.
   pending — closes the pre-HIL batch cont. 10-18. First seq_generator.c delta of
   the arc (everything prior was seq_ui-layer).
 - Files: `seq_generator.c/h`, `seq_ui.c` (+ surface map, this log, §9 chronology).
+
+**2026-07-15 — Slicer tenant act 1: chop the loop like a sample (BUILT, by-ear pending)**
+
+- User ask: "a slicer/shuffler. something that i can use to chop up midi like a
+  sample and resequence it." Scope decided via alignment: BOTH surfaces (seed-browse
+  dials + painted order) and BOTH materials (drum + melodic) in act 1. Plan doc:
+  `doc/plans/2026-07-15-slicer-tenant.md`.
+- **Born as a render-stack processor at the TAIL** (new `SEQ_CORE_SLICE_SLOT 5`,
+  `NUM_PROCESSOR_SLOTS` 5→6, `SEQ_PROCESSOR_ID_SLICE`): the pass is a buffer
+  PERMUTATION — output slice i copies its par+trg step-block from source slice
+  map[i]. Non-bijective mapping ⇒ reorder/stutter/reverse are ONE primitive.
+  Chops what you HEAR (post Pitch/ChordMask/Arp/Tension/Limit); output mirror
+  holds the chop ⇒ capture/tape/bounce faithful for free, EDIT stays source.
+  Emission feel (Groove/Humanize/Echo/strum) rides on top, un-chopped.
+- **Mapping construction** (deterministic, per-track-RNG keystone; new grip_hash
+  zones 0x60-0x63): painted wins → seed fills (WITH replacement — repeats/drops
+  are the point) → REPT replaces an engaged slice with the previous OUTPUT slice
+  → REV flags in-slice reversal. STRENGTH = thermometer over hash-ranked slices;
+  painted positions engage across the LOWER dial half, seeded across the upper
+  (sweep = intent first, chaos second). Only the MAP hash folds in SEED — the
+  engage/stutter/reverse skeleton survives seed-browsing. REPT/REV skip painted
+  positions (painted = exact) and are independent dials (each 0 = off).
+- **Painted order = new `SEQ_PAR_Type_SliceOrd` (25)** par layer, the Waypoint
+  idiom: value 1..16 = source slice in the current 16-slice window, 0 =
+  unpainted; painted ANYWHERE inside a slice counts (first non-zero byte); read
+  from SOURCE (EDIT-page painting is the act-1 surface — a bespoke GP face on
+  plane 2 waits for a user tab-grid mock, per the mock ritual). Excluded (with
+  Waypoint) from the permute itself: control-topology layers stay pinned.
+- **CCs 0xA4-0xA8** (GRID bits0..2 + bit7 bypass / SEED / STRENGTH / REPT / REV),
+  all 0-neutral ⇒ V5 block persists them as-is, NO format bump (old V5 records
+  hold 0s there — the write path already clamped unmapped headroom to 0).
+  Bounce reset zeroes all five (GENERATION axis, the ARP reasoning: the capture
+  baked the chop). `SEQ_CORE_SliceSlotSync` = the Arp sync shape, joined
+  `AllSlotSync`.
+- **Sweep fence**: a cross-step permute can't render sweep_window_render's
+  partial window (output steps pull from OUTSIDE it) — slice-armed tracks skip
+  the sweep regime, always the quiet full render (per-CC-write cost, fine at
+  POC grain). Scratch = 400 B main-SRAM .bss (map 128 + rev 16 + one 256-byte
+  row snapshot; render is effectively single-threaded).
+- **Rack row 11 "Slic" at position 6** (between the generators and the feel trio):
+  Grid (headline, off/2stp/4stp/8stp/16st; 0→on engage-seeds Seed=1 + Str=127) ·
+  Seed · Str · Rept · Rev. Double-tap = config-PRESERVING bypass (GRID bit 7, the
+  Voicing spirit — the chop drops in/out live), NOT the param-row reset. Status:
+  slice geometry + where the painted order lives / how to get one.
+- **Deferred by choice** (plan doc): CHOKE (cut lengths at slice edges), MOTION
+  (per-bar re-roll — mechanism known: dirty-on-bar + seed=f(bar)), live
+  slice-jump pads, per-drum scope CC pair, >16-slice painted windows, plane-2
+  painted-order GP face (needs the user's mock).
+- Validation: zero-warning rebuild; RAM: +128 B CCM (slot array, tail ~1.3 KB),
+  +400 B main .bss scratch, ~12.7 KB main free. Flash/HIL/by-ear pending; HIL
+  pins sketched in the plan doc.
+- Files: `seq_core.c/h`, `seq_cc.c/h`, `seq_par.c/h`, `seq_ui.c` (+ surface map,
+  this log, §9 chronology, plan doc).
+
+**2026-07-16/17 — Slicer HIL pins + the ext-CC replay gap (fix: ExtCcNeutralExtend); baseline 278/278**
+
+- Slicer act 1 flashed; by-ear "works!" after one display fix: the EDIT-page value
+  printers (`SEQ_LCD_PrintLayerValue` + `SEQ_LCD_PrintLayerEvent`) fell to "????"
+  for par type 25 — the encoder worked the whole time, every value just rendered
+  as "????". SlcOr now shows the Waypoint idiom (dot = unpainted, else 1..16).
+- **10 HIL pins** (`tests/apps/seq_v4/test_slicer.py`, + harness `CC.SLICE_*` /
+  `LAY_CONST_A4`): true pass-through (all-zero AND armed-grid+strength-0), exact
+  painted permutation across note+velocity+gate bits (mid-slice paint counts;
+  SlcOr layer itself un-permuted), the strength-63 thermometer boundary (painted
+  all in / seeded none), REPT=127 cascade to slice 0, REV=127 per-slice reversal,
+  seeded rearrangement + byte-identical re-render, bypass-bit round-trip, GRID
+  clamp, per-drum-instrument permute (trg fixture is 8 layers × 1 instrument —
+  per-drum trg instruments don't exist on track_drum_init), degrade-safe ext-CC
+  persistence. All hash-free except the rearrangement pin.
+- **The 14 capture-family reds were NOT capture bugs** — a day-long hunt (worth
+  its own postmortem): the user's jam left the slicer ARMED (Grid=1/Seed=1/
+  Str=127, the engage-seed signature) and that RAM state SURVIVED every pattern
+  load of V3/V4-era records, because the pattern/track ext-CC replay only wrote
+  the CCs present in the record — "0xa0+ keep in-RAM values" (the documented
+  old-slot voicing quirk, benign for feel dials, STRUCTURAL for the slicer).
+  Every AUTOTEST fixture load carried the armed chop on the borrowed dst track;
+  14 tests read correct content through a 2-step-slice shuffle (the "lost" drum
+  bytes, arp 69→57, "+2 rotations" were all the slicer's deterministic map).
+  Bounce/capture/SD paths were faithful throughout. Diagnosis was confounded by
+  the conftest session dance (AUTOTEST ↔ the user's "Chop" session): passing
+  repro scripts were accidentally measuring Chop's V5 banks.
+- **Fix: `ExtCcNeutralExtend()`** (seq_file_b.c) — pattern AND track loads now
+  neutral-extend the ext-CC replay to the live count (0s; strum/tilt 64) on all
+  record generations V1..V4, the PhraseReadCCs contract applied to loads. A
+  pattern load now genuinely clears leftover slicer/voicing state — recall
+  faithfulness. Retroactively cures the "voicing persists until reboot on old
+  slots" quirk. Remix-skipped tracks still deliberately keep RAM values.
+- **DURABLE RULE (the general lesson): a new ext-block CC is not "0-neutral
+  safe" until the READ side neutral-extends old records — the write-side clamp
+  alone leaves RAM leakage through every old-record load.** The V5 bump pinned
+  the write side; the read side was the missing half.
+- Sharp edges found + boarded (OPEN_ITEMS): CMD_BANK_CREATE stale bank-info
+  cache (loads -132 until a REAL session switch; same-name session_load
+  short-circuits); harness transport-stop doesn't rewind the song position.
+  AUTOTEST bank 1 was re-created + densified during recovery (test debris also
+  landed in the user's Chop session bank 0 slots 60-63 — flagged to user).
+- Validation: full suite **278/278 = the new baseline** (268 + 10 slicer pins)
+  on the fixed firmware. `tests/log_traffic_plugin.py` added (SysEx wire-diff
+  shim that cracked the case — kept as a diagnostic tool).
+- Files: `seq_lcd.c`, `seq_file_b.c`, `seq_cc.c` (bounce-reset comment),
+  `tests/apps/seq_v4/test_slicer.py`, `tests/harness/sysex.py`,
+  `tests/log_traffic_plugin.py` (+ OPEN_ITEMS, this log, §9 chronology).

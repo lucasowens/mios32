@@ -42,7 +42,19 @@ Fix plans live in [plans/2026-07-02-held-findings-35-46.md](plans/2026-07-02-hel
   run 2026-07-11 (rotation match off by ~2 steps + one foreign head byte = capture-vs-
   playhead phase race), passed the same day's other full run + 3/3 isolated re-runs on
   identical firmware. If it reds again, suspect the test's phase-sampling window, not the
-  capture engine.
+  capture engine. *2026-07-17 note: a lookalike signature (block rotations in mirror
+  reads) turned out to be leftover ext-CC state chopping the mirror — see the
+  ExtCcNeutralExtend postmortem in the decisions log before chasing phase math.*
+- **`CMD_BANK_CREATE` leaves the cached bank info stale** (found 2026-07-17 while
+  restoring AUTOTEST bank 1): after the verb re-creates a bank file, saves "commit" but
+  loads return `SEQ_FILE_B_ERR_READ` (-132) until a REAL session switch re-opens the
+  bank — and a same-name `session_load` short-circuits without refreshing. Fix: the verb
+  should invalidate/re-open the bank info itself. Testctrl-only surface (the instrument
+  never re-creates banks under a live session).
+- **Harness `transport(False)` doesn't rewind the song position** — it calls
+  `SEQ_BPM_Stop()` only; the physical STOP button path also resets `bpm_tick`. Tests
+  that assume step-0 state after a harness stop inherit whatever mid-measure position
+  the last play left. Consider a REWIND flag on the verb (or button-path parity).
 - **Retire `seq_ui_trkpitchgen.c` ("Pitch Gen (POC)" menu page)** — superseded by the PROC
   PitchGen row. Coupled: harness `Page.PITCHGEN` + `tests/capture_now.py`; needs an HIL run.
   (Queued since 2026-06-22, design doc §7 reclaim ledger.)

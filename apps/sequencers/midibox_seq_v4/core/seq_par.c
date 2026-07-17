@@ -79,6 +79,7 @@ static const char seq_par_type_names[SEQ_PAR_NUM_TYPES][6] = {
   "VInv ", // 22
   "VStrm", // 23
   "VTilt", // 24
+  "SlcOr", // 25
 };
 
 static const u8 seq_par_map[SEQ_PAR_NUM_TYPES] = { // allows to change the order for the UI selection
@@ -103,6 +104,7 @@ static const u8 seq_par_map[SEQ_PAR_NUM_TYPES] = { // allows to change the order
   SEQ_PAR_Type_Scale,
   SEQ_PAR_Type_Ctrl,
   SEQ_PAR_Type_Waypoint,
+  SEQ_PAR_Type_SliceOrd,
   SEQ_PAR_Type_VSprd,
   SEQ_PAR_Type_VInv,
   SEQ_PAR_Type_VStrm,
@@ -135,6 +137,7 @@ static const u8 seq_par_default_value[SEQ_PAR_NUM_TYPES] = {
   64,   // VInv: neutral offset
   64,   // VStrm: neutral offset
   64,   // VTilt: neutral offset
+  0x00, // SliceOrd: unpainted (seed/identity fills)
 };
 
 static const u8 seq_par_max_value[SEQ_PAR_NUM_TYPES] = {
@@ -163,6 +166,7 @@ static const u8 seq_par_max_value[SEQ_PAR_NUM_TYPES] = {
   0x7f, // VInv: 64-biased offset
   0x7f, // VStrm: 64-biased offset
   0x7f, // VTilt: 64-biased offset
+  16,   // SliceOrd: source slice 1..16 within the window (0 = unpainted)
 };
 
 

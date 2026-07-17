@@ -24,7 +24,7 @@
 
 #define SEQ_CORE_NUM_BPM_PRESETS       16
 
-#define SEQ_CORE_NUM_PROCESSOR_SLOTS   5
+#define SEQ_CORE_NUM_PROCESSOR_SLOTS   6
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -273,6 +273,7 @@ typedef enum {
   SEQ_PROCESSOR_ID_PITCH      = 3, // transpose+FTS (Track 2 pitch-chain migration)
   SEQ_PROCESSOR_ID_LIMIT      = 4, // note-limit octave fold (Track 2 Stage B)
   SEQ_PROCESSOR_ID_ARP        = 5, // deterministic step-indexed chord-tone select
+  SEQ_PROCESSOR_ID_SLICE      = 6, // slicer: chop the rendered loop into slices + resequence (plan 2026-07-15)
 } seq_processor_id_t;
 
 typedef struct {
@@ -293,6 +294,7 @@ typedef struct {
 #define SEQ_CORE_ARP_SLOT       2 // sibling to CHORD_MASK: select-one vs snap-toward-any
 #define SEQ_CORE_TENSION_SLOT   3
 #define SEQ_CORE_LIMIT_SLOT     4
+#define SEQ_CORE_SLICE_SLOT     5 // TAIL by design: the slicer chops what you HEAR — everything upstream included
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -497,6 +499,7 @@ extern void SEQ_CORE_LimitSlotSync(u8 track);
 // tcc (arp_mode). Armed iff arp_mode != 0; never armed in legacy Arpeggiator
 // playmode or Drum event mode (same fence as PITCH/LIMIT). Called from SEQ_CC_Set.
 extern void SEQ_CORE_ArpSlotSync(u8 track);
+extern void SEQ_CORE_SliceSlotSync(u8 track);
 
 // All five tenant syncs in one call — required after any RAW tcc write on a
 // LIVE track (memcpy restore / direct-field reset bypasses the SEQ_CC_Set

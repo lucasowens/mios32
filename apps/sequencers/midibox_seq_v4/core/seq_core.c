@@ -1261,6 +1261,225 @@ static void arp_render_range(u8 track, const seq_processor_slot_t *p,
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// SLICER tenant (plan 2026-07-15) — render-stack TAIL processor. Treats the
+// track's HEARD output as a sample: the loop is divided into equal slices
+// (GRID = 2/4/8/16 steps) and resequenced as a buffer permutation — output
+// slice i takes its par+trg step-block from source slice map[i]. The mapping
+// need not be a bijection, so reorder / stutter-repeat / reverse are one
+// primitive. Runs LAST in slot order (after LIMIT), so it chops everything
+// the pitch chain and GRAVITY did to the steps; emission-time feel (Groove
+// shift, Humanize, Echo, strum ranks) rides on top, un-chopped, as usual.
+//
+// Mapping inputs, all deterministic (per-track-RNG keystone — same dials,
+// same material, same chop, forever; captures re-render byte-identically):
+//  - PAINTED order: the first SEQ_PAR_Type_SliceOrd par layer (Waypoint
+//    idiom, 0 = unpainted). Value 1..16 = source slice within the current
+//    16-slice window; painted anywhere inside a slice counts (first non-zero
+//    byte wins), read from the SOURCE buffer so EDIT-page painting is live.
+//  - SEED: 0 = identity; else a hash-keyed shuffle fills unpainted positions
+//    (with replacement — repeats/drops are the musical point).
+//  - STRENGTH (slot->strength, the row's universal sweep): a thermometer over
+//    hash-ranked slices. Painted positions engage across the LOWER dial half
+//    (all in by 64), seeded across the UPPER — sweeping 0->127 brings in the
+//    deliberate order first, then the chaos. 0 = true pass-through.
+//  - REPT / REV: independent thermometers (each 0 = off). REPT replaces an
+//    engaged slice with a repeat of the previous OUTPUT slice (stutter); REV
+//    plays a slice's steps backwards. Both skip painted positions (painted =
+//    exact). Only the MAP hash folds in SEED — the engage/stutter/reverse
+//    skeleton stays put while browsing seeds, so the groove survives the hunt.
+//
+// SWEEP FENCE: a cross-step permute cannot render a partial window (output
+// steps pull content from OUTSIDE the window, which the sweep never rebuilt) —
+// SEQ_CORE_RenderTrack forces the quiet full-buffer path while the slice slot
+// is armed. Cost: a dial sweep re-renders the full track per CC write instead
+// of per-tick window slices (the pre-sweep-regime behavior; fine at POC grain).
+/////////////////////////////////////////////////////////////////////////////
+
+// Zone axis (grip_hash): 0x60 block — distinct from TENSION 0..6, CHORD_MASK
+// 0x20, ARP 0x40. MAP folds SEED into the hash's instr axis; the others pass 0.
+#define GRIP_ZONE_SLICE_MAP   0x60
+#define GRIP_ZONE_SLICE_RANK  0x61
+#define GRIP_ZONE_SLICE_REPT  0x62
+#define GRIP_ZONE_SLICE_REV   0x63
+
+// Max slices per loop: 256 steps / min 2-step grid. Map + rev + one-row scratch
+// are STATIC (main-SRAM .bss, ~400 B) — the render path is effectively single-
+// threaded (tick renderer while playing, synchronous edit-flush while stopped),
+// same concurrency envelope as the output-mirror halves themselves.
+#define SLICE_MAX_SLICES 128
+static u8 slice_map[SLICE_MAX_SLICES];
+static u8 slice_rev_bits[SLICE_MAX_SLICES/8];
+static u8 slice_row_scratch[256]; // one par row (<=256 steps) or trg row (<=32 bytes)
+
+static inline u8 slice_rev_get(u16 os) {
+  return (slice_rev_bits[os>>3] >> (os&7)) & 1;
+}
+
+// Build slice_map/slice_rev_bits for a domain of S slices (S <= SLICE_MAX_SLICES).
+// Windows of 16 slices wrap for long loops: painted/seeded picks stay within the
+// output slice's own window, so the per-bar feel repeats instead of smearing.
+static void slice_map_build(u8 track, const seq_cc_trk_t *tcc, u8 strength,
+                            u16 S, u8 len, s8 ord_layer, u16 num_p_steps)
+{
+  u8 seed = tcc->slice_seed;
+  u8 rept = tcc->slice_rept;
+  u8 rev  = tcc->slice_rev;
+  u16 os;
+  for(os=0; os<S; ++os) {
+    u16 win = os & ~0x000f; // 16-slice window base
+    // painted: first non-zero SliceOrd byte within the slice, from the SOURCE
+    // par buffer (wraps into the par domain when the trg domain runs longer)
+    u8 painted = 0;
+    if( ord_layer >= 0 && num_p_steps ) {
+      const u8 *src = &seq_par_layer_value[track][(u32)ord_layer * num_p_steps];
+      u16 s0 = (u16)(((u32)os * len) % num_p_steps);
+      u8 k;
+      for(k=0; k<len; ++k) {
+        u16 s = (u16)(s0 + k);
+        if( s >= num_p_steps )
+          break;
+        if( src[s] ) { painted = src[s]; break; }
+      }
+    }
+    // strength thermometer (rank hash does NOT fold in seed — stable skeleton)
+    u8 rank = grip_hash(track, 0, os, GRIP_ZONE_SLICE_RANK);
+    u8 thr = painted ? (u8)(rank % 63)         // 0..62  — all painted in by 64
+                     : (u8)(63 + (rank % 64)); // 63..126 — seeded rides the upper half
+    u16 m = os; // identity
+    if( strength > thr ) {
+      if( painted ) {
+        u16 t = (u16)(win + (painted - 1));
+        m = (t < S) ? t : (u16)(S - 1);
+      } else if( seed ) {
+        u16 wsz = (u16)(S - win);
+        if( wsz > 16 ) wsz = 16;
+        m = (u16)(win + (grip_hash(track, seed, os, GRIP_ZONE_SLICE_MAP) % wsz));
+      }
+    }
+    // REPT: repeat the previous OUTPUT slice (its map is final). grip_hash caps
+    // at 126, so a 127 dial is "always".
+    if( os > 0 && !painted && rept &&
+        grip_hash(track, 0, os, GRIP_ZONE_SLICE_REPT) < rept )
+      m = slice_map[os-1];
+    slice_map[os] = (u8)m;
+    u8 r = (!painted && rev &&
+            grip_hash(track, 0, os, GRIP_ZONE_SLICE_REV) < rev) ? 1 : 0;
+    if( r )
+      slice_rev_bits[os>>3] |= (u8)(1u << (os&7));
+    else
+      slice_rev_bits[os>>3] &= (u8)~(1u << (os&7));
+  }
+}
+
+// The permute pass. Full-buffer only (see the sweep fence). par and trg have
+// independent step domains (a drum track's trg often runs longer than its par);
+// each applies the shared map over its own slice count — windows keep the
+// pattern consistent — and falls back to identity where a map entry points
+// past its domain.
+static void slice_render_apply(u8 track, const seq_processor_slot_t *p,
+                               u8 *par_buf, u8 *trg_buf)
+{
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  u8 grid = tcc->slice_grid;
+  if( (grid & 0x80) || !(grid & 0x07) )
+    return; // bypassed / off (belt and braces; SliceSlotSync gates the slot)
+  u8 len = (u8)(1u << (grid & 0x07)); // 1..4 -> 2/4/8/16 steps per slice
+  u8 strength = p->strength;         // durable rule: strength renders from the SLOT
+  if( !strength && !tcc->slice_rept && !tcc->slice_rev )
+    return; // every axis at 0 = true pass-through
+
+  u16 num_p_steps  = (u16)SEQ_PAR_NumStepsGet(track);
+  u8  num_p_layers = (u8)SEQ_PAR_NumLayersGet(track);
+  u8  num_p_instr  = (u8)SEQ_PAR_NumInstrumentsGet(track);
+  u16 num_t_steps  = (u16)SEQ_TRG_NumStepsGet(track);
+  u8  num_t_layers = (u8)SEQ_TRG_NumLayersGet(track);
+  u8  num_t_instr  = (u8)SEQ_TRG_NumInstrumentsGet(track);
+  u16 num_t_step8  = (u16)(num_t_steps / 8);
+
+  if( num_p_steps > 256 || num_t_step8 > 256 )
+    return; // scratch bound: a par/trg row must fit slice_row_scratch (256-step tracks max)
+
+  u16 S_par = (u16)(num_p_steps / len);
+  u16 S_trg = (u16)(num_t_steps / len);
+  u16 S = (S_par > S_trg) ? S_par : S_trg;
+  if( S > SLICE_MAX_SLICES ) S = SLICE_MAX_SLICES;
+  if( S_par > S ) S_par = S;
+  if( S_trg > S ) S_trg = S;
+  if( S < 2 )
+    return; // nothing to resequence
+
+  // painted-order layer: first SliceOrd assignment wins (Waypoint idiom)
+  s8 ord_layer = -1;
+  {
+    u8 l;
+    for(l=0; l<num_p_layers; ++l)
+      if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_SliceOrd ) { ord_layer = (s8)l; break; }
+  }
+
+  slice_map_build(track, tcc, strength, S, len, ord_layer, num_p_steps);
+
+  u8 is_drum = (tcc->event_mode == SEQ_EVENT_MODE_Drum);
+  u8 instr, layer;
+  u16 os;
+
+  // par rows: move step-blocks wholesale (notes/vel/len/CC travel with their step)
+  for(instr=0; instr<num_p_instr; ++instr) {
+    if( is_drum && !(p->drum_mask & (1u << instr)) )
+      continue;
+    for(layer=0; layer<num_p_layers; ++layer) {
+      seq_par_layer_type_t t = SEQ_PAR_AssignmentGet(track, layer);
+      if( t == SEQ_PAR_Type_SliceOrd || t == SEQ_PAR_Type_Waypoint )
+        continue; // control-topology layers describe POSITIONS, not content — pinned
+      u8 *row = &par_buf[((u32)instr * num_p_layers + layer) * num_p_steps];
+      memcpy(slice_row_scratch, row, num_p_steps);
+      for(os=0; os<S_par; ++os) {
+        u8 src = slice_map[os];
+        u8 rv  = slice_rev_get(os);
+        if( (src == os && !rv) || src >= S_par )
+          continue;
+        u16 dst0 = (u16)(os * len), src0 = (u16)(src * len);
+        if( !rv ) {
+          memcpy(&row[dst0], &slice_row_scratch[src0], len);
+        } else {
+          u8 k;
+          for(k=0; k<len; ++k)
+            row[dst0 + k] = slice_row_scratch[src0 + (len - 1 - k)];
+        }
+      }
+    }
+  }
+
+  // trg rows: same blocks at bit grain (gates/accents/rolls travel with the step).
+  // LSB-first within a byte (SEQ_TRG_Get addressing).
+  if( num_t_step8 ) {
+    for(instr=0; instr<num_t_instr; ++instr) {
+      if( is_drum && !(p->drum_mask & (1u << instr)) )
+        continue;
+      for(layer=0; layer<num_t_layers; ++layer) {
+        u8 *row = &trg_buf[((u32)instr * num_t_layers + layer) * num_t_step8];
+        memcpy(slice_row_scratch, row, num_t_step8);
+        for(os=0; os<S_trg; ++os) {
+          u8 src = slice_map[os];
+          u8 rv  = slice_rev_get(os);
+          if( (src == os && !rv) || src >= S_trg )
+            continue;
+          u16 dst0 = (u16)(os * len), src0 = (u16)(src * len);
+          u8 k;
+          for(k=0; k<len; ++k) {
+            u16 sb = (u16)(src0 + (rv ? (len - 1 - k) : k));
+            u16 db = (u16)(dst0 + k);
+            if( (slice_row_scratch[sb>>3] >> (sb&7)) & 1 )
+              row[db>>3] |= (u8)(1u << (db&7));
+            else
+              row[db>>3] &= (u8)~(1u << (db&7));
+          }
+        }
+      }
+    }
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // Track 2 — pitch-chain migration (plan 2026-06-10). The emission-time pitch
 // chain (SEQ_CORE_Transpose → force-to-scale; the note limit follows in
 // Stage B) becomes a render-stack processor, so the output mirror holds the
@@ -1975,10 +2194,19 @@ void SEQ_CORE_RenderTrack(u8 track)
     return;
 
   if( SEQ_CORE_RenderSweeping(track) ) {
-    // Sweep regime — partial slice into active half, no flip, keep dirty so
-    // the next tick re-runs the sweep until the touched timestamp expires.
-    sweep_window_render(track);
-    return;
+    // Slicer fence: a cross-step permute can't render a partial window (output
+    // steps pull content from OUTSIDE the window, which the sweep never
+    // rebuilt) — while the slice slot is armed+enabled, skip the sweep regime
+    // and take the quiet full-buffer path below (per-CC-write cost, see the
+    // slicer section header). sweep_window_render's own slot loop has no SLICE
+    // case, so this fence is the only place that keeps the two consistent.
+    const seq_processor_slot_t *sl = &seq_processor_stack[track][SEQ_CORE_SLICE_SLOT];
+    if( !(sl->id == SEQ_PROCESSOR_ID_SLICE && sl->enabled) ) {
+      // Sweep regime — partial slice into active half, no flip, keep dirty so
+      // the next tick re-runs the sweep until the touched timestamp expires.
+      sweep_window_render(track);
+      return;
+    }
   }
 
   // Quiet regime — full render into the inactive half, then atomic flip. Copy only the
@@ -2018,6 +2246,9 @@ void SEQ_CORE_RenderTrack(u8 track)
         break;
       case SEQ_PROCESSOR_ID_LIMIT:
         limit_render_range(track, p, par_buf, trg_buf, 0, num_p_steps);
+        break;
+      case SEQ_PROCESSOR_ID_SLICE:
+        slice_render_apply(track, p, par_buf, trg_buf);
         break;
       default:
         break;
@@ -2090,6 +2321,36 @@ void SEQ_CORE_ArpSlotSync(u8 track)
     slot->drum_mask = 0xFFFF;
     SEQ_CORE_RenderTouched(track);
   } else if( slot->id == SEQ_PROCESSOR_ID_ARP ) {
+    slot->id        = SEQ_PROCESSOR_ID_NONE;
+    slot->enabled   = 0;
+    slot->strength  = 0;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  }
+}
+
+// SLICER tenant: armed iff grid != 0 (the Arp "active on non-neutral state" shape).
+// Bypass (grid bit 7) keeps the slot ARMED but disabled — occupancy survives, the
+// chop drops out (the config-preserving double-tap). strength rides the slot per
+// the durable rule (the render pass reads p->strength, never tcc, for the sweep).
+// Whole-kit drum scope for act 1 (no per-drum mask CC yet — the slicer chops
+// structure, not pitch, so ChordMask's drum scope is NOT shared).
+void SEQ_CORE_SliceSlotSync(u8 track)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  seq_processor_slot_t *slot = &seq_processor_stack[track][SEQ_CORE_SLICE_SLOT];
+
+  if( tcc->slice_grid & 0x07 ) {
+    slot->id        = SEQ_PROCESSOR_ID_SLICE;
+    slot->enabled   = (tcc->slice_grid & 0x80) ? 0 : 1;
+    slot->strength  = tcc->slice_strength;
+    slot->bus       = 0;
+    slot->drum_mask = 0xFFFF;
+    SEQ_CORE_RenderTouched(track);
+  } else if( slot->id == SEQ_PROCESSOR_ID_SLICE ) {
     slot->id        = SEQ_PROCESSOR_ID_NONE;
     slot->enabled   = 0;
     slot->strength  = 0;
@@ -2219,6 +2480,7 @@ void SEQ_CORE_AllSlotSync(u8 track)
   SEQ_CORE_PitchSlotSync(track);
   SEQ_CORE_LimitSlotSync(track);
   SEQ_CORE_ArpSlotSync(track);
+  SEQ_CORE_SliceSlotSync(track);
 }
 
 // PITCH is implicit-dirty (per tick) only when its inputs are live — the

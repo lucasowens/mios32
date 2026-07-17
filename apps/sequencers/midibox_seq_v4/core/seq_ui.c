@@ -1499,6 +1499,10 @@ typedef enum {
                       //   never yank the global scale onto the ladder — so the table's
                       //   lo/deflt are -1. Divergence from the page: CCW from off-ladder
                       //   does nothing (the page jumps to Loc); enter the ladder CW (Tens).
+  PROC_KIND_SLICE_GRID, // Slicer grid/headline: slice length in bits 0..2 (0 = off/dark
+                      //   row, 1..4 = 2/4/8/16 steps), 0x80 = the row's bypass bit.
+                      //   Masked RMW preserving bypass (Echo idiom); the 0->on turn
+                      //   engage-seeds Seed/Str so the chop is audible at once (Slicer).
 } proc_pkind_t;
 
 // Action ids for PROC_KIND_ACTION params (stored in the param's `cc` slot). PitchGen and
@@ -1622,6 +1626,7 @@ static void SEQ_UI_PROC_Status_PitchGen(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_TrigGen(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_Humanize(u8 track, u8 slot);
 static void SEQ_UI_PROC_Status_Voicing(u8 track, u8 slot);
+static void SEQ_UI_PROC_Status_Slicer(u8 track, u8 slot);
 
 // Ptch — the merged pitch-domain cockpit (2026-07-12): the old Pitch row (transpose
 // Semi/Oct + force-to-scale FTS with the GLOBAL Scale/Root/Deg it snaps to) absorbed
@@ -1867,6 +1872,25 @@ static const proc_param_t proc_params_voicing[] = {
   { "Hi",   PROC_KIND_LIMIT_HI,      SEQ_CC_LIMIT_UPPER,    1, 127, 127, PROC_FMT_DEFAULT },
 };
 
+// Slicer — render-stack TAIL processor (plan 2026-07-15): chop the HEARD loop into
+// equal slices and resequence them. Grid is the headline/occupancy dial (0 = off/dark;
+// 1..4 = 2/4/8/16-step slices; its 0->on turn engage-seeds Seed=1 + Str=127 so the
+// chop is audible at once). Seed browses deterministic shuffles (0 = identity —
+// painted order still applies); Str is the universal sweep (a thermometer over ranked
+// slices — painted positions engage across the lower dial half, seeded across the
+// upper); Rept = stutter (repeat the previous output slice), Rev = in-slice reverse,
+// both independent thermometers. PAINTED order = a SEQ_PAR_Type_SliceOrd par layer
+// (assign in TrkEvnt, paint on the EDIT page — the Waypoint idiom; value 1..16 =
+// source slice, 0 = unpainted). Double-tap = config-preserving bypass (GRID bit 7),
+// so the chop drops in/out live without losing the dialled shape.
+static const proc_param_t proc_params_slicer[] = {
+  { "Grid", PROC_KIND_SLICE_GRID, SEQ_CC_SLICE_GRID,     0,   4, 0, PROC_FMT_DEFAULT },
+  { "Seed", PROC_KIND_CC,         SEQ_CC_SLICE_SEED,     0, 127, 0, PROC_FMT_DEFAULT, 1 },
+  { "Str",  PROC_KIND_CC,         SEQ_CC_SLICE_STRENGTH, 0, 127, 0, PROC_FMT_DEFAULT, 127 },
+  { "Rept", PROC_KIND_CC,         SEQ_CC_SLICE_REPT,     0, 127, 0, PROC_FMT_DEFAULT },
+  { "Rev",  PROC_KIND_CC,         SEQ_CC_SLICE_REV,      0, 127, 0, PROC_FMT_DEFAULT },
+};
+
 static const proc_row_t proc_rows[] = {
   { .name = "Pitch",     .abbr = "Ptch", .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_PITCH_SLOT,
     .params = proc_params_pitch,     .n_params = 8, .face1 = PROC_FACE_CHORDMASK_SELF,
@@ -1892,7 +1916,13 @@ static const proc_row_t proc_rows[] = {
     .params = proc_params_triggen_op,  .n_params = 8,
     .params2 = proc_params_triggen_steps, .n_params2 = 8, .face2 = PROC_FACE_TRIGGEN_STEPS,
     .status = SEQ_UI_PROC_Status_TrigGen },
-  // Grve at position 6 (2026-07-13 mock): the timing/feel row leads the emission tail.
+  // Slic at position 6 (plan 2026-07-15): the structural chop sits between the
+  // generators (whose material it resequences — the slice pass runs at the render-
+  // stack TAIL, after everything pitch-shaped) and the feel pair below.
+  { .name = "Slicer",    .abbr = "Slic", .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_SLICE_SLOT,
+    .params = proc_params_slicer,    .n_params = 5,
+    .status = SEQ_UI_PROC_Status_Slicer },
+  // Grve at position 7 (2026-07-13 mock): the timing/feel row leads the emission tail.
   { .name = "Groove",    .abbr = "Grve", .rowkind = PROC_ROW_EMISSION,
     .params = proc_params_groove,    .n_params = 8,
     .occ_cc = SEQ_CC_GROOVE_STYLE, .disable_mask = 0x80, .face1 = PROC_FACE_GROOVE_PAINT,
@@ -2425,6 +2455,8 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
   }
   case PROC_KIND_SHADE:
     return SEQ_UI_GRAVITY_ShadePosGet(); // ladder pos, -1 = off-ladder
+  case PROC_KIND_SLICE_GRID:
+    return SEQ_CC_Get(track, p->cc) & 0x07; // grid clicks; strip the 0x80 bypass bit
   default: // CC, CM_STR, HUM_VALUE
     return SEQ_CC_Get(track, p->cc);
   }
@@ -2740,6 +2772,17 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
   case PROC_KIND_SHADE:
     SEQ_UI_GRAVITY_ShadeSet(v); // GLOBAL scale via the ladder; v<0 = no-op (see the kind)
     break;
+  case PROC_KIND_SLICE_GRID: {
+    u8 raw = SEQ_CC_Get(track, p->cc);
+    u8 oldgrid = raw & 0x07;
+    SEQ_CC_Set(track, p->cc, (raw & 0x80) | ((u8)v & 0x07)); // preserve the bypass bit
+    // Engage-seed: grid alone is silent (seed 0 = identity, strength 0 = pass-through).
+    // On the 0->on turn, seed Seed=1 + Str=127 (each guarded on its own untouched
+    // state) so dialling Grid up chops at once.
+    if( oldgrid == 0 && ((u8)v & 0x07) )
+      SEQ_UI_PROC_SeedRowDefaults(track, p);
+    break;
+  }
   default: // CC, CM_STR
     SEQ_CC_Set(track, p->cc, (u8)v);
     break;
@@ -2918,6 +2961,11 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_KIND_SHADE:
     SEQ_LCD_PrintFormattedString("%-4s", SEQ_UI_GRAVITY_ShadeName(v));
     return;
+  case PROC_KIND_SLICE_GRID: {
+    static const char *const gn[5] = { "off ", "2stp", "4stp", "8stp", "16st" };
+    SEQ_LCD_PrintString(gn[(v >= 0 && v < 5) ? v : 0]);
+    return;
+  }
   case PROC_KIND_GEN_RANGE_LO:
   case PROC_KIND_GEN_RANGE_HI:
   case PROC_KIND_GEN_RATE:
@@ -3290,6 +3338,29 @@ static void SEQ_UI_PROC_Status_Voicing(u8 track, u8 slot)
   u8 strum = SEQ_CC_Get(track, SEQ_CC_VOICE_STRUM);
   SEQ_LCD_PrintFormattedString("Chord voicing  Strum:%-4s",
     (strum == 64) ? "off" : (strum > 64) ? "up" : "down");
+}
+
+// Slicer right-screen readout: the resulting slice geometry (row 0) + where the
+// painted order lives — or how to get one (row 1, the Voicing "no Chord layer" idiom).
+static void SEQ_UI_PROC_Status_Slicer(u8 track, u8 slot)
+{
+  u8 grid = SEQ_CC_Get(track, SEQ_CC_SLICE_GRID) & 0x07;
+  if( !grid )
+    return; // dark row — the generic rack readout says enough
+  u8 len = (u8)(1 << grid);
+  u16 num_steps = SEQ_PAR_NumStepsGet(track);
+  SEQ_LCD_CursorSet(41, 0);
+  SEQ_LCD_PrintFormattedString("%d slices of %d", num_steps / len, len);
+
+  s8 ord_layer = -1;
+  u8 l, n = (u8)SEQ_PAR_NumLayersGet(track);
+  for(l=0; l<n; ++l)
+    if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_SliceOrd ) { ord_layer = (s8)l; break; }
+  SEQ_LCD_CursorSet(40, 1);
+  if( ord_layer >= 0 )
+    SEQ_LCD_PrintFormattedString("order: SlcOr layer %c (paint on EDIT)", 'A' + ord_layer);
+  else
+    SEQ_LCD_PrintString("order: Seed only (SlcOr layer: TrkEvnt)");
 }
 
 // Page buttons. The B-row (rack), GP encoders (operate), and GP-row mask are all
@@ -4925,6 +4996,15 @@ static s32 SEQ_UI_Button_DirectTrack(s32 depressed, u32 sel_button)
 	      default: SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 2000, "PitchGen", "ENGAGE failed");
 	      }
 	    }
+	  } else if( proc_rows[slot].rowkind == PROC_ROW_STACK &&
+	             proc_rows[slot].stack_slot == SEQ_CORE_SLICE_SLOT ) {
+	    // Slicer: config-PRESERVING bypass (GRID bit 7, the Voicing spirit) instead
+	    // of the stack-row dial reset — double-tap drops the chop in/out live
+	    // without losing the dialled shape. Kill the config by dialling Grid to off.
+	    u8 raw = SEQ_CC_Get(visible_track, SEQ_CC_SLICE_GRID) ^ 0x80;
+	    SEQ_CC_Set(visible_track, SEQ_CC_SLICE_GRID, raw);
+	    SEQ_UI_Msg(SEQ_UI_MSG_USER_R, 1000, (char *)SEQ_UI_PROC_SlotName(slot),
+	               (raw & 0x80) ? "  bypassed" : "   enabled");
 	  } else {
 	    SEQ_UI_PROC_SlotReset(visible_track, slot);
 	    // The merged Ptch row also owns ChordMask, whose slot presence IS the track

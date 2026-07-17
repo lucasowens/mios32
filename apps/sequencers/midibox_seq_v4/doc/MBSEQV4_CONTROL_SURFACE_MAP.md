@@ -11,9 +11,10 @@ This is the **UX-design companion** to `MBSEQV4_HARDWARE_GLOSSARY.md`:
 
 Use the **bold glossary terms** here. Lines marked **[fork]** are repurposed away from
 stock MBSEQ. Everything below was verified against source (symbol names, not line numbers —
-line numbers drift in this fork). Last verified: 2026-07-12 (merge passes — the rack is
-now 10 rows: ChordMask dissolved into Ptch, Limit into Voic, Arp into TGen; the
-pitch/generative cluster leads — Ptch/Voic/Tens/PGen/TGen; PROC base-layout header).
+line numbers drift in this fork). Last verified: 2026-07-15 (Slicer tenant — the rack is
+now 11 rows: the 2026-07-12/13 merges (ChordMask dissolved into Ptch, Limit into Voic,
+Arp into TGen) + the Slic row at position 6; the pitch/generative cluster leads —
+Ptch/Voic/Tens/PGen/TGen/Slic; PROC base-layout header).
 
 ---
 
@@ -272,9 +273,9 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
 
 **The three rows in PROC mode:**
 - **B-row** = the rack: one key per row, in order
-  **Ptch · Voic · Tens · PGen · TGen · Grve · Humn · Robo · Echo · LFO**
-  (10 rows after the 2026-07-12/13 merges — pitch/generative cluster, the feel trio
-  (Grve/Humn/Robo), then the emission tail:
+  **Ptch · Voic · Tens · PGen · TGen · Slic · Grve · Humn · Robo · Echo · LFO**
+  (11 rows: 10 after the 2026-07-12/13 merges + **Slic** 2026-07-15 — pitch/generative
+  cluster, the structural chop, the feel trio (Grve/Humn/Robo), then the emission tail:
   **Ptch** = the merged pitch-domain cockpit (old Pitch's Semi/Oct/FTS/Scle/Root/Deg +
   the dissolved ChordMask row's Str/Bus + mask face; fronts BOTH stack slots; where LIVE
   lands you); **Voic** = voicing + the dissolved Limit row (Sprd/Inv/Drop/Strm/Tilt ·
@@ -286,14 +287,26 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
   off-ladder; push/reset = no-op so the scale is never yanked onto the ladder) ·
   spacer · **FTS** (doubled from Ptch for convenience — same per-track flag); the
   16-track grip bar rides unlabeled in the dead cells (cols 24-39), zone name at
-  the row-readout home (col 41)).
+  the row-readout home (col 41));
+  **Slic** (position 6, 2026-07-15) = the slicer: chop the HEARD loop into equal
+  slices and resequence them (render-stack tail — capture/tape/bounce grab the chop
+  for free). Dials **Grid** (headline: off/2/4/8/16-step slices; 0→on engage-seeds
+  Seed=1 + Str=127 so it chops at once) · **Seed** (browse deterministic shuffles;
+  0 = identity) · **Str** (thermometer over ranked slices — painted positions engage
+  across the LOWER dial half, seeded across the upper; 0 = true pass-through) ·
+  **Rept** (stutter: repeat the previous output slice) · **Rev** (in-slice reverse).
+  Painted order = a **SlcOr par layer** (assign in TrkEvnt, paint on EDIT — the
+  Waypoint idiom; value 1..16 = source slice, 0 = unpainted; painted anywhere inside
+  a slice counts and always wins over Seed).
   Tap = focus (always lands on the row's primary plane). **Double-tap (<350 ms) = the row's
   on/off gesture**: emission rows flip their native bypass bit (config preserved — on Voic
   the bypass only gates the voicing dials; **an active range clamp keeps applying**, kill
   it by pushing the Lo/Hi encoders to their detents); generator rows ENGAGE⇄DISENGAGE
   (loop preserved — on TGen, which absorbed the ARP row into its OPER cells 6-7, the
   double-tap stays the generator's gesture: an armed arp keeps playing, kill it by
-  dialling/pushing its Arp cell to Off); param rows (Ptch/Tension) reset to
+  dialling/pushing its Arp cell to Off); **Slic flips its bypass bit** (GRID bit 7 —
+  config preserved, the chop drops in/out live; kill it by dialling Grid to off);
+  param rows (Ptch/Tension) reset to
   pass-through — Ptch also returns a ChordMask-playmode track to Normal (the painted
   mask CCs survive).
   LEDs: **green = occupied** (winks when bypassed / at true pass-through), **red = focused**

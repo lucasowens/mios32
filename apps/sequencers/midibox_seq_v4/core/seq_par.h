@@ -64,6 +64,11 @@ typedef enum {
   SEQ_PAR_Type_VInv=22,
   SEQ_PAR_Type_VStrm=23,
   SEQ_PAR_Type_VTilt=24,
+  // Slicer painted order (plan 2026-07-15, Waypoint idiom): value at any step
+  // inside an output slice = which source slice plays there (1..16, within the
+  // current 16-slice window); 0 = unpainted (seed/identity fills). Emits no
+  // MIDI; read from the SOURCE buffer, excluded from the slice permute itself.
+  SEQ_PAR_Type_SliceOrd=25,
   SEQ_PAR_NUM_TYPES
 } seq_par_layer_type_t;
 

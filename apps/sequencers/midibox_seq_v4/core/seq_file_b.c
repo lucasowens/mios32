@@ -576,6 +576,25 @@ static u8 ExtCcNeutral(u8 cc)
   return 0;
 }
 
+// Neutral-extend an ext-CC replay to the LIVE count (the PhraseReadCCs
+// contract, applied to pattern/track loads 2026-07-17): a record older than
+// the live format carries fewer ext CCs, and the missing tail must land at
+// NEUTRAL — not keep the previous occupant's RAM values. Before the slicer
+// this leak was mild (a leftover voicing STRUM shaded chord feel until
+// reboot — the documented old-slot quirk); an armed leftover SLICE_GRID
+// restructures the render mirror, so any V3/V4-record pattern load came back
+// CHOPPED by whatever the last jam left on that track (found via the HIL
+// capture-family reds 2026-07-17: 14 tests read slicer-permuted mirrors).
+// Remix-skipped tracks deliberately keep their in-RAM values — this runs only
+// on tracks the load actually replays.
+static void ExtCcNeutralExtend(u8 track, u8 from_count)
+{
+  u8 i;
+  for(i=from_count; i<SEQ_FILE_B_TRK_EXT_CC_COUNT; ++i)
+    SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i,
+               ExtCcNeutral(SEQ_FILE_B_TRK_EXT_CC_FIRST + i));
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // reads a pattern from bank into given group
 // returns < 0 on errors (error codes are documented in seq_file.h)
@@ -952,11 +971,12 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	      u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // up to 48 (0x80..0xaf)
 	      u8 cc_count = (tag == SEQ_FILE_B_TRK_EXT_TAG_V5)
 		? SEQ_FILE_B_TRK_EXT_CC_COUNT       // 48 (0x80..0xaf)
-		: SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f); 0xa0+ keep in-RAM values
+		: SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f); 0xa0+ neutral-extended below
 	      status |= FILE_ReadBuffer(ext_cc_buffer, cc_count);
 	      u8 i;
 	      for(i=0; i<cc_count; ++i)
 		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      ExtCcNeutralExtend(track, cc_count); // older record: neutral the missing tail
 	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 	      if( tag != SEQ_FILE_B_TRK_EXT_TAG_V3 )
@@ -967,9 +987,11 @@ DEBUG_MSG("Skipping Track %d\n", track);
 	      u8 i;
 	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT_V2; ++i)
 		SEQ_CC_Set(track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      ExtCcNeutralExtend(track, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2);
 	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 	    } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V1 ) {
+	      ExtCcNeutralExtend(track, 0); // V1 carries anchors only — neutral ALL ext CCs
 	      status |= FILE_ReadBuffer((u8 *)seq_cc_trk[track].robotize_bar_anchors,
 					SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 	    } else {
@@ -1265,12 +1287,13 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 	    u8 ext_cc_buffer[SEQ_FILE_B_TRK_EXT_CC_COUNT];   // up to 48 (0x80..0xaf)
 	    u8 cc_count = (tag == SEQ_FILE_B_TRK_EXT_TAG_V5)
 	      ? SEQ_FILE_B_TRK_EXT_CC_COUNT       // 48 (0x80..0xaf)
-	      : SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f); 0xa0+ keep in-RAM values
+	      : SEQ_FILE_B_TRK_EXT_CC_COUNT_V3;   // 32 frozen (0x80..0x9f); 0xa0+ neutral-extended below
 	    ext_status |= FILE_ReadBuffer(ext_cc_buffer, cc_count);
 	    if( ext_status >= 0 ) {
 	      u8 i;
 	      for(i=0; i<cc_count; ++i)
 		SEQ_CC_Set(dst_track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      ExtCcNeutralExtend(dst_track, cc_count); // older record: neutral the missing tail
 	      ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
 					    SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 	      if( ext_status >= 0 && tag != SEQ_FILE_B_TRK_EXT_TAG_V3 )
@@ -1283,10 +1306,12 @@ s32 SEQ_FILE_B_TrackRead(u8 bank, u8 pattern, u8 slot_track, u8 dst_track)
 	      u8 i;
 	      for(i=0; i<SEQ_FILE_B_TRK_EXT_CC_COUNT_V2; ++i)
 		SEQ_CC_Set(dst_track, SEQ_FILE_B_TRK_EXT_CC_FIRST + i, ext_cc_buffer[i]);
+	      ExtCcNeutralExtend(dst_track, SEQ_FILE_B_TRK_EXT_CC_COUNT_V2);
 	      ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
 					    SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 	    }
 	  } else if( tag == SEQ_FILE_B_TRK_EXT_TAG_V1 ) {
+	    ExtCcNeutralExtend(dst_track, 0); // V1 carries anchors only — neutral ALL ext CCs
 	    ext_status |= FILE_ReadBuffer((u8 *)seq_cc_trk[dst_track].robotize_bar_anchors,
 					  SEQ_FILE_B_TRK_EXT_ANCHORS_SIZE);
 	  }

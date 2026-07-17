@@ -266,6 +266,15 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   // SEQ_CORE_AllSlotSync (arp renders from slot->strength, unlike PITCH/LIMIT).
   tcc->arp_mode = 0;
   tcc->arp_bus  = 0;
+  // Slicer off (GENERATION axis, same reasoning as ARP): the capture baked the
+  // chopped order into the notes — kept dials would re-chop the frozen tape.
+  // Same stale-slot caveat as ARP: raw tcc writes on a LIVE dst need
+  // SEQ_CORE_AllSlotSync (the slice pass renders from slot->id/strength).
+  tcc->slice_grid     = 0;
+  tcc->slice_seed     = 0;
+  tcc->slice_strength = 0;
+  tcc->slice_rept     = 0;
+  tcc->slice_rev      = 0;
   {
     u8 i;
     for(i=0; i<16; ++i)
@@ -314,6 +323,11 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
         // SEQ_PAR_Type_VSprd/VInv/VStrm/VTilt: PRESERVED for the same reason —
         // deterministic SHAPING like the voicing dials themselves (same
         // byte + dials + offsets always re-expand to the same voices).
+        // SEQ_PAR_Type_SliceOrd: PRESERVED like Waypoint (hand-painted order =
+        // deterministic step data). Inert on the frozen copy — the slice dials
+        // were zeroed above, and the painted order only drives the slice pass —
+        // but re-arming Grid re-uses the painted order instead of finding it
+        // silently erased.
         default:
           break;
       }
@@ -343,7 +357,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
   // while stopped they run a synchronous full track render (RenderTouched),
   // which must not execute with interrupts masked (#17). Each sync re-derives
   // from tcc, so deferring past the tcc write is equivalent.
-  u8 sync_chordmask = 0, sync_tension = 0, sync_pitch = 0, sync_limit = 0, sync_arp = 0;
+  u8 sync_chordmask = 0, sync_tension = 0, sync_pitch = 0, sync_limit = 0, sync_arp = 0, sync_slice = 0;
 
   // since CCs can be modified from other tasks at different priority we should do this operation atomic
   portENTER_CRITICAL();
@@ -581,6 +595,30 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	tcc->voice_tilt = value & 0x7f; // 64 = flat (off)
 	break;
 
+      // Slicer tenant — every dial re-renders (the chop is a render-buffer permute).
+      case SEQ_CC_SLICE_GRID:
+	tcc->slice_grid = value & 0x87; // bits 0..2 = grid, bit 7 = bypass
+	if( (tcc->slice_grid & 0x07) > 4 )
+	  tcc->slice_grid = (tcc->slice_grid & 0x80) | 4;
+	sync_slice = 1;
+	break;
+      case SEQ_CC_SLICE_SEED:
+	tcc->slice_seed = value & 0x7f;
+	sync_slice = 1;
+	break;
+      case SEQ_CC_SLICE_STRENGTH:
+	tcc->slice_strength = value & 0x7f;
+	sync_slice = 1;
+	break;
+      case SEQ_CC_SLICE_REPT:
+	tcc->slice_rept = value & 0x7f;
+	sync_slice = 1;
+	break;
+      case SEQ_CC_SLICE_REV:
+	tcc->slice_rev = value & 0x7f;
+	sync_slice = 1;
+	break;
+
       default:
 	portEXIT_CRITICAL();
         return -2; // invalid CC
@@ -595,6 +633,7 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
   if( sync_pitch )     SEQ_CORE_PitchSlotSync(track);
   if( sync_limit )     SEQ_CORE_LimitSlotSync(track);
   if( sync_arp )       SEQ_CORE_ArpSlotSync(track);
+  if( sync_slice )     SEQ_CORE_SliceSlotSync(track);
 
   // FEARLESS SWITCHING: live diverged from slot. Loads re-clear at the end of
   // SEQ_PATTERN_Load (the bank read replays CCs through this chokepoint).
@@ -807,6 +846,11 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_VOICE_STRUM:          return tcc->voice_strum;
     case SEQ_CC_VOICE_DROP:           return tcc->voice_drop;
     case SEQ_CC_VOICE_TILT:           return tcc->voice_tilt;
+    case SEQ_CC_SLICE_GRID:           return tcc->slice_grid;
+    case SEQ_CC_SLICE_SEED:           return tcc->slice_seed;
+    case SEQ_CC_SLICE_STRENGTH:       return tcc->slice_strength;
+    case SEQ_CC_SLICE_REPT:           return tcc->slice_rept;
+    case SEQ_CC_SLICE_REV:            return tcc->slice_rev;
   }
 
   return -2; // invalid CC
