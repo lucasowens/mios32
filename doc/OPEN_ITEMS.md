@@ -28,11 +28,13 @@ by-ear partially confirmed; the full validation pass is the next session's job
 - **By-ear verdicts owed, per thread:** Chok · Motn (5-detent) · 1stp grid ·
   CHOP jump pads · ORDR paint plane · punch-chop · momentary interject ·
   read-head wink. Plan: [plans/2026-07-17-slicer-act2.md](plans/2026-07-17-slicer-act2.md).
-- **HIL pass owed (baseline was 278/278 pre-act-2):** act-2 pins (choke glide-cut,
-  motion no-regression at 0, jump semantics) + the GRID-remap-shifted act-1 pins
-  (already edited in `test_slicer.py` — suite must run against the new firmware)
-  + four capture-fix pins: ext-CC travel (voicing/slicer dials on copies), FTS
-  survival, drum transpose travel, drum tape per-instrument write-back.
+- **HIL: suite RAN 2026-07-18 → 278/278 on the act-2 firmware** (first run
+  275/278; the 3 reds were legacy FTS-reset pins asserting the contract the
+  field-membership decision inverted — flipped, now they ARE the FTS-survival
+  pins; zero content reds; commit c3d2f4d7). Still owed as NEW pins: act-2
+  behavior (choke glide-cut, motion no-regression at 0, jump semantics,
+  ORDR paint/punch/interject) + ext-CC travel + drum transpose travel +
+  drum tape per-instrument write-back.
 - **STOPPED drum re-sim capture is still melodic-mono** (out-of-scope since
   2026-06-26; the while-playing tape path is fixed). Lift only if stopped drum
   grabs turn out to be a real workflow.
