@@ -162,8 +162,19 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   // Track mode -> Normal; clears Off / Transpose / Arpeggiator. Bounced tape
   // is just notes, no live transposer/arp input wanted.
   tcc->playmode = SEQ_CORE_TRKMODE_Normal;
-  // Mode flags: clears FORCE_SCALE + SUSTAIN + UNSORTED/HOLD/RESTART/FIRST_NOTE/STEP_TRG.
-  tcc->trkmode_flags.ALL = 0;
+  // Mode flags: clears SUSTAIN + UNSORTED/HOLD/RESTART/FIRST_NOTE/STEP_TRG —
+  // but PRESERVES FORCE_SCALE (2026-07-18, "the pitch settings get dropped"):
+  // FTS is IDEMPOTENT on the baked tape (snapping already-snapped notes under
+  // the same scale is a no-op), and keeping it keeps the frozen copy a MEMBER
+  // OF THE GLOBAL HARMONIC FIELD — Scle/Root/Deg/Shade performance moves keep
+  // bending it like every live track. The capture freezes the track's own
+  // generation, not its membership in the field. (Semi/Oct/grip stay zeroed
+  // below: those are baked into the notes — keeping them would double-apply.)
+  {
+    u8 fts = tcc->trkmode_flags.FORCE_SCALE;
+    tcc->trkmode_flags.ALL = 0;
+    tcc->trkmode_flags.FORCE_SCALE = fts;
+  }
   // Bus assignment -> bus 0.
   tcc->busasg.ALL = 0;
   // Clock-divider flags: clear synch-to-measure only. TRIPLETS + MANUAL are
@@ -275,6 +286,8 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->slice_strength = 0;
   tcc->slice_rept     = 0;
   tcc->slice_rev      = 0;
+  tcc->slice_choke    = 0;
+  tcc->slice_motion   = 0;
   {
     u8 i;
     for(i=0; i<16; ++i)
@@ -598,8 +611,8 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
       // Slicer tenant — every dial re-renders (the chop is a render-buffer permute).
       case SEQ_CC_SLICE_GRID:
 	tcc->slice_grid = value & 0x87; // bits 0..2 = grid, bit 7 = bypass
-	if( (tcc->slice_grid & 0x07) > 4 )
-	  tcc->slice_grid = (tcc->slice_grid & 0x80) | 4;
+	if( (tcc->slice_grid & 0x07) > 5 )
+	  tcc->slice_grid = (tcc->slice_grid & 0x80) | 5;
 	sync_slice = 1;
 	break;
       case SEQ_CC_SLICE_SEED:
@@ -616,6 +629,14 @@ s32 SEQ_CC_Set(u8 track, u8 cc, u8 value)
 	break;
       case SEQ_CC_SLICE_REV:
 	tcc->slice_rev = value & 0x7f;
+	sync_slice = 1;
+	break;
+      case SEQ_CC_SLICE_CHOKE:
+	tcc->slice_choke = value & 0x7f;
+	sync_slice = 1;
+	break;
+      case SEQ_CC_SLICE_MOTION:
+	tcc->slice_motion = (value > 4) ? 4 : value; // 0=off, 1..4 = 8/4/2/1 bars (GRID clamp idiom)
 	sync_slice = 1;
 	break;
 
@@ -851,6 +872,8 @@ s32 SEQ_CC_Get(u8 track, u8 cc)
     case SEQ_CC_SLICE_STRENGTH:       return tcc->slice_strength;
     case SEQ_CC_SLICE_REPT:           return tcc->slice_rept;
     case SEQ_CC_SLICE_REV:            return tcc->slice_rev;
+    case SEQ_CC_SLICE_CHOKE:          return tcc->slice_choke;
+    case SEQ_CC_SLICE_MOTION:         return tcc->slice_motion;
   }
 
   return -2; // invalid CC

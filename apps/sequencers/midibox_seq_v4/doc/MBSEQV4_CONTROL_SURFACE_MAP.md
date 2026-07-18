@@ -288,16 +288,61 @@ any page change) drops the latch; a dirty Groove paint persists `MBSEQ_G.V4` on 
   spacer · **FTS** (doubled from Ptch for convenience — same per-track flag); the
   16-track grip bar rides unlabeled in the dead cells (cols 24-39), zone name at
   the row-readout home (col 41));
-  **Slic** (position 6, 2026-07-15) = the slicer: chop the HEARD loop into equal
-  slices and resequence them (render-stack tail — capture/tape/bounce grab the chop
-  for free). Dials **Grid** (headline: off/2/4/8/16-step slices; 0→on engage-seeds
-  Seed=1 + Str=127 so it chops at once) · **Seed** (browse deterministic shuffles;
-  0 = identity) · **Str** (thermometer over ranked slices — painted positions engage
-  across the LOWER dial half, seeded across the upper; 0 = true pass-through) ·
-  **Rept** (stutter: repeat the previous output slice) · **Rev** (in-slice reverse).
-  Painted order = a **SlcOr par layer** (assign in TrkEvnt, paint on EDIT — the
-  Waypoint idiom; value 1..16 = source slice, 0 = unpainted; painted anywhere inside
-  a slice counts and always wins over Seed).
+  **Slic** (position 6, 2026-07-15; act 2 2026-07-17) = the slicer: chop the HEARD
+  loop into equal slices and resequence them (render-stack tail — capture/tape/bounce
+  grab the chop for free). Dials **Grid** (headline: off/1/2/4/8/16-step slices —
+  **1stp** (2026-07-17) = the step-grain break chopper, one hit per position; REV is
+  inert there (a 1-step slice has no order to reverse); 0→on
+  engage-seeds Seed=1 + Str=127 so it chops at once) · **Seed** (browse deterministic
+  shuffles; 0 = identity) · **Str** (thermometer over ranked slices — painted positions
+  engage across the LOWER dial half, seeded across the upper; 0 = true pass-through) ·
+  **Rept** (stutter: repeat the previous output slice) · **Rev** (in-slice reverse) ·
+  **Chok** (act 2: edge-cut thermometer — choked slices lose their glide tie at the
+  slice edge, so tails stop at the cut points; works at Str 0 as a pure gate-tightener)
+  · **Motn** (act 2: per-bar re-roll of the seeded fill — a 5-detent rate selector
+  like Grid, off/8bar/4bar/2bar/1bar, ONE CLICK per rate; only the seeded fill
+  re-rolls, the stutter/reverse skeleton and painted slices stay put; the new chop
+  always lands ON the One).
+  Painted order = a **SlcOr par layer** (value 1..16 = source slice, 0 = unpainted;
+  painted anywhere inside a slice counts and always wins over Seed; EDIT-page
+  painting still works, but the ORDR plane below is the home surface).
+  **GP9–16 on the CHOP plane = the JUMP PADS** (act 2): punch the playhead to slice
+  1–8, quantized to the next step (the retrigger feel — finger-drum the loop against
+  the grid). Active whenever Grid is set (bypass does NOT gate them — the jump moves
+  the playhead, not the render); pads past the track's play length are dark/inert;
+  LEDs light the playable pads with the sounding slice winking (ROBOLOOP playhead
+  idiom); LCD row 1 right screen mirrors the pads, sounding slice bracketed.
+  **The ORDR plane** (act 2, Up/Dn flips CHOP⇄ORDR — the first pure-face plane, no
+  dial bank): the 16 GP cells show the **RESOLVED map** — what each output position
+  actually plays: painted positions bare (` 3`), machine-decided in parens (`( 3)`),
+  trailing `<` = REV'd, a repeated source = the stutter, so browsing Seed/Motn
+  animates exactly the parens cells while the painted skeleton visibly stays put.
+  **Encoder turn = paint** that position's source slice (1..S; down through 0 =
+  unpaint), **encoder push = unpaint**. **GP buttons = the MPC pads**: pad K means
+  **SOURCE slice K**, and while the loop RUNS the **press sounds it at once** (a
+  transient map override — no paint yet, no phase slip; the bar stays locked
+  because the content moves, not the playhead; phase-slip stays on the CHOP pads).
+  The RELEASE is the tap/hold split (350 ms, the Grve idiom): **quick tap = the
+  PUNCH commit** — SlcOr painted at the press-time landing (nearest boundary:
+  front half of a slice = the current position, its remaining steps already
+  re-rendered to K's tail — late-hit forgiveness; back half = next boundary;
+  1stp = next-16th quantize; loop-around lands on the One), so the hit loops,
+  overdubs pass by pass, captures/bounces for free — the map IS the recording.
+  **Hold = the MOMENTARY INTERJECT** ("play it, then come back", 2026-07-18):
+  the held source repeats for as long as you hold, release returns the loop
+  EXACTLY where it would have been, nothing painted — the playhead never left,
+  so the comeback is free; the read-head wink parks on the held pad, then
+  resumes bouncing. Legato drumming commits each quick hit (a new press
+  finalizes a still-quick previous pad). Stopped transport: pad = jump into
+  region K (preview). Paints respect Str like every edit. First touch (turn or punch) on a track with no
+  SlcOr layer **auto-adopts** one (first free par layer, zeroed — the pre-ENGAGE
+  adopt idiom; drum tracks route via TrkEvnt). LEDs duo-color (gen-STEPS idiom):
+  color 1 = live positions, color 2 = painted; **the wink is the BOUNCING READ HEAD**
+  (2026-07-18) — `map[current position]`, which source slice is being read right now:
+  the permute's virtual playhead, visibly jumping in map order (wink-meaning matches
+  pad-meaning per plane: CHOP winks the POSITION, ORDR winks the SOURCE). Cells
+  show bare numbers only while the paint is ENGAGED — at low Str a gated-out paint
+  reads parens (the truth of what sounds); the color-2 LED still marks it.
   Tap = focus (always lands on the row's primary plane). **Double-tap (<350 ms) = the row's
   on/off gesture**: emission rows flip their native bypass bit (config preserved — on Voic
   the bypass only gates the voicing dials; **an active range clamp keeps applying**, kill

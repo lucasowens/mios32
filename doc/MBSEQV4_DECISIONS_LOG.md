@@ -2847,3 +2847,315 @@ push expressiveness.
 - Files: `seq_lcd.c`, `seq_file_b.c`, `seq_cc.c` (bounce-reset comment),
   `tests/apps/seq_v4/test_slicer.py`, `tests/harness/sysex.py`,
   `tests/log_traffic_plugin.py` (+ OPEN_ITEMS, this log, §9 chronology).
+
+**2026-07-17 — Slicer act 2: choke + motion + jump pads (BUILT, by-ear pending)**
+
+- User picked ALL FOUR act-1 deferred threads; three built this session, the
+  plane-2 painted-order face WAITS on a user tab-grid mock (mock ritual). Plan:
+  `doc/plans/2026-07-17-slicer-act2.md`.
+- **CHOKE (CC 0xA9, dial "Chok")**: verified a par Length clamps at 96 ticks =
+  one step — the ONLY per-step cross-edge tail is the GLIDE trg tie, so choke =
+  clear the glide bit at choked slices' final output step (chain stops at the
+  cut point). Per-slice thermometer (REPT/REV idiom, new grip zone 0x64) but
+  painted slices are NOT skipped (choke is articulation, not order). Works at
+  strength 0 (gate-tightener on the un-reordered loop). Track-mode SUSTAIN is
+  emission-time — rides on top like Echo, accepted.
+- **MOTION (CC 0xAA, dial "Motn")**: per-bar re-roll of the seeded fill. Value
+  quarters = every 8/4/2/1 bars (0 = frozen). Folds `epoch =
+  robotize_measure_ctr / N` into the SEED axis only (seed_eff = 1 + ((seed-1) +
+  epoch*53) % 127; seed 0 stays identity) — skeleton + painted stay put, the
+  fill re-rolls. KEY ORDERING FIND: SEQ_CORE_RenderTracks runs at the TOP of the
+  tick, BEFORE the ref_step==0 hook — a plain dirty flag would render one tick
+  late and smear the downbeat; the hook renders SYNCHRONOUSLY instead
+  (TensionResolveBoundary spirit) so the new chop lands ON the One. Mid-epoch
+  renders rebuild the same map (ctr/N constant between boundaries).
+- **Jump pads (PROC_FACE_SLICE_JUMP, the Slic row's face1)**: GP9-16 punch the
+  playhead to slice 1-8. NO new machinery — `SEQ_CORE_SetTrkPos` already
+  latches manual_step while playing (consumed at the next step advance = a
+  step-quantized jump) and sets the step directly while stopped. Active on grid
+  geometry regardless of bypass (playhead, not render); pads past the play
+  length inert. LEDs: playable pads lit, sounding slice winks (ROBOLOOP idiom);
+  Status_Slicer row 1 right screen = the pad cells (the old verbose "order:"
+  row-1 line compacted into row 0 as "SlcOr:x" / "no SlcOr").
+- Rack row: n_params 5→7 (Chok, Motn); new PROC_FMT_MOTN_BARS formatter
+  (off/8bar/4bar/2bar/1bar). SeedRowDefaults untouched (zero-seed params are
+  skipped by construction). Double-tap bypass + engage-seed unchanged.
+- Persistence: 0xA9/0xAA are in-range in the fixed-size V5 ext block; the write
+  side always clamped unmapped headroom CCs to 0, so pre-act-2 V5 records read
+  back as genuine 0s, and ExtCcNeutralExtend covers V1..V4 by count (0 default)
+  — degrade-safe both directions, NO V6. Bounce reset zeroes both new dials
+  (they sit in the existing slice_* reset block's file, added alongside).
+- Files: `seq_cc.h`, `seq_cc.c`, `seq_core.c`, `seq_ui.c`,
+  `MBSEQV4_CONTROL_SURFACE_MAP.md` (+ the plan doc, this log, §9 chronology).
+  Compiles clean; flash/by-ear/HIL pending. Manual-fork entry follows the GO
+  (act-1 precedent: the surface map documents gestures pre-GO).
+
+**2026-07-17 (cont.) — Slicer act 2: the ORDR paint plane (first-instinct build, user refines)**
+
+- User call: skip the author-a-mock step — "give your first instinct a try, then
+  ill refine". Flash of the morning build was already done; this block adds the
+  fourth thread on top.
+- **The instinct: encoders paint, buttons jump, the LCD shows the RESOLVED map.**
+  Plane 2 of the Slic row (Up/Dn flips CHOP⇄ORDR): 16 cells = the first window's
+  output positions, each showing what it ACTUALLY plays — painted bare (` 3`),
+  machine-decided in parens (`( 3)`), trailing `<` = REV'd; stutter reads as a
+  repeated source. Browsing Seed/Motn animates only the parens cells — the
+  painted skeleton visibly stays put (the Str thermometer's intent made visual).
+- Gestures: encoder turn = set the position's source (1..S, down to 0 =
+  unpaint), push = unpaint, GP button = jump-audition the position (the CHOP
+  pads' SetTrkPos gesture extended to all 16). First turn with no SlcOr layer
+  AUTO-ADOPTS one (first still-None par layer, zeroed first — the pre-ENGAGE
+  adopt idiom; DRUM tracks are fenced to TrkEvnt: adopt writes LAY_CONST_A,
+  the non-drum assignment home). LEDs duo-color (gen-STEPS idiom): color 1 =
+  live positions + winking playhead, color 2 = painted.
+- **Plumbing precedent: the first PURE-FACE plane 2** (face2 set, params2 NULL).
+  HasPlane2 now ORs face2; SlotParams returns an EMPTY param list on such a
+  plane (never a fall-through to plane 1's dials — the face owns the encoders
+  via its own branch in the turn/push handlers).
+- **slice_map_build now fills CALLER buffers** (render passes the old statics;
+  the new `SEQ_CORE_SlicePreview` fills 16-entry UI-task locals — display can
+  never race a render mid-build). Preview calls the build with S'=min(S,16),
+  which IS the real first window (win=0 → same wsz; painted values are 1..16 by
+  definition; REPT only looks backward). Preview strength reads tcc (not the
+  slot): shows the source-side state and keeps working under bypass.
+  `SEQ_CORE_SliceOrderPaint` zeroes the position's whole slice span before
+  writing the canonical first step (a stale mid-slice byte from EDIT painting
+  can't shadow the new value), then RenderTouched.
+- Readout split: CHOP plane keeps geometry only, compacted to col 50 ("8x2" —
+  col 41 is the plane cue now, 55 = BYP); the ORDR plane's row 0 carries the
+  order context ("Order 8 slices of 2  SlcOr:C" / "turn adopts SlcOr").
+- Files: `seq_core.c` (build refactor + SliceOrdLayerGet/SlicePreview/
+  SliceOrderPaint), `seq_core.h`, `seq_ui.c` (SlotParams/HasPlane2 widening,
+  PROC_FACE_SLICE_ORDER, SliceJump/SliceOrderEnc helpers, Status_Slicer plane
+  split, LED branch), surface map, the mock TSV (now shows the built design —
+  the user's markup canvas). Compiles clean; flash/by-ear pending — HIL pins
+  for all of act 2 follow the GO.
+
+**2026-07-17 (cont. 2) — Motn refined to a 5-detent rate selector**
+
+- First hands-on report: "motn seems to only go to 8bar". Not a value bug —
+  the 0..127 zone-quarters encoding needed 32 encoder clicks to leave a zone,
+  and with no feedback until the next bar boundary it read as stuck. A 5-state
+  selector on a 127-step dial was the wrong grammar; **Grid (its sibling
+  headline selector) is the right idiom: one click per state.**
+- CC 0xAA re-encoded: 0 = off, 1..4 = every 8/4/2/1 bars (write clamps >4 → 4,
+  the GRID clamp idiom; still 0-neutral, V5 untouched). slice_motion_bars =
+  8 >> (v-1); dial lo/hi 0..4; formatter = named cells off/8bar/4bar/2bar/1bar.
+- Encoding-change note: any Motn value saved during today's session decodes as
+  clamp(raw,4) on load — a raw 20 becomes "1bar" (4) instead of 8bar. Only
+  today's test saves are affected; nothing older carries the CC.
+- Files: `seq_cc.h/.c`, `seq_core.c`, `seq_ui.c`, surface map, act-2 plan.
+
+**2026-07-17 (cont. 3) — 1stp grid: the step-grain break chopper**
+
+- User asked "would it be pointless to add 1stp?" — no: 1-step slices are the
+  classic sampler chop (one hit per position). Step-grain reorder/stutter,
+  painted order = full step-level resequencing on the ORDR face. Known
+  casualty: REV is inert at 1stp (a 1-step slice has no order to reverse) —
+  documented, not fenced.
+- **GRID values REMAPPED for clean dial order: 1..5 = 1/2/4/8/16 steps**
+  (was 1..4 = 2/4/8/16; appending 5=1stp would have put the finest grid after
+  the coarsest). Sessions are disposable (user's standing rule) and the act-1
+  HIL pins are ours: `test_slicer.py` GRID_* constants shifted +1, the clamp
+  pin now expects 5/0x85. Anything saved with the old encoding loads one grid
+  notch FINER than it meant (raw byte unchanged, meaning shifted) — today's
+  test sessions only.
+- 256-step tracks at 1stp exceed SLICE_MAX_SLICES (128): positions past 128
+  fall back to identity — accepted, real material is 16-64 steps (comment
+  updated at the cap).
+- Files: `seq_cc.h/.c` (clamp 5), `seq_core.c` (len = 1<<(grid-1) ×3 sites +
+  header comments), `seq_ui.c` (dial hi 5, formatter "1stp", len decodes ×5),
+  `tests/apps/seq_v4/test_slicer.py`, surface map. Compiles clean.
+
+**2026-07-17 (cont. 4) — Punch-chop: "record the pads, real MPC style"**
+
+- User ask: record the manual slice triggers, MPC-style. THE INSIGHT: a
+  recorded chop performance IS a painted order — no event recording, no
+  replay machinery, no phase capture. While the loop runs, an ORDR pad punch
+  quantizes to the NEAREST slice boundary and paints SlcOr there; what you
+  hear is the map, the map is the recording (loops forever, overdubs pass by
+  pass, bare cells on the face, captures/bounces for free).
+- **ORDR pads re-read as SOURCES (the MPC semantic), not positions**: punch
+  pad 3 = "play slice 3 now". The bar stays LOCKED — the content moves, not
+  the playhead (an MPC chop keeps the one); phase-slip performance stays on
+  the CHOP plane's jump pads. Stopped transport: pad = jump into region K
+  (preview). The audition-jump-while-playing on ORDR is GONE (flagged to
+  user as the one veto-able change).
+- Quantize feel: front half of a slice repaints the CURRENT position (its
+  remaining steps re-render to K's tail — late-hit forgiveness), back half
+  lands the next boundary; 1stp = next-16th quantize; loop-around punch
+  lands on the One. Punches respect Str like every paint (dial sovereignty).
+- Shared adopt: SliceOrdEnsureLayer extracted from the encoder path — first
+  punch on a layerless track adopts too. SliceOrderPaint's position bound
+  widened 16 → SLICE_MAX_SLICES (punches can land beyond the first window on
+  long loops; the VALUE stays 1..16 within-window, matching the map build).
+- Display truthfulness fix the feature exposed: a painted-but-GATED position
+  (low Str) now shows parens (what actually sounds), not a bare number —
+  the color-2 LED still marks the paint. Bare = engaged, always.
+- Files: `seq_ui.c` (SlicePunch + EnsureLayer + pad branch + cell notation),
+  `seq_core.c` (paint bound), surface map. Compiles clean; by-ear pending
+  with the rest of act 2.
+
+**2026-07-18 — The bouncing read head (ORDR wink = source being read)**
+
+- User mused: "what if we moved the playhead to access the slices? so it would
+  be visual? ... bouncing around, then a capture would make it linear."
+  Assessment delivered: a traversal engine would be audibly identical to the
+  permute (same map) but breaks mirror-=-heard (§3's core invariant, the
+  reason the slicer is render-stack) and collapses the two independent play
+  axes (content map × head position — the CHOP pads' slip-over-chop compound
+  play). Capture-makes-it-linear already exists (the mirror IS the flattened
+  chop). What the idea genuinely wanted = the VISUAL — and that is a display
+  feature: we know map[current position] every tick.
+- **ORDR's wink is now the READ HEAD**: map[current output position] = the
+  source slice being read right now, winking full-dark (both colors) so
+  painted pads bounce visibly too. The LED row jumps in map order — the
+  permute's virtual playhead, honest (it IS where the sound is read from).
+  Symmetry rule: wink-meaning matches pad-meaning per plane — CHOP (pads =
+  positions) winks the sounding POSITION, ORDR (pads = sources) winks the
+  sounding SOURCE.
+- Zero cost: the LED branch already computes the preview map; the wink just
+  indexes it. Beyond window 1 (long loops) the head is dark — same limit as
+  the cells. A slice-grain DIRECTION mode ("WpSlice", real playhead jumps,
+  phase-slip character) noted as a possible future act ONLY if the ear asks —
+  it would be a second chop engine (WpHop precedent exists).
+- Files: `seq_ui.c` (LED branch), surface map. Compiles clean.
+
+**2026-07-18 (cont.) — Momentary interject: "play the slice, then jump back"**
+
+- User ask (hedged "maybe that doesnt make any sense" — it does): trigger a
+  slice, hear it, then RETURN to where the playhead was. In the permute
+  architecture the return is FREE: the playhead never leaves — a momentary
+  interject is a TRANSIENT map override (while set, every position reads the
+  held source; clear = the loop resumes exactly in phase). No return-jump
+  machinery, no phase math, no event state.
+- The slicer's performance ladder completes: **slip** (CHOP pads — relocate
+  the head, phase bends) → **interject** (ORDR hold — play it, come back) →
+  **record** (ORDR tap — play it, keep it).
+- **ORDR pad gesture is now press/tap/hold** (the Grve 350ms idiom): PRESS
+  sounds source K at once (override on, no paint); QUICK release = the punch
+  COMMIT (paint at the press-time quantized landing — yesterday's recording,
+  commit moved press→release, audibly earlier not later since the press
+  already sounds); HOLD = ride the repeat, release returns unpainted. Legato:
+  a new press commits a still-quick previous pad (fast rolls don't drop
+  paints). Read-head wink parks on the held pad. Stopped: preview jump
+  (unchanged).
+- Implementation: `seq_core_slice_hold[16]` RAM-only performance state (no
+  CC, not persisted, NOT in the map hash — captures grab the interject
+  as-heard via the mirror, by design), `SEQ_CORE_SliceHoldSet` re-renders on
+  both edges; slice_map_build overrides m (un-reversed) while held,
+  painted_out still reports the layer (skeleton stays on the color-2 LEDs);
+  UI stash pad/track/target/t0 (track stashed — the datawheel can walk
+  mid-hold); PROC page exit clears a live hold.
+- Files: `seq_core.c/.h`, `seq_ui.c`, surface map. Compiles clean; by-ear
+  pending with the whole act-2 stack.
+
+**2026-07-18 (cont. 2) — The ext-CC travel gap (capture→switch "sounds different")**
+
+- User report: capture to the same track / different pattern, switch to it →
+  sounds different. Investigation found a GENERAL defect: `slottrk_src_cc[128]`
+  and every CC copy loop in the capture/bounce/copy family stopped at 0x7F —
+  **the fork ext block (0x80..0xAF: voicing + slicer dials) never travelled
+  with ANY copy verb.** A deposit's ext CCs were whatever the borrowed DST
+  pattern had, minus the reset's zeroing. The seq_core comment even
+  acknowledged it ("the fork CCs at 0x80+ are not in the 0x00..0x7f inherit")
+  — acceptable when every 0x80+ CC was generative (reset-covered), broken
+  since the voicing dials (2026-07-11): they are deterministic SHAPING the
+  reset deliberately PRESERVES (the seq_layer expansion contract), but the
+  inherit never brought them — chord-track captures came back voiced with the
+  DST slot's stale/neutral dials. The LIVING save verb (keep-gen by design,
+  no reset) silently dropped the whole block — a living chopping track lost
+  its chop on recall.
+- **Fix: SEQ_CORE_CC_INHERIT_COUNT 0xB0** — full CC space incl. the ext block
+  everywhere: new SEQ_CORE_CcInherit(dst,src) helper for the two direct
+  Get→Set paths (CaptureToTrack, CaptureSpanPrepDst); slottrk_src_cc bumped
+  to 0xB0 with <0-clamped snapshots (unmapped headroom 0xAB..0xAF reads -1)
+  at all four snapshot sites (flatten-to-slot, chord, canvas, living) + the
+  three array replays. Flatten paths still ResetGenerativeForBounce AFTER the
+  inherit: generative ext CCs (chordmask/arp/slicer) zeroed, shaping (voicing)
+  survives. Span path: voicing inert on its baked note material (expansion
+  already in the tape) — no double-apply.
+- Whether THIS was the user's audible difference depends on the track
+  (chord/voicing → yes exactly; plain slicer flatten should have been
+  byte-faithful — then suspect Motn epoch freeze, or the by-design
+  echo/LFO strip on copies). Re-test requested on the fixed build; HIL pin
+  for ext-CC travel to ride the act-2 pin pass.
+- Files: `seq_core.c` (define + helper + 9 sites + comments). Compiles clean.
+
+**2026-07-18 (cont. 3) — FTS survives the bounce reset (the copy stays in the field)**
+
+- User confirmed the capture→switch difference involves "pitch settings
+  getting dropped". Split delivered: Semi/Oct/ChordMask-Str zeroing is
+  CORRECT (baked into the mirror notes — keeping them would double-apply);
+  but clearing FORCE_SCALE made the frozen copy DROP OUT of the global
+  harmonic field — Scle/Root/Deg/Shade performance moves kept bending every
+  live track except the fresh capture. FTS is IDEMPOTENT on the baked tape
+  (re-snapping in-scale notes under the same scale = no-op), so preserving it
+  costs zero fidelity and restores the follow. **Principle: the capture
+  freezes the track's own generation, not its membership in the global
+  field** (the groove-preservation reasoning, extended to harmony).
+- ResetGenerativeForBounce now preserves the FORCE_SCALE bit through the
+  trkmode_flags clear (playmode still -> Normal: the transposer key is a live
+  gesture, and a kept Transpose playmode would re-apply the current key on
+  top of the baked pitch — not idempotent). GRAVITY grip stays zeroed for the
+  same reason (a kept grip would re-bend the baked bend).
+- AWAITING user re-test on the fixed build (ext-CC inherit + FTS-keep both
+  in) + the discriminator: same notes right after the switch (difference only
+  appears under pitch PERFORMANCE) = this was the whole story; wrong notes
+  immediately = dig the legacy-pitch fences (arp playmode / drum) next.
+- Files: `seq_cc.c`. Compiles clean. HIL: the capture-family baseline pins
+  assert content (unchanged); an FTS-follow pin joins the act-2 pass.
+
+**2026-07-18 (cont. 4) — Drum transpose travels through capture (the user's case, nailed)**
+
+- User's facts closed the case: DRUM track, Semi+Oct set, FTS on — the copy
+  had neither the dials NOR the pitch baked. Root cause: drum event mode is
+  legacy-pitch-FENCED (the render mirror never bakes drum pitch) AND drum
+  steps cannot store notes at all — gates+vel per instrument, the note lives
+  in per-drum config. So on EVERY capture path drum pitch normalizes back to
+  the untransposed instrument, and the reset then zeroed Semi/Oct: the only
+  carrier of the kit's tuning. (The tape path bakes pitch for melodic
+  material; for drums the emitted notes map back to instruments — nothing to
+  bake into.)
+- **Fix: the chord re-apply idiom, generalized — drum (and chord, on the
+  mirror verbs that lacked it) sources re-apply the src's static Semi/Oct
+  through the reset at all four flatten sites**: CaptureToTrack,
+  CaptureSpanPrepDst (drum-only: the tape bakes everything else — a chord/
+  melodic re-apply there would double-transpose), CaptureToSlotTrack, and the
+  canvas (src_is_chord || src_is_drum; the span route's values arrive via the
+  scratch snapshot, already restored by PrepDst — consistent either way).
+- Rule of thumb now explicit in the comments: **where the material can't
+  carry the pitch (drum steps: no notes; chord steps: indices), the config IS
+  the pitch and must TRAVEL; where the material carries it (melodic mirror/
+  tape), the config is BAKED and must reset.** FTS survives everywhere
+  (idempotent, cont. 3).
+- Files: `seq_core.c` (4 sites). Compiles clean. HIL pins owed in the act-2
+  pass: drum-capture transpose travel + FTS survival + ext-CC travel.
+
+**2026-07-18 (cont. 5) — Drum tape capture gets per-instrument write-back**
+
+- Follow-up to cont. 4: pitch travel confirmed working by user, but "on the
+  capture only one note/instrument is playing". Root cause is OLDER than
+  today: **the tape write-back was melodic-mono by construction** — pass 1
+  gated instrument 0 unconditionally, pass 2 last-write-wins into the single
+  note/vel layer. A drum source's 16 interleaved instruments all funnelled
+  into instrument 0, overwriting each other: one drum survives, the rest
+  come back empty. Drum-over-tape was documented "by-ear out-of-scope" in
+  the 2026-06-26 ReSim comment and never refused — it just mangled.
+- The tape is a passive MIDI-out wire tap (no instrument identity in the
+  package; cable = track only), so instead of plumbing instrument through
+  the scheduler: **rebuild the mapping at grab time** — each drum's EXPECTED
+  emitted note = lay_const row-A note through the same static emission chain
+  the window heard (Semi/Oct sign-decoded per SEQ_CORE_Transpose + the FTS
+  snap via SEQ_CORE_FTS_GetScaleAndRoot/SEQ_SCALE_Note). Exact match first,
+  else NEAREST (absorbs limit folds / humanize-note wobble); ties -> lowest
+  instrument. Assumes dials static across the window (same assumption
+  melodic content capture makes).
+- Drum dst write-back: gates per mapped instrument (pass 1); taped velocity
+  into the kit's Vel par layer when present (else the fixed lay_const
+  velocity plays — gate-only capture); NO length chains (drum gates are
+  one-step). Melodic path byte-identical to before. STOPPED drum re-sim
+  stays out-of-scope (mono) — the while-playing tape is the jam path.
+- Files: `seq_core.c` (capture_drum_instr_for_note + expected-note table +
+  both write-back passes). Compiles clean. HIL pin owed: drum tape capture
+  with transpose+FTS armed -> per-instrument gates match the source pattern.

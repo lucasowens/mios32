@@ -1263,7 +1263,9 @@ static void arp_render_range(u8 track, const seq_processor_slot_t *p,
 /////////////////////////////////////////////////////////////////////////////
 // SLICER tenant (plan 2026-07-15) — render-stack TAIL processor. Treats the
 // track's HEARD output as a sample: the loop is divided into equal slices
-// (GRID = 2/4/8/16 steps) and resequenced as a buffer permutation — output
+// (GRID = 1/2/4/8/16 steps; 1stp = the step-grain break chopper, added
+// 2026-07-17 — REV is inert there, a 1-step slice has no order to reverse)
+// and resequenced as a buffer permutation — output
 // slice i takes its par+trg step-block from source slice map[i]. The mapping
 // need not be a bijection, so reorder / stutter-repeat / reverse are one
 // primitive. Runs LAST in slot order (after LIMIT), so it chops everything
@@ -1287,6 +1289,12 @@ static void arp_render_range(u8 track, const seq_processor_slot_t *p,
 //    plays a slice's steps backwards. Both skip painted positions (painted =
 //    exact). Only the MAP hash folds in SEED — the engage/stutter/reverse
 //    skeleton stays put while browsing seeds, so the groove survives the hunt.
+//  - CHOKE (act 2): edge-cut thermometer (0 = off) — choked slices lose the
+//    GLIDE tie at their final step so tails stop at the cut points. Does NOT
+//    skip painted (articulation, not order); works at strength 0 too.
+//  - MOTION (act 2): per-bar re-roll of the seeded fill (0 = frozen; value
+//    quarters = every 8/4/2/1 bars). Folds the bar epoch into the SEED axis
+//    only; the boundary render fires synchronously from the ref_step==0 hook.
 //
 // SWEEP FENCE: a cross-step permute cannot render a partial window (output
 // steps pull content from OUTSIDE the window, which the sweep never rebuilt) —
@@ -1301,8 +1309,11 @@ static void arp_render_range(u8 track, const seq_processor_slot_t *p,
 #define GRIP_ZONE_SLICE_RANK  0x61
 #define GRIP_ZONE_SLICE_REPT  0x62
 #define GRIP_ZONE_SLICE_REV   0x63
+#define GRIP_ZONE_SLICE_CHOKE 0x64 // act 2: per-slice edge-cut thermometer
 
-// Max slices per loop: 256 steps / min 2-step grid. Map + rev + one-row scratch
+// Max slices per loop: 128-capped (a 256-step track at the 1-step grid would
+// yield 256 — positions past 128 fall back to identity, accepted: real material
+// is 16-64 steps). Map + rev + one-row scratch
 // are STATIC (main-SRAM .bss, ~400 B) — the render path is effectively single-
 // threaded (tick renderer while playing, synchronous edit-flush while stopped),
 // same concurrency envelope as the output-mirror halves themselves.
@@ -1318,12 +1329,59 @@ static inline u8 slice_rev_get(u16 os) {
 // Build slice_map/slice_rev_bits for a domain of S slices (S <= SLICE_MAX_SLICES).
 // Windows of 16 slices wrap for long loops: painted/seeded picks stay within the
 // output slice's own window, so the per-bar feel repeats instead of smearing.
+// MOTION (act 2): dial value -> re-roll period in bars. 0 = off; 1..4 = every
+// 8/4/2/1 bars — one detent per rate (the GRID selector idiom; a 0..127
+// thermometer needed 32 clicks per zone and read as "stuck at 8bar" by ear).
+// Callers guard motion != 0.
+static inline u16 slice_motion_bars(u8 motion)
+{
+  u8 m = (motion > 4) ? 4 : motion;
+  return (u16)(8u >> (m - 1));
+}
+
+// MOMENTARY INTERJECT (2026-07-18, "play the slice, then jump back"): a
+// TRANSIENT map override — 0 = none, 1..16 = while set, every position reads
+// source slice `hold` (in its own window). The return-to-where-it-was costs
+// nothing: the playhead never left — content came back when the override
+// cleared. Pure performance state: RAM-only (no CC, not persisted, not part
+// of the map hash — captures grab it as-heard via the mirror, which is the
+// point). Written from the UI task (pad press/release edges, u8 = atomic),
+// read here at render time.
+u8 seq_core_slice_hold[SEQ_CORE_NUM_TRACKS];
+
+void SEQ_CORE_SliceHoldSet(u8 track, u8 src)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS || seq_core_slice_hold[track] == src )
+    return;
+  seq_core_slice_hold[track] = src;
+  SEQ_CORE_RenderTouched(track);
+}
+
+// Builds into CALLER buffers since act 2: the render pass hands in the shared
+// statics (slice_map/slice_rev_bits); the ORDR-face preview (SlicePreview, UI
+// task) hands in 16-entry locals so a display refresh can never race a render
+// mid-build. painted_out (optional, NULL from the render) receives each
+// position's painted value (0 = unpainted) for the face's bare-vs-parens
+// notation.
 static void slice_map_build(u8 track, const seq_cc_trk_t *tcc, u8 strength,
-                            u16 S, u8 len, s8 ord_layer, u16 num_p_steps)
+                            u16 S, u8 len, s8 ord_layer, u16 num_p_steps,
+                            u8 *map, u8 *rev_bits, u8 *painted_out)
 {
   u8 seed = tcc->slice_seed;
   u8 rept = tcc->slice_rept;
   u8 rev  = tcc->slice_rev;
+  u8 hold = seq_core_slice_hold[track]; // momentary interject (see the setter)
+  // MOTION folds the bar epoch into the SEED axis only (act 2): the rank/rept/rev
+  // skeleton and all painted slices stay put while the seeded fill re-rolls every
+  // N bars. seed 0 stays identity (motion modifies the seed, it is not a seed
+  // source), and motion 0 leaves seed untouched (act-1 renders byte-identical).
+  // Epoch = robotize_measure_ctr / N: constant between rate boundaries, so any
+  // mid-epoch render (a dial move) rebuilds the SAME map; the boundary itself
+  // re-renders synchronously from the ref_step==0 hook (lands ON the One).
+  if( seed && tcc->slice_motion ) {
+    u32 epoch = seq_core_trk[track].robotize_measure_ctr / slice_motion_bars(tcc->slice_motion);
+    seed = (u8)(1u + ((u32)(seed - 1) + epoch * 53u) % 127u);
+  }
   u16 os;
   for(os=0; os<S; ++os) {
     u16 win = os & ~0x000f; // 16-slice window base
@@ -1360,14 +1418,24 @@ static void slice_map_build(u8 track, const seq_cc_trk_t *tcc, u8 strength,
     // at 126, so a 127 dial is "always".
     if( os > 0 && !painted && rept &&
         grip_hash(track, 0, os, GRIP_ZONE_SLICE_REPT) < rept )
-      m = slice_map[os-1];
-    slice_map[os] = (u8)m;
-    u8 r = (!painted && rev &&
+      m = map[os-1];
+    // MOMENTARY INTERJECT overrides everything: every position reads the held
+    // source (its own window), un-reversed. painted_out still reports the
+    // layer — the painted skeleton stays visible (color-2 LEDs) while the
+    // cells drop to the parens truth of what sounds.
+    if( hold ) {
+      u16 t = (u16)(win + (hold - 1));
+      m = (t < S) ? t : (u16)(S - 1);
+    }
+    map[os] = (u8)m;
+    u8 r = (!hold && !painted && rev &&
             grip_hash(track, 0, os, GRIP_ZONE_SLICE_REV) < rev) ? 1 : 0;
     if( r )
-      slice_rev_bits[os>>3] |= (u8)(1u << (os&7));
+      rev_bits[os>>3] |= (u8)(1u << (os&7));
     else
-      slice_rev_bits[os>>3] &= (u8)~(1u << (os&7));
+      rev_bits[os>>3] &= (u8)~(1u << (os&7));
+    if( painted_out )
+      painted_out[os] = painted;
   }
 }
 
@@ -1383,9 +1451,9 @@ static void slice_render_apply(u8 track, const seq_processor_slot_t *p,
   u8 grid = tcc->slice_grid;
   if( (grid & 0x80) || !(grid & 0x07) )
     return; // bypassed / off (belt and braces; SliceSlotSync gates the slot)
-  u8 len = (u8)(1u << (grid & 0x07)); // 1..4 -> 2/4/8/16 steps per slice
+  u8 len = (u8)(1u << ((grid & 0x07) - 1)); // 1..5 -> 1/2/4/8/16 steps per slice
   u8 strength = p->strength;         // durable rule: strength renders from the SLOT
-  if( !strength && !tcc->slice_rept && !tcc->slice_rev )
+  if( !strength && !tcc->slice_rept && !tcc->slice_rev && !tcc->slice_choke )
     return; // every axis at 0 = true pass-through
 
   u16 num_p_steps  = (u16)SEQ_PAR_NumStepsGet(track);
@@ -1409,14 +1477,10 @@ static void slice_render_apply(u8 track, const seq_processor_slot_t *p,
     return; // nothing to resequence
 
   // painted-order layer: first SliceOrd assignment wins (Waypoint idiom)
-  s8 ord_layer = -1;
-  {
-    u8 l;
-    for(l=0; l<num_p_layers; ++l)
-      if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_SliceOrd ) { ord_layer = (s8)l; break; }
-  }
+  s8 ord_layer = (s8)SEQ_CORE_SliceOrdLayerGet(track);
 
-  slice_map_build(track, tcc, strength, S, len, ord_layer, num_p_steps);
+  slice_map_build(track, tcc, strength, S, len, ord_layer, num_p_steps,
+                  slice_map, slice_rev_bits, NULL);
 
   u8 is_drum = (tcc->event_mode == SEQ_EVENT_MODE_Drum);
   u8 instr, layer;
@@ -1476,7 +1540,126 @@ static void slice_render_apply(u8 track, const seq_processor_slot_t *p,
         }
       }
     }
+
+    // CHOKE (act 2): cut the ring at the slice edge. The only per-step tail that
+    // crosses a slice boundary is the GLIDE trg tie (a par Length clamps at 96
+    // ticks = one step; track-mode SUSTAIN is emission-time, out of render
+    // reach) — after a permute those ties ring into DIFFERENT content and smear
+    // the cut points. A choked slice loses its glide bit at the final output
+    // step, so the chain stops exactly at the edge. Thermometer over hash-ranked
+    // slices (REPT/REV idiom) but painted slices are NOT skipped: choke is
+    // articulation, not order — a tail cut doesn't break the painted content
+    // promise. Runs after the permute (cuts the NEW edges) and applies at
+    // strength 0 too: choke alone is a gate-tightener on the un-reordered loop.
+    if( tcc->slice_choke && tcc->trg_assignments.glide ) {
+      u8 glide_layer = (u8)(tcc->trg_assignments.glide - 1);
+      u8 choke = tcc->slice_choke;
+      if( glide_layer < num_t_layers ) {
+        for(os=0; os<S_trg; ++os) {
+          if( grip_hash(track, 0, os, GRIP_ZONE_SLICE_CHOKE) >= choke )
+            continue; // grip_hash caps at 126 -> a 127 dial chokes every edge
+          u16 eb = (u16)(os * len + (len - 1)); // the slice's final output step
+          for(instr=0; instr<num_t_instr; ++instr) {
+            if( is_drum && !(p->drum_mask & (1u << instr)) )
+              continue;
+            u8 *row = &trg_buf[((u32)instr * num_t_layers + glide_layer) * num_t_step8];
+            row[eb>>3] &= (u8)~(1u << (eb&7));
+          }
+        }
+      }
+    }
   }
+}
+
+// The ORDR face's SlcOr layer lookup (first SliceOrd assignment wins — the
+// same rule as the render pass). -1 = no layer assigned.
+s32 SEQ_CORE_SliceOrdLayerGet(u8 track)
+{
+  u8 l, n = (u8)SEQ_PAR_NumLayersGet(track);
+  for(l=0; l<n; ++l)
+    if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_SliceOrd )
+      return l;
+  return -1;
+}
+
+// ORDR-face preview (act 2): the RESOLVED first-window map for display — what
+// the chop actually plays at each output position, plus which positions are
+// painted (the face's bare-vs-parens notation) and the per-position REV flag.
+// Fills min(S,16) entries of the caller's 16-entry arrays; returns the number
+// filled (0 = no geometry). Calling slice_map_build with S'=min(S,16) IS the
+// real build's first window: win=0 → wsz = min(S,16) either way, painted
+// targets are 1..16 by SliceOrd definition, and REPT only looks backward
+// inside the window. Strength comes from tcc (not the slot): the preview
+// shows the SOURCE-side state the next sync renders, and it must keep
+// working under bypass (slot disabled) where the render never runs.
+s32 SEQ_CORE_SlicePreview(u8 track, u8 *map, u8 *rev_flags, u8 *painted)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return 0;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  u8 grid = tcc->slice_grid & 0x07;
+  if( !grid )
+    return 0;
+  u8 len = (u8)(1u << (grid - 1));
+
+  // domain S: keep in sync with slice_render_apply (par/trg max, 128 cap)
+  u16 num_p_steps = (u16)SEQ_PAR_NumStepsGet(track);
+  u16 num_t_steps = (u16)SEQ_TRG_NumStepsGet(track);
+  u16 S_par = (u16)(num_p_steps / len);
+  u16 S_trg = (u16)(num_t_steps / len);
+  u16 S = (S_par > S_trg) ? S_par : S_trg;
+  if( S > SLICE_MAX_SLICES ) S = SLICE_MAX_SLICES;
+  if( S < 2 )
+    return 0;
+  if( S > 16 ) S = 16;
+
+  u8 rev_bits[2] = { 0, 0 };
+  slice_map_build(track, tcc, tcc->slice_strength, S, len,
+                  (s8)SEQ_CORE_SliceOrdLayerGet(track), num_p_steps,
+                  map, rev_bits, painted);
+  u16 os;
+  for(os=0; os<S; ++os)
+    rev_flags[os] = (u8)((rev_bits[os>>3] >> (os&7)) & 1);
+  return (s32)S;
+}
+
+// ORDR-face paint (act 2): set output position `pos`'s painted source slice
+// (1..16; 0 = unpaint) in the SOURCE SlcOr layer — the whole slice span is
+// zeroed first so a stale mid-slice byte (EDIT-page painting, "first non-zero
+// wins") can't shadow the new value, then the canonical first step carries it.
+// Instrument 0 — the render's map build reads the layer-major offset, which is
+// instrument 0's block. Re-renders via the normal touched path (synchronous
+// edit-flush while stopped). Returns -1 = no SlcOr layer (caller may adopt),
+// -2 = no geometry / position out of range.
+s32 SEQ_CORE_SliceOrderPaint(u8 track, u8 pos, u8 value)
+{
+  if( track >= SEQ_CORE_NUM_TRACKS )
+    return -2;
+  seq_cc_trk_t *tcc = &seq_cc_trk[track];
+  u8 grid = tcc->slice_grid & 0x07;
+  if( !grid )
+    return -2;
+  u8 len = (u8)(1u << (grid - 1));
+  u16 num_p_steps = (u16)SEQ_PAR_NumStepsGet(track);
+  u16 s0 = (u16)((u16)pos * len);
+  // position bound: any slice whose first step exists (the punch-chop pads can
+  // land beyond the first 16-slice window on long loops; the VALUE stays 1..16
+  // = within-window source, which is how the map build reads it there too)
+  if( pos >= SLICE_MAX_SLICES || s0 >= num_p_steps )
+    return -2;
+  s32 ord_layer = SEQ_CORE_SliceOrdLayerGet(track);
+  if( ord_layer < 0 )
+    return -1;
+
+  u8 k;
+  for(k=0; k<len; ++k) {
+    u16 s = (u16)(s0 + k);
+    if( s >= num_p_steps )
+      break;
+    SEQ_PAR_Set(track, s, (u8)ord_layer, 0, (k == 0) ? value : 0);
+  }
+  SEQ_CORE_RenderTouched(track);
+  return 0;
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -2830,6 +3013,32 @@ s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_patte
 // copy valid. The dst's generative CC is then reset so it plays the frozen
 // line without re-modulation.
 //
+// Full CC-space inherit bound for the capture/bounce/copy family (2026-07-18):
+// 0x00..0x7f stock + the fork ext block 0x80..0xaf (voicing + slicer dials).
+// Before this the ext block NEVER travelled with any copy verb — deposits kept
+// the DST pattern's stale ext values (mis-voiced chord captures: the voicing
+// dials are deterministic shaping the reset deliberately PRESERVES, but the
+// old 128-bound inherit never brought them) and the LIVING save verb silently
+// dropped the whole block (a living chopping track lost its chop dials on
+// recall). SEQ_CC_Get returns <0 for the unmapped headroom (0xab..0xaf) —
+// clamp to 0; SEQ_CC_Set no-ops them. Flatten paths still run
+// SEQ_CC_ResetGenerativeForBounce AFTER the inherit: generative ext CCs
+// (chordmask/arp/slicer) are zeroed there, shaping ones (voicing) survive.
+#define SEQ_CORE_CC_INHERIT_COUNT 0xB0
+
+// Direct src->dst full-CC inherit (the snapshot-array paths use the same
+// bound on slottrk_src_cc instead — they must survive a pattern load between
+// snapshot and replay).
+static void SEQ_CORE_CcInherit(u8 dst_track, u8 src_track)
+{
+  int i;
+  for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i) {
+    s32 v = SEQ_CC_Get(src_track, i);
+    SEQ_CC_Set(dst_track, i, (v < 0) ? 0 : (u8)v);
+  }
+  SEQ_CC_LinkUpdate(dst_track);
+}
+
 // Arms the unified UNDO net internally (SEQ_CORE_JournalArm(dst) below) — a
 // caller must NOT snapshot dst itself or it double-arms. (Note: the live UI
 // CAPTURE gesture is SEQ_CORE_CaptureSpan, which arms separately; this verb is
@@ -2860,17 +3069,13 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
   SEQ_TRG_TrackInit(dst_track, trg_steps, trg_layers, num_instr);
 
   // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
-  // the source's whole 0x00..0x7f CC space so length/clock/groove/trigger
-  // assignments/routing travel with the frozen notes — not just the lay_const +
-  // drum par-asg (which left the copy at dst's defaults: wrong length/clock,
-  // wrong gates, no groove). ResetGenerativeForBounce below strips the generation
-  // axis; the deterministic shaping (groove/length/clkdiv/structural trg-asg) stays.
-  {
-    int i;
-    for(i=0; i<128; ++i)
-      SEQ_CC_Set(dst_track, i, SEQ_CC_Get(src_track, i));
-    SEQ_CC_LinkUpdate(dst_track);
-  }
+  // the source's whole CC space — 0x00..0x7f AND the fork ext block (see
+  // SEQ_CORE_CC_INHERIT_COUNT) — so length/clock/groove/trigger assignments/
+  // routing AND the voicing dials travel with the frozen notes.
+  // ResetGenerativeForBounce below strips the generation axis; the
+  // deterministic shaping (groove/length/clkdiv/structural trg-asg/voicing)
+  // stays.
+  SEQ_CORE_CcInherit(dst_track, src_track);
 
   // 2. Lossless output → dst source (forced quiet render → sweep-safe). Valid
   //    raw copy because dst geometry now equals src geometry.
@@ -2880,10 +3085,23 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 
   // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated.
   //    The reset is a raw tcc write: step 1's CC replay armed dst's slots from
-  //    PRE-reset values (e.g. dst's own old arp_mode — the fork CCs at 0x80+
-  //    are not in the 0x00..0x7f inherit), so re-sync or a stale-armed
-  //    ARP/CHORD_MASK/TENSION slot re-transforms the frozen tape at render.
+  //    PRE-reset values (since 2026-07-18 the inherit spans the ext block too,
+  //    so those are the SRC's generative dials), so re-sync or a stale-armed
+  //    ARP/CHORD_MASK/TENSION/SLICE slot re-transforms the frozen tape at render.
   SEQ_CC_ResetGenerativeForBounce(dst_track);
+  // Legacy-pitch-fenced sources (2026-07-18, "Semi/Oct not baked" on a drum
+  // capture): DRUM content has no per-step note storage at all (gates+vel per
+  // instrument; the note lives in per-drum config) and CHORD steps store
+  // indices — for both, the mirror can NOT bake transpose, the config IS the
+  // pitch. Re-apply the source's static Semi/Oct through the reset (the
+  // canvas chord idiom, generalized to every flatten verb).
+  {
+    u8 sem = (u8)SEQ_CC_Get(src_track, SEQ_CC_MIDI_EVENT_MODE);
+    if( sem == SEQ_EVENT_MODE_Drum || sem == SEQ_EVENT_MODE_Chord ) {
+      SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_SEMI, (u8)SEQ_CC_Get(src_track, SEQ_CC_TRANSPOSE_SEMI));
+      SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_OCT,  (u8)SEQ_CC_Get(src_track, SEQ_CC_TRANSPOSE_OCT));
+    }
+  }
   SEQ_CORE_AllSlotSync(dst_track);
 
   // 4. Force a full dst render so SEQ_PAR_Get(dst) reads the captured bytes
@@ -3117,8 +3335,16 @@ static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
   // keeps its gate; LENGTH stays exact (dst_steps-1) so loop timing is unchanged. The
   // caller's trg overflow guard already reserves the ceil'd byte count ((dst_steps+7)/8).
   SEQ_TRG_TrackInit(dst, (dst_steps + 7) & ~7, trg_layers, trg_instr);
-  { int i; for(i=0; i<128; ++i) SEQ_CC_Set(dst, i, SEQ_CC_Get(src, i)); SEQ_CC_LinkUpdate(dst); }
+  SEQ_CORE_CcInherit(dst, src); // full span incl. the ext block (voicing travels)
   SEQ_CC_ResetGenerativeForBounce(dst);                // forward playback, strip gen axis
+  // DRUM sources (2026-07-18): the tape bakes pitch for melodic material, but
+  // drum steps can't store notes at all (gates+vel per instrument) — the
+  // emitted pitch normalizes back to the instrument, so the transpose config
+  // must TRAVEL through the reset or the copy plays untransposed.
+  if( seq_cc_trk[src].event_mode == SEQ_EVENT_MODE_Drum ) {
+    SEQ_CC_Set(dst, SEQ_CC_TRANSPOSE_SEMI, (u8)SEQ_CC_Get(src, SEQ_CC_TRANSPOSE_SEMI));
+    SEQ_CC_Set(dst, SEQ_CC_TRANSPOSE_OCT,  (u8)SEQ_CC_Get(src, SEQ_CC_TRANSPOSE_OCT));
+  }
   SEQ_CC_Set(dst, SEQ_CC_GROOVE_VALUE, 0);
   SEQ_CC_Set(dst, SEQ_CC_GROOVE_STYLE, 0);
   SEQ_CC_Set(dst, SEQ_CC_LENGTH, dst_steps - 1);       // K-bar length
@@ -3346,6 +3572,23 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
 // refusal codes as the re-sim path (negative; see CMD_CAPTURE_SPAN), plus -10 = the
 // span scrolled out of the tape ring (too many notes buffered). Runs under
 // MUTEX_MIDIOUT so the tape read + dst write are serialized against the live engine.
+// Map an emitted drum note back to its instrument via the expected-note table
+// (exact match first, else NEAREST — absorbs transforms the table doesn't
+// model, e.g. limit folds or a humanize-note wobble; ties -> lowest index).
+static u8 capture_drum_instr_for_note(const u8 *exp_note, u8 n_drums, u8 note)
+{
+  u8 d, best = 0;
+  int best_d = 1000;
+  for(d=0; d<n_drums; ++d) {
+    int diff = (int)note - (int)exp_note[d];
+    if( diff < 0 ) diff = -diff;
+    if( diff == 0 )
+      return d;
+    if( diff < best_d ) { best_d = diff; best = d; }
+  }
+  return best;
+}
+
 s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || dst >= SEQ_CORE_NUM_TRACKS ) return -1;
@@ -3470,8 +3713,43 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
   s8 vel_layer  = dtcc->link_par_layer_velocity;
   s8 len_layer  = dtcc->link_par_layer_length;
 
+  // DRUM write-back (2026-07-18, "only one note/instrument plays on the
+  // capture"): the tape is a passive wire tap — events carry NO instrument,
+  // and the old melodic-mono sink dumped every drum onto instrument 0
+  // (last-write-wins: one drum survived, the rest came back empty). Rebuild
+  // the mapping AT GRAB TIME instead: each drum's EXPECTED emitted note = its
+  // config note (lay_const row A) through the same static emission pitch
+  // chain the window heard — Semi/Oct sign-decoded exactly like
+  // SEQ_CORE_Transpose, then the FTS snap when armed. Assumes the dials
+  // didn't move mid-window (the same assumption melodic content capture
+  // already makes). Gates land per instrument; the taped velocity goes into
+  // the kit's Vel par layer when it has one; no length chains (drum gates
+  // are one-step).
+  u8 dst_is_drum = (dtcc->event_mode == SEQ_EVENT_MODE_Drum);
+  u8 exp_note[16];
+  u8 n_drums = 0;
+  if( dst_is_drum ) {
+    n_drums = (u8)((trg_instr < 16) ? trg_instr : 16);
+    int inc_oct  = tcc->transpose_oct;  if( inc_oct  >= 8 ) inc_oct  -= 16;
+    int inc_semi = tcc->transpose_semi; if( inc_semi >= 8 ) inc_semi -= 16;
+    u8 d;
+    for(d=0; d<n_drums; ++d) {
+      int nn = (int)tcc->lay_const[d] + 12*inc_oct + inc_semi;
+      if( nn < 0 ) nn = 0; else if( nn > 127 ) nn = 127;
+      if( tcc->trkmode_flags.FORCE_SCALE ) {
+        u8 scale, root_selection, root;
+        SEQ_CORE_FTS_GetScaleAndRoot(src, 0, d, tcc, &scale, &root_selection, &root);
+        mios32_midi_package_t sp;
+        sp.ALL = 0; sp.type = NoteOn; sp.event = NoteOn; sp.note = (u8)nn;
+        SEQ_SCALE_Note(&sp, scale, root);
+        nn = sp.note;
+      }
+      exp_note[d] = (u8)nn;
+    }
+  }
+
   // Quantize the window's note-ons -> steps. Iterate oldest..newest; collisions on a
-  // step are last-write-wins (melodic-mono target, same as the re-sim sink). Each on
+  // step are last-write-wins (melodic-mono target; DRUM dst maps per instrument). Each on
   // carries its precise gate (off.tick-on.tick, back-filled at tap time); a note still
   // ringing at grab keeps gate 0 -> SEQ_CORE_CaptureGateToParLen returns the default. A
   // note spanning more than one step is written as a multi-step length chain (SEQ's
@@ -3497,7 +3775,9 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
       if( (s32)(e->tick - win_end) >= 0 ) continue;    // in the live bar (not completed)
       u16 step = (u16)((e->tick - win_start) / tps);
       if( step >= dst_steps ) continue;
-      SEQ_TRG_GateSet(dst, step, 0, 1);
+      SEQ_TRG_GateSet(dst, step,
+                      dst_is_drum ? capture_drum_instr_for_note(exp_note, n_drums, e->note) : 0,
+                      1);
     }
   }
   // pass 2: materialize
@@ -3508,8 +3788,16 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
     if( (s32)(e->tick - win_end) >= 0 ) continue;      // in the live bar (not completed)
     u16 step = (u16)((e->tick - win_start) / tps);
     if( step >= dst_steps ) continue;
-    SEQ_CORE_CaptureMaterializeNote(dst, step, dst_steps, e->gate, (u16)tps,
-                                    e->note, e->vel, note_layer, vel_layer, len_layer);
+    if( dst_is_drum ) {
+      // gate landed per instrument in pass 1; carry the taped velocity when
+      // the kit has a Vel par layer (else the fixed lay_const velocity plays)
+      if( vel_layer >= 0 )
+        SEQ_PAR_Set(dst, step, (u8)vel_layer,
+                    capture_drum_instr_for_note(exp_note, n_drums, e->note), e->vel);
+    } else {
+      SEQ_CORE_CaptureMaterializeNote(dst, step, dst_steps, e->gate, (u16)tps,
+                                      e->note, e->vel, note_layer, vel_layer, len_layer);
+    }
   }
 
   SEQ_PATTERN_DirtySetTrack(dst); // the capture IS a deliberate change to dst
@@ -3554,7 +3842,7 @@ static u8           slottrk_par_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_PAR_MAX_
 static u8           slottrk_trg_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP][SEQ_TRG_MAX_BYTES];
 static char         slottrk_name_snap[20];
 static u8           slottrk_play_section_snap[SEQ_CORE_NUM_TRACKS_PER_GROUP];
-static u8           slottrk_src_cc[128];
+static u8           slottrk_src_cc[SEQ_CORE_CC_INHERIT_COUNT]; // full span incl. ext block (2026-07-18)
 // Par/trg GEOMETRY (num_steps/layers/instruments) lives in seq_par/trg metadata
 // (par_layer_num_steps[]), NOT in seq_cc_trk or the byte buffers — so the snapshot
 // must restore it via TrackInit or a re-partition (e.g. the slot read, or the dst_track
@@ -3631,13 +3919,15 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
   u8  src_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
   u16 src_trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
   u8  src_trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
-  // Snapshot the source's FULL CC config (0x00..0x7f). The frozen copy must
-  // reproduce what was heard — length (0x4d), clock divider (0x4c), groove
-  // (0x52/0x53) and the trigger-layer assignments (0x60..0x68) all live above the
-  // old lower-48 inherit, so a partial copy left the copy running at the dst
-  // slot's defaults ("too fast" wrong length/clock, wrong gates, no groove).
-  for(i=0; i<128; ++i)
-    slottrk_src_cc[i] = (u8)SEQ_CC_Get(src_track, i);
+  // Snapshot the source's FULL CC config — 0x00..0x7f AND the fork ext block
+  // (SEQ_CORE_CC_INHERIT_COUNT). The frozen copy must reproduce what was heard —
+  // length (0x4d), clock divider (0x4c), groove (0x52/0x53), the trigger-layer
+  // assignments (0x60..0x68) and the VOICING dials (0xa0..0xa3) all live above
+  // the old partial inherits. Unmapped headroom reads <0 -> clamp 0.
+  for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i) {
+    s32 ccv = SEQ_CC_Get(src_track, i);
+    slottrk_src_cc[i] = (ccv < 0) ? 0 : (u8)ccv;
+  }
 
   // 2. Snapshot the dst group's live RAM (4 tracks) so we can restore it.
   for(t=0; t<SEQ_CORE_NUM_TRACKS_PER_GROUP; ++t) {
@@ -3673,19 +3963,31 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     SEQ_PAR_TrackInit(dst_track, src_par_steps, src_par_layers, src_num_instr);
     SEQ_TRG_TrackInit(dst_track, src_trg_steps, src_trg_layers, src_num_instr);
     // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
-    // the source's whole 0x00..0x7f CC space so length/clock/groove/trigger
-    // assignments/routing travel with the frozen notes. SEQ_CC_ResetGenerativeForBounce
-    // below strips the generation axis (mode/direction/transpose/robotize/echo/lfo/
-    // random) while keeping the deterministic shaping (groove, length, clkdiv,
-    // structural trg-asg). EVENT_MODE re-set in the loop is a harmless no-op
-    // (already set above; the setter only re-links, never re-partitions).
-    for(i=0; i<128; ++i)
+    // the source's whole CC space (incl. the ext block — voicing travels, see
+    // SEQ_CORE_CC_INHERIT_COUNT) so length/clock/groove/trigger assignments/
+    // routing travel with the frozen notes. SEQ_CC_ResetGenerativeForBounce
+    // below strips the generation axis (mode/direction/transpose/robotize/echo/
+    // lfo/random/slicer) while keeping the deterministic shaping (groove,
+    // length, clkdiv, structural trg-asg, voicing). EVENT_MODE re-set in the
+    // loop is a harmless no-op (already set above; the setter only re-links,
+    // never re-partitions).
+    for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i)
       SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
     SEQ_CC_LinkUpdate(dst_track);
     memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
     // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
     SEQ_CC_ResetGenerativeForBounce(dst_track);
+    // Legacy-pitch-fenced sources (2026-07-18): drum steps store no notes and
+    // chord steps store indices — the mirror can't bake their transpose, the
+    // config IS the pitch. Re-apply the source's static Semi/Oct.
+    {
+      u8 sem = slottrk_src_cc[SEQ_CC_MIDI_EVENT_MODE];
+      if( sem == SEQ_EVENT_MODE_Drum || sem == SEQ_EVENT_MODE_Chord ) {
+        SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_SEMI, slottrk_src_cc[SEQ_CC_TRANSPOSE_SEMI]);
+        SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_OCT,  slottrk_src_cc[SEQ_CC_TRANSPOSE_OCT]);
+      }
+    }
     // The captured copy is a FREEZE: generator-less by definition (same intent
     // as the generative-CC reset above). Clears the slot-read-seeded gens for
     // this section so the step-5 write persists none for it.
@@ -3810,7 +4112,10 @@ static s32 SEQ_CORE_CaptureChordWindow(u8 src, u8 k,
   if( (u32)W * par_layers * par_instr > SEQ_PAR_MAX_BYTES ) return -9;
   if( (u32)cap_t8 * trg_layers * trg_instr > SEQ_TRG_MAX_BYTES ) return -12;
 
-  { int i; for(i=0; i<128; ++i) slottrk_src_cc[i] = (u8)SEQ_CC_Get(src, i); } // chord mode + layers travel
+  { int i; for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i) {
+      s32 ccv = SEQ_CC_Get(src, i);
+      slottrk_src_cc[i] = (ccv < 0) ? 0 : (u8)ccv;
+  } } // chord mode + layers travel (full span incl. voicing since 2026-07-18)
   memset(capture_par_snapshot, 0, SEQ_PAR_MAX_BYTES);
   memset(capture_trg_snapshot, 0, SEQ_TRG_MAX_BYTES);
 
@@ -3879,6 +4184,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
   // Read the source's event mode NOW — step 4's slot load clobbers the dst group, which
   // may contain src. Drives both the window-fill branch and the transpose re-apply below.
   u8 src_is_chord = (seq_cc_trk[src].event_mode == SEQ_EVENT_MODE_Chord);
+  u8 src_is_drum  = (seq_cc_trk[src].event_mode == SEQ_EVENT_MODE_Drum);
 
   // Borrow a scratch track in the dst group: the span capture needs a target != src,
   // and the slot writer overwrites dst_track. With 4 tracks/group and 2 excluded there
@@ -3932,8 +4238,10 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
       // the grid). Read it as the slot-source material + geometry.
       memcpy(capture_par_snapshot, seq_par_layer_value[scratch], SEQ_PAR_MAX_BYTES);
       memcpy(capture_trg_snapshot, seq_trg_layer_value[scratch], SEQ_TRG_MAX_BYTES);
-      for(i=0; i<128; ++i)
-        slottrk_src_cc[i] = (u8)SEQ_CC_Get(scratch, i);
+      for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i) {
+        s32 ccv = SEQ_CC_Get(scratch, i);
+        slottrk_src_cc[i] = (ccv < 0) ? 0 : (u8)ccv;
+      }
       cap_par_steps  = (u16)SEQ_PAR_NumStepsGet(scratch);   // window length W = k*spm (exact)
       cap_par_layers = (u8)SEQ_PAR_NumLayersGet(scratch);
       cap_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(scratch);
@@ -4008,7 +4316,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
       SEQ_CC_LinkUpdate(dst_track);
       SEQ_PAR_TrackInit(dst_track, canvas, cap_par_layers, cap_num_instr);  // canvas, src layout
       SEQ_TRG_TrackInit(dst_track, canvas, cap_trg_layers, cap_trg_instr);  // (clears the buffers)
-      for(i=0; i<128; ++i)
+      for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i)
         SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
       SEQ_CC_LinkUpdate(dst_track);
       // tile the window (snapshot, W steps) across loop_steps; steps past loop_steps stay rest
@@ -4019,10 +4327,15 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
       SEQ_GENERATOR_TrackClear(dst_track);
       // A chord track stores ROOT indices; transpose is applied to the expanded notes at
       // render, so it's NOT baked into the captured indices the way the note path bakes it
-      // into emitted notes. ResetGenerativeForBounce just zeroed it — re-apply the source's
-      // static transpose so captured chords keep their key (live/global transpose still
-      // follow at playback; the held-key transposer is a live gesture, not track data).
-      if( src_is_chord ) {
+      // into emitted notes. Same for DRUM tracks (2026-07-18): drum steps store no notes
+      // at all (gates+vel per instrument; pitch = per-drum config + emission transpose),
+      // so nothing bakes there either. ResetGenerativeForBounce just zeroed it — re-apply
+      // the source's static transpose so captured chords keep their key and captured kits
+      // keep their tuning (live/global transpose still follows at playback; the held-key
+      // transposer is a live gesture, not track data). slottrk_src_cc snapshots SCRATCH
+      // for the drum/span route — its PrepDst re-apply already restored these, so the
+      // values are the source's either way.
+      if( src_is_chord || src_is_drum ) {
         SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_SEMI, slottrk_src_cc[SEQ_CC_TRANSPOSE_SEMI]);
         SEQ_CC_Set(dst_track, SEQ_CC_TRANSPOSE_OCT,  slottrk_src_cc[SEQ_CC_TRANSPOSE_OCT]);
       }
@@ -4103,8 +4416,13 @@ s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst
   u8  src_num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src_track);
   u16 src_trg_steps  = (u16)SEQ_TRG_NumStepsGet(src_track);
   u8  src_trg_layers = (u8)SEQ_TRG_NumLayersGet(src_track);
-  for(i=0; i<128; ++i)
-    slottrk_src_cc[i] = (u8)SEQ_CC_Get(src_track, i);
+  // FULL span incl. the ext block (2026-07-18): the LIVING verb keeps the
+  // generative axis by design — before this it silently dropped the slicer/
+  // voicing dials (0x80+), so a living chopping track came back un-chopped.
+  for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i) {
+    s32 ccv = SEQ_CC_Get(src_track, i);
+    slottrk_src_cc[i] = (ccv < 0) ? 0 : (u8)ccv;
+  }
   // The living generator pool travels too (the keep-gen difference). Snapshot it
   // now: if src is in the dst group, step 3's load would replace its pool entry.
   copytrk_src_gen_count = SEQ_GENERATOR_TrackSnapshot(src_track, copytrk_src_gen, SEQ_GENERATOR_PERSIST_SLOTS);
@@ -4138,7 +4456,7 @@ s32 SEQ_CORE_CopyTrackLiveToSlot(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst
     SEQ_CC_LinkUpdate(dst_track);
     SEQ_PAR_TrackInit(dst_track, src_par_steps, src_par_layers, src_num_instr);
     SEQ_TRG_TrackInit(dst_track, src_trg_steps, src_trg_layers, src_num_instr);
-    for(i=0; i<128; ++i)
+    for(i=0; i<SEQ_CORE_CC_INHERIT_COUNT; ++i)
       SEQ_CC_Set(dst_track, i, slottrk_src_cc[i]);
     SEQ_CC_LinkUpdate(dst_track);
     memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
@@ -5593,6 +5911,22 @@ s32 SEQ_CORE_Tick(u32 bpm_tick, s8 export_track, u8 mute_nonloopback_tracks)
       for(t_idx = 0; t_idx < SEQ_CORE_NUM_TRACKS; ++t_idx, ++t_m, ++tcc_m) {
 	++t_m->robotize_measure_ctr;
 	SEQ_CORE_RobotizeLoopBarTick(t_m, tcc_m);
+
+	// Slicer MOTION (act 2): re-roll the seeded fill at its bar-rate
+	// boundary. The tick's render pass (SEQ_CORE_RenderTracks, top of
+	// SEQ_CORE_Tick) already ran, so a plain dirty flag would render one
+	// tick LATE and smear the downbeat — render synchronously instead so
+	// the new chop lands exactly ON the One (TensionResolveBoundary
+	// spirit). Guarded to armed slots with motion+seed live, at the rate
+	// boundary only: cost = one dial-write-class render every N bars.
+	if( tcc_m->slice_motion && tcc_m->slice_seed ) {
+	  const seq_processor_slot_t *sl_m = &seq_processor_stack[t_idx][SEQ_CORE_SLICE_SLOT];
+	  if( sl_m->id == SEQ_PROCESSOR_ID_SLICE && sl_m->enabled &&
+	      (t_m->robotize_measure_ctr % slice_motion_bars(tcc_m->slice_motion)) == 0 ) {
+	    seq_render_dirty[t_idx] = 1;
+	    SEQ_CORE_RenderTrack(t_idx);
+	  }
+	}
       }
 
       // Retroactive CAPTURE: ring the visible track's generative frame for the

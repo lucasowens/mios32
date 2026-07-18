@@ -92,6 +92,16 @@ static u8 proc_groove_dirty = 0;
 static s8 proc_groove_paint_val = 0;
 static u8 proc_groove_held_step = 0xff;
 static u8 proc_groove_held_turned = 0;
+// Slicer ORDR pad hold (momentary interject, 2026-07-18): press starts the
+// transient map override (the source sounds at once); QUICK release (<350ms,
+// the established tap threshold) = the punch COMMIT (paint at the press-time
+// quantized landing); a longer hold = ride the repeat, release returns the
+// loop unpainted — the playhead never left, so "coming back" is free. Track
+// stashed at press (the datawheel can walk tracks mid-hold).
+static u8  proc_slice_held_pad = 0xff;
+static u8  proc_slice_held_track = 0;
+static u8  proc_slice_held_target = 0;
+static u32 proc_slice_held_t0 = 0;
 // Hold-vs-tap split (2026-07-13, "check a step without removing it"): a quick release
 // (<350ms, the B-row double-tap threshold) is the toggle; a longer hold is a PEEK —
 // the Val cell showed the step's value, the release does nothing.
@@ -1500,7 +1510,7 @@ typedef enum {
                       //   lo/deflt are -1. Divergence from the page: CCW from off-ladder
                       //   does nothing (the page jumps to Loc); enter the ladder CW (Tens).
   PROC_KIND_SLICE_GRID, // Slicer grid/headline: slice length in bits 0..2 (0 = off/dark
-                      //   row, 1..4 = 2/4/8/16 steps), 0x80 = the row's bypass bit.
+                      //   row, 1..5 = 1/2/4/8/16 steps), 0x80 = the row's bypass bit.
                       //   Masked RMW preserving bypass (Echo idiom); the 0->on turn
                       //   engage-seeds Seed/Str so the chop is audible at once (Slicer).
 } proc_pkind_t;
@@ -1524,6 +1534,7 @@ typedef enum {
   PROC_FMT_PLUS1,       // value shown as v+1 (1-based counts)        (LFO Rate = steps/cycle)
   PROC_FMT_PCT,         // value shown as v% directly                 (LFO Phase 0..99)
   PROC_FMT_PCT127,      // value 0..127 shown as 0..100 percent (v*100/127) (TrigGen Density)
+  PROC_FMT_MOTN_BARS,   // slicer MOTION zones: off / 8bar / 4bar / 2bar / 1bar (Slic Motn)
 } proc_fmt_t;
 
 typedef struct {
@@ -1570,6 +1581,11 @@ typedef enum {
   PROC_FACE_GROOVE_PAINT,   // Groove's paintable 16-step shape (custom templates only)
   PROC_FACE_LFO_PALETTE,    // LFO's waveform palette: tap a GP button to pick a shape
   PROC_FACE_TENSION_ZONES,  // Tension's zone jump: GP9-15 = DRONE..SLIP, GP16 = RESOLVE
+  PROC_FACE_SLICE_JUMP,     // Slicer's jump pads (act 2): GP9-16 punch the playhead to slice 1-8
+  PROC_FACE_SLICE_ORDER,    // Slicer's ORDR paint plane (act 2): encoders paint the slice
+                            //   order per position, buttons jump, LCD shows the RESOLVED map
+                            //   (painted bare, machine-decided in parens). Pure face, no dial
+                            //   bank (params2 NULL — the first such plane).
 } proc_face_t;
 
 typedef struct {
@@ -1874,7 +1890,8 @@ static const proc_param_t proc_params_voicing[] = {
 
 // Slicer — render-stack TAIL processor (plan 2026-07-15): chop the HEARD loop into
 // equal slices and resequence them. Grid is the headline/occupancy dial (0 = off/dark;
-// 1..4 = 2/4/8/16-step slices; its 0->on turn engage-seeds Seed=1 + Str=127 so the
+// 1..5 = 1/2/4/8/16-step slices — 1stp is the step-grain break chopper, REV inert
+// there; its 0->on turn engage-seeds Seed=1 + Str=127 so the
 // chop is audible at once). Seed browses deterministic shuffles (0 = identity —
 // painted order still applies); Str is the universal sweep (a thermometer over ranked
 // slices — painted positions engage across the lower dial half, seeded across the
@@ -1884,11 +1901,16 @@ static const proc_param_t proc_params_voicing[] = {
 // source slice, 0 = unpainted). Double-tap = config-preserving bypass (GRID bit 7),
 // so the chop drops in/out live without losing the dialled shape.
 static const proc_param_t proc_params_slicer[] = {
-  { "Grid", PROC_KIND_SLICE_GRID, SEQ_CC_SLICE_GRID,     0,   4, 0, PROC_FMT_DEFAULT },
+  { "Grid", PROC_KIND_SLICE_GRID, SEQ_CC_SLICE_GRID,     0,   5, 0, PROC_FMT_DEFAULT },
   { "Seed", PROC_KIND_CC,         SEQ_CC_SLICE_SEED,     0, 127, 0, PROC_FMT_DEFAULT, 1 },
   { "Str",  PROC_KIND_CC,         SEQ_CC_SLICE_STRENGTH, 0, 127, 0, PROC_FMT_DEFAULT, 127 },
   { "Rept", PROC_KIND_CC,         SEQ_CC_SLICE_REPT,     0, 127, 0, PROC_FMT_DEFAULT },
   { "Rev",  PROC_KIND_CC,         SEQ_CC_SLICE_REV,      0, 127, 0, PROC_FMT_DEFAULT },
+  // Act 2 (plan 2026-07-17): Chok = edge-cut thermometer (glide ties cleared at
+  // choked slices' final step); Motn = per-bar re-roll of the seeded fill —
+  // a 5-detent rate selector like Grid (off/8bar/4bar/2bar/1bar, one click each).
+  { "Chok", PROC_KIND_CC,         SEQ_CC_SLICE_CHOKE,    0, 127, 0, PROC_FMT_DEFAULT },
+  { "Motn", PROC_KIND_CC,         SEQ_CC_SLICE_MOTION,   0,   4, 0, PROC_FMT_MOTN_BARS },
 };
 
 static const proc_row_t proc_rows[] = {
@@ -1920,7 +1942,8 @@ static const proc_row_t proc_rows[] = {
   // generators (whose material it resequences — the slice pass runs at the render-
   // stack TAIL, after everything pitch-shaped) and the feel pair below.
   { .name = "Slicer",    .abbr = "Slic", .rowkind = PROC_ROW_STACK, .stack_slot = SEQ_CORE_SLICE_SLOT,
-    .params = proc_params_slicer,    .n_params = 5,
+    .params = proc_params_slicer,    .n_params = 7, .face1 = PROC_FACE_SLICE_JUMP,
+    .face2 = PROC_FACE_SLICE_ORDER, .p1name = "CHOP", .p2name = "ORDR",
     .status = SEQ_UI_PROC_Status_Slicer },
   // Grve at position 7 (2026-07-13 mock): the timing/feel row leads the emission tail.
   { .name = "Groove",    .abbr = "Grve", .rowkind = PROC_ROW_EMISSION,
@@ -2108,14 +2131,17 @@ static const char *SEQ_UI_PROC_SlotName(u8 row)
 }
 
 // The param list for a rack row's CURRENT plane (ui_proc_plane). *n = 0 for none.
-// Plane 1 exists only where the row declares params2; every other row ignores the plane.
+// A 2nd plane can be a dial bank (params2) OR a pure face with NO dial bank
+// (face2 set, params2 NULL — Slic's ORDR paint plane, act 2): on such a plane
+// the param list is EMPTY, never a fall-through to plane 1's dials (the face
+// owns the encoders via its own branch).
 static void SEQ_UI_PROC_SlotParams(u8 row, const proc_param_t **out, u8 *n)
 {
   if( row < PROC_NUM_ROWS ) {
     const proc_row_t *r = &proc_rows[row];
-    if( ui_proc_plane == 1 && r->params2 ) {
+    if( ui_proc_plane == 1 && (r->params2 || r->face2 != PROC_FACE_NONE) ) {
       *out = r->params2;
-      *n   = r->n_params2;
+      *n   = r->params2 ? r->n_params2 : 0;
     } else {
       *out = r->params;
       *n   = r->n_params;
@@ -2126,10 +2152,11 @@ static void SEQ_UI_PROC_SlotParams(u8 row, const proc_param_t **out, u8 *n)
   }
 }
 
-// Does row `row` have a 2nd plane (so ‹/› toggles it)?
+// Does row `row` have a 2nd plane (so ‹/› toggles it)? A dial bank OR a pure face.
 static u8 SEQ_UI_PROC_HasPlane2(u8 row)
 {
-  return row < PROC_NUM_ROWS && proc_rows[row].params2 != NULL;
+  return row < PROC_NUM_ROWS &&
+    (proc_rows[row].params2 != NULL || proc_rows[row].face2 != PROC_FACE_NONE);
 }
 
 // The bespoke face of the row's CURRENT plane (PROC_FACE_NONE for a plain dial bank).
@@ -2962,8 +2989,8 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
     SEQ_LCD_PrintFormattedString("%-4s", SEQ_UI_GRAVITY_ShadeName(v));
     return;
   case PROC_KIND_SLICE_GRID: {
-    static const char *const gn[5] = { "off ", "2stp", "4stp", "8stp", "16st" };
-    SEQ_LCD_PrintString(gn[(v >= 0 && v < 5) ? v : 0]);
+    static const char *const gn[6] = { "off ", "1stp", "2stp", "4stp", "8stp", "16st" };
+    SEQ_LCD_PrintString(gn[(v >= 0 && v < 6) ? v : 0]);
     return;
   }
   case PROC_KIND_GEN_RANGE_LO:
@@ -2998,6 +3025,11 @@ static void SEQ_UI_PROC_ParamPrintValue(u8 track, const proc_param_t *p)
   case PROC_FMT_PLUS1:  SEQ_LCD_PrintFormattedString("%3d ", (int)v + 1); break;
   case PROC_FMT_PCT:    SEQ_LCD_PrintFormattedString("%3d%%", (int)v);    break;
   case PROC_FMT_PCT127: SEQ_LCD_PrintFormattedString("%3d%%", (int)v * 100 / 127); break;
+  case PROC_FMT_MOTN_BARS: {
+    static const char *const mn[5] = { "off ", "8bar", "4bar", "2bar", "1bar" };
+    SEQ_LCD_PrintString(mn[(v >= 0 && v <= 4) ? v : 4]);
+    break;
+  }
   default:              SEQ_LCD_PrintFormattedString("%3d ", (int)v);     break;
   }
 }
@@ -3340,27 +3372,181 @@ static void SEQ_UI_PROC_Status_Voicing(u8 track, u8 slot)
     (strum == 64) ? "off" : (strum > 64) ? "up" : "down");
 }
 
-// Slicer right-screen readout: the resulting slice geometry (row 0) + where the
-// painted order lives — or how to get one (row 1, the Voicing "no Chord layer" idiom).
-static void SEQ_UI_PROC_Status_Slicer(u8 track, u8 slot)
+// Slicer act-2 shared gesture: punch the playhead to output position `pos` —
+// SEQ_CORE_SetTrkPos latches manual_step while playing (consumed at the next
+// step advance = a step-quantized jump, the retrigger feel) and sets the step
+// directly while stopped. Used by the CHOP plane's GP9-16 pads (positions 1-8)
+// and the ORDR plane's full GP1-16. Active on grid GEOMETRY regardless of the
+// bypass bit (the jump moves the playhead, not the render).
+static void SEQ_UI_PROC_SliceJump(u8 track, u8 pos)
 {
   u8 grid = SEQ_CC_Get(track, SEQ_CC_SLICE_GRID) & 0x07;
   if( !grid )
-    return; // dark row — the generic rack readout says enough
-  u8 len = (u8)(1 << grid);
-  u16 num_steps = SEQ_PAR_NumStepsGet(track);
-  SEQ_LCD_CursorSet(41, 0);
-  SEQ_LCD_PrintFormattedString("%d slices of %d", num_steps / len, len);
+    return;
+  u16 step = (u16)pos * (u16)(1u << (grid - 1));
+  if( step <= seq_cc_trk[track].length )
+    SEQ_CORE_SetTrkPos(track, (u8)step, 0);
+}
 
-  s8 ord_layer = -1;
-  u8 l, n = (u8)SEQ_PAR_NumLayersGet(track);
+// Ensure the track has a SlcOr layer, AUTO-ADOPTING one if missing (the
+// pre-ENGAGE adopt idiom): the first still-None par layer gets the
+// assignment, zeroed to all-unpainted. Drum tracks usually have no free par
+// layer and keep their assignments in par_assignment_drum (different CCs) —
+// the TrkEvnt ceremony remains their route. Returns 0 when a layer exists.
+// Shared by the ORDR encoders and the punch-chop pads.
+static s32 SEQ_UI_PROC_SliceOrdEnsureLayer(u8 track)
+{
+  if( SEQ_CORE_SliceOrdLayerGet(track) >= 0 )
+    return 0;
+  if( seq_cc_trk[track].event_mode == SEQ_EVENT_MODE_Drum ) {
+    SEQ_UI_Msg_Track("SlcOr: TrkEvnt");
+    return -1;
+  }
+  u8 l, n = (u8)SEQ_PAR_NumLayersGet(track), adopted = 0xff;
   for(l=0; l<n; ++l)
-    if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_SliceOrd ) { ord_layer = (s8)l; break; }
-  SEQ_LCD_CursorSet(40, 1);
-  if( ord_layer >= 0 )
-    SEQ_LCD_PrintFormattedString("order: SlcOr layer %c (paint on EDIT)", 'A' + ord_layer);
-  else
-    SEQ_LCD_PrintString("order: Seed only (SlcOr layer: TrkEvnt)");
+    if( SEQ_PAR_AssignmentGet(track, l) == SEQ_PAR_Type_None ) { adopted = l; break; }
+  if( adopted == 0xff ) {
+    SEQ_UI_Msg_Track("no free par layer");
+    return -1;
+  }
+  // a None layer's bytes are stale — zero to all-unpainted before assigning
+  u16 st, num_steps = (u16)SEQ_PAR_NumStepsGet(track);
+  for(st=0; st<num_steps; ++st)
+    SEQ_PAR_Set(track, st, adopted, 0, 0);
+  SEQ_CC_Set(track, SEQ_CC_LAY_CONST_A1 + adopted, SEQ_PAR_Type_SliceOrd);
+  SEQ_UI_Msg_Track("SlcOr adopted");
+  return 0;
+}
+
+// ORDR-plane encoder: nudge position `pos`'s painted source slice (0 =
+// unpainted, the machine decides).
+static void SEQ_UI_PROC_SliceOrderEnc(u8 track, u8 pos, s32 incr)
+{
+  u8 map16[16], rev16[16], painted16[16];
+  s32 S = SEQ_CORE_SlicePreview(track, map16, rev16, painted16);
+  if( S <= 0 || (s32)pos >= S )
+    return;
+  if( SEQ_UI_PROC_SliceOrdEnsureLayer(track) < 0 )
+    return;
+  s32 v = (s32)painted16[pos] + incr;
+  if( v < 0 ) v = 0;
+  if( v > S ) v = S;
+  SEQ_CORE_SliceOrderPaint(track, pos, (u8)v);
+}
+
+// PUNCH-CHOP + MOMENTARY INTERJECT (act 2 cont — "record the pads, real MPC
+// style" + "play the slice, then jump back"): while the loop RUNS, ORDR pad K
+// means SOURCE slice K. The PRESS starts a transient map override — K sounds
+// at once, no paint, no phase slip (the content moves, the playhead keeps the
+// bar; the CHOP plane's pads keep the phase-slipping playhead jump as the
+// contrast). What the RELEASE means is the tap/hold split (350ms, the Grve
+// idiom): QUICK = the punch COMMIT — paint SlcOr at the press-time quantized
+// landing, so the hit loops forever, overdubs pass by pass, captures/bounces
+// for free (no event recording: the map IS the recording); LONG = it was a
+// repeat ride — release clears the override and the loop resumes exactly
+// where it would have been (the playhead never left). Nearest-boundary
+// landing: front half of a slice = the CURRENT position (its remaining steps
+// already re-rendered to K's tail — late-hit forgiveness), back half = the
+// next boundary; 1stp = next-16th quantize; a loop-around punch lands on the
+// One. Paints respect Str like the encoders (dial sovereignty).
+
+// The press half: guards, quantized landing stashed, override on. A press
+// while another pad is still QUICK-held commits that one first (legato
+// drumming must not drop paints).
+static void SEQ_UI_PROC_SlicePadPress(u8 track, u8 pad)
+{
+  u8 grid = SEQ_CC_Get(track, SEQ_CC_SLICE_GRID) & 0x07;
+  if( !grid )
+    return;
+  u8 map16[16], rev16[16], painted16[16];
+  s32 S = SEQ_CORE_SlicePreview(track, map16, rev16, painted16);
+  if( (s32)pad >= S )
+    return; // pads beyond the window's sources are inert (LEDs already dark)
+
+  if( proc_slice_held_pad != 0xff &&
+      (u32)MIOS32_TIMESTAMP_GetDelay(proc_slice_held_t0) < 350 &&
+      SEQ_UI_PROC_SliceOrdEnsureLayer(proc_slice_held_track) == 0 )
+    SEQ_CORE_SliceOrderPaint(proc_slice_held_track, proc_slice_held_target,
+                             (u8)(proc_slice_held_pad + 1));
+
+  u8 len = (u8)(1u << (grid - 1));
+  u16 play_len = (u16)seq_cc_trk[track].length + 1;
+  u16 play_slices = (u16)(play_len / len);
+  u8 step = seq_core_trk[track].step;
+  u16 C = (u16)(step / len), off = (u16)(step % len);
+  u16 target = (off < (u16)(len >> 1)) ? C : (u16)(C + 1);
+  if( play_slices && target >= play_slices )
+    target = 0; // wrap: the loop-around punch lands on the One
+
+  proc_slice_held_pad    = pad;
+  proc_slice_held_track  = track;
+  proc_slice_held_target = (u8)target;
+  proc_slice_held_t0     = (u32)MIOS32_TIMESTAMP_Get();
+  SEQ_CORE_SliceHoldSet(track, (u8)(pad + 1));
+}
+
+// Slicer readout, per plane. CHOP (plane 1): compact geometry "8x2" at col 50
+// (col 41 is the plane cue since the ORDR plane landed; 55 = BYP) + the 8
+// jump-pad cells on row 1 right (GP9-16), sounding slice bracketed. ORDR
+// (plane 2): row 0 left = context (slice count, SlcOr layer or adopt hint);
+// row 1 = the 16 RESOLVED-map cells — painted positions bare (" 3"), machine-
+// decided in parens ("( 3)"), trailing '<' = REV'd; stutter shows up as the
+// same source repeating. Browsing Seed/Motion animates exactly the parens
+// cells: the deliberate skeleton visibly stays put.
+static void SEQ_UI_PROC_Status_Slicer(u8 track, u8 slot)
+{
+  u8 grid = SEQ_CC_Get(track, SEQ_CC_SLICE_GRID) & 0x07;
+
+  if( SEQ_UI_PROC_CurFace(slot) == PROC_FACE_SLICE_ORDER ) {
+    SEQ_LCD_CursorSet(0, 0);
+    if( !grid ) {
+      SEQ_LCD_PrintString("Grid off - no slices to order");
+      return;
+    }
+    u8 map16[16], rev16[16], painted16[16];
+    s32 S = SEQ_CORE_SlicePreview(track, map16, rev16, painted16);
+    u8 len = (u8)(1 << (grid - 1));
+    SEQ_LCD_PrintFormattedString("Order %d slices of %d  ", (int)S, (int)len);
+    s32 ord_layer = SEQ_CORE_SliceOrdLayerGet(track);
+    if( ord_layer >= 0 )
+      SEQ_LCD_PrintFormattedString("SlcOr:%c", (char)('A' + ord_layer));
+    else
+      SEQ_LCD_PrintString("turn adopts SlcOr");
+    s32 s;
+    for(s=0; s<S && s<16; ++s) {
+      SEQ_LCD_CursorSet((u16)(s*5), 1);
+      int src = (int)map16[s] + 1;
+      // bare ONLY when the paint is ENGAGED (resolved == painted). At low Str a
+      // painted position can be gated back to identity — the cell then shows the
+      // parens TRUTH (what sounds) while the color-2 LED still marks the paint.
+      if( painted16[s] && map16[s] == (u8)(painted16[s] - 1) )
+        SEQ_LCD_PrintFormattedString(" %2d  ", src);
+      else
+        SEQ_LCD_PrintFormattedString("(%2d)%c", src, rev16[s] ? '<' : ' ');
+    }
+    return;
+  }
+
+  // CHOP plane
+  if( !grid )
+    return; // dark row — the generic rack readout says enough
+  u8 len = (u8)(1 << (grid - 1));
+  u16 num_steps = SEQ_PAR_NumStepsGet(track);
+  SEQ_LCD_CursorSet(50, 0);
+  SEQ_LCD_PrintFormattedString("%dx%d", num_steps / len, len);
+
+  // jump pads: 8 cells x 5 cols at 40..79, slice s playable iff its first step
+  // is within the play length (same bound as SEQ_UI_PROC_SliceJump)
+  u16 play_len = (u16)seq_cc_trk[track].length + 1;
+  u8 cur = (u8)(seq_core_trk[track].step / len);
+  u8 s;
+  for(s=0; s<8; ++s) {
+    SEQ_LCD_CursorSet((u16)(40 + s*5), 1);
+    if( (u16)s * len < play_len )
+      SEQ_LCD_PrintFormattedString((s == cur) ? "[%2d] " : " %2d  ", s + 1);
+    else
+      SEQ_LCD_PrintString("  -  ");
+  }
 }
 
 // Page buttons. The B-row (rack), GP encoders (operate), and GP-row mask are all
@@ -3374,6 +3560,20 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
   // still acts on the press edge only.
   if( button >= SEQ_UI_BUTTON_GP1 && button <= SEQ_UI_BUTTON_GP16 && depressed ) {
     u8 pc = (u8)(button - SEQ_UI_BUTTON_GP1);
+    // Slicer ORDR pad release — the tap/hold split (see SEQ_UI_PROC_SlicePadPress):
+    // clear the momentary override either way (the loop resumes where it would
+    // have been); a QUICK release additionally COMMITS the punch (paint at the
+    // press-time landing). Keyed on the stashed pad, not the face — a plane flip
+    // or track walk mid-hold must still release cleanly.
+    if( pc == proc_slice_held_pad ) {
+      u8 quick = ((u32)MIOS32_TIMESTAMP_GetDelay(proc_slice_held_t0) < 350);
+      SEQ_CORE_SliceHoldSet(proc_slice_held_track, 0);
+      if( quick && SEQ_UI_PROC_SliceOrdEnsureLayer(proc_slice_held_track) == 0 )
+        SEQ_CORE_SliceOrderPaint(proc_slice_held_track, proc_slice_held_target,
+                                 (u8)(proc_slice_held_pad + 1));
+      proc_slice_held_pad = 0xff;
+      seq_ui_display_update_req = 1;
+    }
     if( pc == proc_groove_held_step ) {
       u8 turned = proc_groove_held_turned;
       // A QUICK release is the tap/toggle; a longer hold was a PEEK at the Val cell
@@ -3491,6 +3691,25 @@ static s32 SEQ_UI_PROC_page_Button(seq_ui_button_t button, s32 depressed)
         SEQ_CORE_TensionGravitySet(tension_zone_jump[pc - 8]);
       }
     }
+    // Slicer jump pads (act 2): CHOP plane GP9-16 = slices 1-8; the ORDR plane
+    // extends the same gesture to all 16 GP buttons (tap a position = hear it —
+    // paint with the encoder, audition with the pad). Pads past the track's
+    // play length are ignored (see SEQ_UI_PROC_SliceJump).
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_SLICE_JUMP && pc >= 8 ) {
+      SEQ_UI_PROC_SliceJump(track, (u8)(pc - 8));
+    }
+    else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_SLICE_ORDER && pc < 16 ) {
+      // ORDR pads = SOURCES (MPC semantics): running loop -> the press half of
+      // the tap/hold gesture (interject now; the RELEASE decides punch-commit
+      // vs repeat-ride — see the release handler at the top of this function);
+      // stopped -> jump into region K (preview).
+      if( SEQ_BPM_IsRunning() ) {
+        SEQ_UI_PROC_SlicePadPress(track, pc);
+        seq_ui_display_update_req = 1;
+      } else {
+        SEQ_UI_PROC_SliceJump(track, pc);
+      }
+    }
     return 1; // swallow either way
   }
 
@@ -3523,6 +3742,11 @@ static s32 SEQ_UI_PROC_page_Exit(void)
 {
   if( seq_ui_sel_view == SEQ_UI_SEL_VIEW_PROC )
     seq_ui_sel_view = SEQ_UI_SEL_VIEW_NONE;
+  // a slice hold must not outlive the page (its release lands elsewhere)
+  if( proc_slice_held_pad != 0xff ) {
+    SEQ_CORE_SliceHoldSet(proc_slice_held_track, 0);
+    proc_slice_held_pad = 0xff;
+  }
   if( proc_groove_dirty ) {
     proc_groove_dirty = 0;
     MUTEX_SDCARD_TAKE;
@@ -4131,7 +4355,12 @@ static s32 SEQ_UI_Button_Enc(s32 depressed, u32 enc_button)
     const proc_param_t *params; u8 nparams;
     SEQ_UI_PROC_SlotParams(ui_focused_proc_slot, &params, &nparams);
     u8 idx = (u8)enc_button - 1;
-    if( idx < nparams ) {
+    // ORDR paint plane (act 2): push = UNPAINT the position (back to the
+    // machine's parens) — the detent spirit of every other encoder push.
+    if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_SLICE_ORDER ) {
+      SEQ_CORE_SliceOrderPaint(SEQ_UI_VisibleTrackGet(), idx, 0);
+      seq_ui_display_update_req = 1;
+    } else if( idx < nparams ) {
       if( params[idx].kind == PROC_KIND_ACTION )
         SEQ_UI_PROC_RunAction(SEQ_UI_VisibleTrackGet(), params[idx].cc); // push = execute
       else
@@ -5951,7 +6180,14 @@ s32 SEQ_UI_Encoder_Handler(u32 encoder, s32 incrementer)
       const proc_param_t *params; u8 nparams;
       SEQ_UI_PROC_SlotParams(ui_focused_proc_slot, &params, &nparams);
       s32 idx = (s32)encoder - 1;
-      if( idx >= 0 && idx < (s32)nparams )
+      // ORDR paint plane (act 2): the encoders ARE the 16 position cells — the
+      // first pure-face plane, no param routing (SlotParams returns 0 params).
+      if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_SLICE_ORDER ) {
+        if( idx >= 0 && idx < 16 ) {
+          SEQ_UI_PROC_SliceOrderEnc(track, (u8)idx, incrementer);
+          seq_ui_display_update_req = 1;
+        }
+      } else if( idx >= 0 && idx < (s32)nparams )
         SEQ_UI_PROC_ParamInc(track, &params[idx], incrementer);
     }
   } else if( ui_encoder_callback != NULL ) {
@@ -6919,6 +7155,50 @@ s32 SEQ_UI_LED_Handler(void)
         // you tapped it again — plus GP16 (Rslv) as a steady discoverability hint.
         u8 zi = tension_zone_index(seq_core_tension_gravity);
         gp = (u16)((1u << (8 + zi)) | (1u << 15));
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_SLICE_JUMP ) {
+        // Slicer jump pads (act 2): light the PLAYABLE pads (GP9-16, slices whose
+        // first step is within the play length) with the sounding slice WINKING —
+        // the ROBOLOOP playhead idiom. Grid off = dark (no geometry, pads inert).
+        u8 vt = SEQ_UI_VisibleTrackGet();
+        u8 sgrid = SEQ_CC_Get(vt, SEQ_CC_SLICE_GRID) & 0x07;
+        if( sgrid ) {
+          u8 slen = (u8)(1u << (sgrid - 1));
+          u16 play_len = (u16)seq_cc_trk[vt].length + 1;
+          int i;
+          for(i=0; i<8; ++i)
+            if( (u16)(i * slen) < play_len )
+              gp |= (1u << (8 + i));
+          u8 scur = (u8)(seq_core_trk[vt].step / slen);
+          if( ui_cursor_flash && scur < 8 )
+            gp &= ~(1u << (8 + scur)); // wink the playhead (slices past pad 8 have no pad)
+        }
+      } else if( SEQ_UI_PROC_CurFace(ui_focused_proc_slot) == PROC_FACE_SLICE_ORDER ) {
+        // ORDR paint plane (act 2, duo-color like gen STEPS): color 1 = the live
+        // positions, color 2 = the PAINTED positions — the deliberate skeleton
+        // readable at a glance, parens cells dark in color 2.
+        // The wink is the BOUNCING READ HEAD (2026-07-18): map[current position]
+        // = which SOURCE slice is being read right now — the permute's virtual
+        // playhead, jumping in map order. Wink-meaning matches pad-meaning per
+        // plane: CHOP pads/wink = positions, ORDR pads/wink = sources. Both
+        // colors clear so painted pads visibly bounce too (full-dark blink).
+        u8 vt = SEQ_UI_VisibleTrackGet();
+        u8 map16[16], rev16[16], painted16[16];
+        s32 S = SEQ_CORE_SlicePreview(vt, map16, rev16, painted16);
+        u8 sgrid = SEQ_CC_Get(vt, SEQ_CC_SLICE_GRID) & 0x07;
+        int i;
+        for(i=0; i<(int)S; ++i) {
+          gp |= (1u << i);
+          if( painted16[i] )
+            gp2 |= (1u << i);
+        }
+        if( sgrid && S > 0 ) {
+          u8 scur = (u8)(seq_core_trk[vt].step / (u8)(1u << (sgrid - 1)));
+          if( ui_cursor_flash && (s32)scur < S ) {
+            u8 rdhead = map16[scur];
+            gp  &= ~(1u << rdhead);
+            gp2 &= ~(1u << rdhead);
+          }
+        }
       }
       ui_gp_leds = gp;
       ui_gp_leds2 = gp2;

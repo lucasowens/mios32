@@ -241,11 +241,14 @@
 // buffer permutation of the output mirror. All dials 0-neutral (V5 ext block,
 // no format bump). Painted order lives in a SEQ_PAR_Type_SliceOrd par layer
 // (Waypoint idiom), not a CC.
-#define SEQ_CC_SLICE_GRID						0xA4 // bits 0..2: 0=off, 1..4 = 2/4/8/16-step slices; bit 7 = row bypass (config-preserving)
+#define SEQ_CC_SLICE_GRID						0xA4 // bits 0..2: 0=off, 1..5 = 1/2/4/8/16-step slices (1stp added + values REMAPPED 2026-07-17 — clean dial order over stale-session compat, sessions are disposable); bit 7 = row bypass (config-preserving)
 #define SEQ_CC_SLICE_SEED						0xA5 // 0..127; 0 = identity order, else deterministic shuffle (grip_hash keyed)
 #define SEQ_CC_SLICE_STRENGTH					0xA6 // 0..127 universal sweep: thermometer over ranked slices, 0 = true pass-through; painted positions engage in the lower half, seeded in the upper
 #define SEQ_CC_SLICE_REPT						0xA7 // 0..127 stutter amount: engaged slices repeat the previous output slice
 #define SEQ_CC_SLICE_REV						0xA8 // 0..127 reverse amount: engaged slices play their steps backwards
+// Act 2 (plan 2026-07-17):
+#define SEQ_CC_SLICE_CHOKE						0xA9 // 0..127 edge-cut amount: engaged slices lose the GLIDE tie at their final step (thermometer; cuts stop ringing across the new cut points)
+#define SEQ_CC_SLICE_MOTION						0xAA // 0=frozen; 1..4 = re-roll the seeded fill every 8/4/2/1 bars (one detent per rate, the GRID selector idiom — was a 0..127 thermometer for a day, 32 clicks per zone read as "stuck") — animates the Seed axis only, skeleton + painted stay put
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -350,11 +353,13 @@ typedef struct {
   u8		voice_strum;             // chord-voicing strum: 0..127 biased at 64 (=off); |v-64| = ticks per voice rank
   u8		voice_drop;              // chord-voicing drop: 0=off, 1=Drop2, 2=Drop3, 3=Drop2&4
   u8		voice_tilt;              // chord-voicing velocity tilt: 0..127 biased at 64 (=flat ramp off)
-  u8		slice_grid;              // slicer: bits 0..2 = grid (0=off, 1..4 = 2/4/8/16-step slices); bit 7 = bypass
+  u8		slice_grid;              // slicer: bits 0..2 = grid (0=off, 1..5 = 1/2/4/8/16-step slices); bit 7 = bypass
   u8		slice_seed;              // slicer: 0 = identity order, 1..127 = deterministic shuffle seed
   u8		slice_strength;          // slicer: 0..127 thermometer over ranked slices (0 = pass-through)
   u8		slice_rept;              // slicer: 0..127 stutter amount
   u8		slice_rev;               // slicer: 0..127 reverse amount
+  u8		slice_choke;             // slicer act 2: 0..127 edge-cut amount (glide tie cleared at choked slices' final step)
+  u8		slice_motion;            // slicer act 2: 0=frozen; 1..4 = re-roll every 8/4/2/1 bars
   u8		robotize_loop_start;     // 0..15 - index of first anchor in the playing window
   u8		robotize_loop_rotate;    // 0..15 - phase rotation within the loop window
 

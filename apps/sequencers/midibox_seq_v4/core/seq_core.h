@@ -501,6 +501,23 @@ extern void SEQ_CORE_LimitSlotSync(u8 track);
 extern void SEQ_CORE_ArpSlotSync(u8 track);
 extern void SEQ_CORE_SliceSlotSync(u8 track);
 
+// Slicer ORDR face (act 2). SliceOrdLayerGet: the track's SlcOr par layer, -1
+// if none. SlicePreview: resolved first-window map for display — fills up to
+// 16 entries of map/rev_flags/painted (painted[i] = the painted value, 0 =
+// machine-decided), returns the count (0 = no geometry). SliceOrderPaint: set
+// position pos's painted source (1..16, 0 = unpaint) in the SOURCE layer +
+// re-render; -1 = no SlcOr layer, -2 = no geometry / out of range.
+extern s32 SEQ_CORE_SliceOrdLayerGet(u8 track);
+extern s32 SEQ_CORE_SlicePreview(u8 track, u8 *map, u8 *rev_flags, u8 *painted);
+extern s32 SEQ_CORE_SliceOrderPaint(u8 track, u8 pos, u8 value);
+
+// MOMENTARY INTERJECT (2026-07-18): transient map override — while set (1..16)
+// every position reads that source slice; 0 clears and the loop resumes where
+// it would have been (the playhead never left). RAM-only performance state,
+// re-renders on both edges via RenderTouched.
+extern u8 seq_core_slice_hold[SEQ_CORE_NUM_TRACKS];
+extern void SEQ_CORE_SliceHoldSet(u8 track, u8 src);
+
 // All five tenant syncs in one call — required after any RAW tcc write on a
 // LIVE track (memcpy restore / direct-field reset bypasses the SEQ_CC_Set
 // chokepoint and leaves slots stale under the new tcc).

@@ -19,6 +19,29 @@ From the 2026-07-10 whole-fork review (report artifact linked in the session mem
 
 *(all closed — see the Closed section)*
 
+### Pending validation — slicer act 2 + capture-fix batch (2026-07-17/18)
+
+Everything below is BUILT + compiled, flashed incrementally during the session,
+by-ear partially confirmed; the full validation pass is the next session's job
+(decisions-log blocks 2026-07-17 .. 2026-07-18 cont. 5 hold the details):
+
+- **By-ear verdicts owed, per thread:** Chok · Motn (5-detent) · 1stp grid ·
+  CHOP jump pads · ORDR paint plane · punch-chop · momentary interject ·
+  read-head wink. Plan: [plans/2026-07-17-slicer-act2.md](plans/2026-07-17-slicer-act2.md).
+- **HIL pass owed (baseline was 278/278 pre-act-2):** act-2 pins (choke glide-cut,
+  motion no-regression at 0, jump semantics) + the GRID-remap-shifted act-1 pins
+  (already edited in `test_slicer.py` — suite must run against the new firmware)
+  + four capture-fix pins: ext-CC travel (voicing/slicer dials on copies), FTS
+  survival, drum transpose travel, drum tape per-instrument write-back.
+- **STOPPED drum re-sim capture is still melodic-mono** (out-of-scope since
+  2026-06-26; the while-playing tape path is fixed). Lift only if stopped drum
+  grabs turn out to be a real workflow.
+- **Copies strip Echo/LFO by design** (reset-on-copy) — flagged as a possible
+  "sounds different" source for emission-FX-heavy tracks; semantics conversation
+  only if the ear raises it.
+- **Slicer manual chapter owed after GO** (use-case recipes — user asked for
+  the use-case map; act-1 precedent: manual follows by-ear).
+
 ## 2. Adversarial-review tail (2026-07-01)
 
 Source: [reviews/2026-07-01-adversarial-review.md](reviews/2026-07-01-adversarial-review.md)

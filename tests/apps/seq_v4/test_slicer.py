@@ -1,7 +1,8 @@
 """Slicer tenant — render-stack TAIL buffer permute (plan 2026-07-15).
 
 The SLICE processor (slot 5, after LIMIT) divides the loop into equal slices
-(GRID = 2/4/8/16 steps) and resequences them as a par+trg buffer permutation:
+(GRID = 1/2/4/8/16 steps; clicks 1..5 since 1stp landed 2026-07-17) and
+resequences them as a par+trg buffer permutation:
 output slice i copies its step-block from source slice map[i]. The mapping is
 deterministic (grip_hash zones 0x60-0x63): PAINTED order (a SlcOr par layer,
 value 1..16, 0 = unpainted, painted anywhere inside a slice counts) wins →
@@ -50,7 +51,7 @@ INSTR = 0
 PAR_TYPE_SLICEORD = 25
 SETTLE = 0.05
 
-GRID_2, GRID_4, GRID_8 = 1, 2, 3  # CC clicks -> slice length 2/4/8 steps
+GRID_2, GRID_4, GRID_8 = 2, 3, 4  # CC clicks -> slice length 2/4/8 steps (1..5 = 1/2/4/8/16 since 1stp, 2026-07-17)
 
 RAMP = [60 + s for s in range(16)]   # note layer: value identifies the step
 VRAMP = [40 + s for s in range(16)]  # velocity layer: moves with its step
@@ -280,9 +281,9 @@ def test_grid_clamps(board):
     _init(board)
     try:
         board.cc_set(TRACK, CC.SLICE_GRID, 0x07)
-        assert board.cc_get(TRACK, CC.SLICE_GRID) == 4, "grid must clamp to 4"
+        assert board.cc_get(TRACK, CC.SLICE_GRID) == 5, "grid must clamp to 5"
         board.cc_set(TRACK, CC.SLICE_GRID, 0x87)
-        assert board.cc_get(TRACK, CC.SLICE_GRID) == 0x84, "clamp must keep the bypass bit"
+        assert board.cc_get(TRACK, CC.SLICE_GRID) == 0x85, "clamp must keep the bypass bit"
     finally:
         _slice_off(board)
 
