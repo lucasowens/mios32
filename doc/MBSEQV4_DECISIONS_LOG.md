@@ -3364,3 +3364,38 @@ push expressiveness.
   of echo/LFO/direction material now KEEP those dials — listen when it comes
   up in a jam) + the boarded forks (groove-on-tape, drum→note verb rung 2,
   RAM chord window, drum LIMIT travel).
+
+**2026-07-18 (cont. 13) — Robotize rack regression (registry seeds on the wrong CCs) + all-zero dial defaults**
+
+- User report mid-jam: robotize dead ("at least on drum tracks") + dials engage
+  high — Note jumps up when Prob is turned. ONE root cause: the G2 defaults-
+  registry refactor (1d336c9c, 2026-07-08) moved ROBO_PROB's engage-seed
+  literals (5/32/32/1) onto the row's dials as `eng` values — but the row's
+  dials are the per-dim PROBABILITY CCs, and SeedRowDefaults writes every seed
+  to the param's OWN cc. Effects: Note prob seeded to 5 / Oct to 1 (the visible
+  jump), Vel/Len (32) silently truncated to 0 in their 5-bit bitfields (the
+  Humanize-bypass truncation class), and the RANGES were never seeded — every
+  dimension gates on `range && dim_prob` (seq_robotize.c), so the engine was
+  inaudible on any track engaged fresh since 07-08. Pre-07-08 tracks still had
+  ranges saved in-session, which is why it read as drum-specific.
+- Fix: PROC_KIND_ROBO_PROB seeds the range CCs DIRECTLY again (each guarded on
+  its own untouched ==0 — the pre-refactor behavior restored verbatim); bogus
+  `eng` values stripped from proc_params_robo_op. **DURABLE RULE** (documented
+  at the registry, the eng field, and the fwd-decl): SeedRowDefaults can only
+  seed a row's OWN params — a tenant whose engage-seeds target off-row CCs
+  (Robotize's ranges, Humanize's mode byte) must seed directly in its headline
+  ParamWrite case, or the seeds land on the wrong CCs.
+- Second finding after flash: dials still ENGAGE at 31 — that's STOCK
+  (SEQ_CC_Init "initialize robotize probabilities to full", so the FX page's
+  range dials were instantly audible in mainline). DECISION: the per-dim
+  probabilities (Note/Vel/Len/Oct — joining Skip) now default 0 = pass-through,
+  in BOTH sites: SEQ_CC_Init and SEQ_CC_ResetGenerativeCommon (capture/bounce
+  deposits land at 0 too). New feel, deliberate: Prob up = arm + silent range
+  seed; each dimension is swept in from 0 on its own dial (the sweep-from-0
+  grammar). "Prob = instant all-dimension chaos" is gone by design.
+- Residue: tracks saved since 07-08 can carry Note=5/Oct=1; older tracks carry
+  stock 31s — dial down once (or any capture reset now lands them at 0).
+- Validation: by-ear GO same session ("everything looking good" after the
+  defaults change). No suite pin asserts the old defaults (checked); the seed
+  path is encoder-level — no harness verb (the Waypoint-pin gap), so this
+  stays by-ear + full-suite-as-bystander. Zero-warning build.

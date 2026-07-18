@@ -47,12 +47,15 @@ s32 SEQ_CC_Init(u32 mode)
     // clear all CCs
     memset((u8 *)tcc, 0, sizeof(seq_cc_trk_t));
 
-    // initialize robotize probabilities to full
+    // robotize per-dimension probabilities start at 0 = pass-through (stock set
+    // them to 31/full so the FX page's range dials were instantly audible; the
+    // rack grammar instead engage-seeds the RANGES via the Prob headline and
+    // each dimension is swept in from 0 on its own dial — 2026-07-18)
     tcc->robotize_skip_probability = 0;
-    tcc->robotize_note_probability = 31;
-    tcc->robotize_oct_probability = 31;
-    tcc->robotize_vel_probability = 31;
-    tcc->robotize_len_probability = 31;
+    tcc->robotize_note_probability = 0;
+    tcc->robotize_oct_probability = 0;
+    tcc->robotize_vel_probability = 0;
+    tcc->robotize_len_probability = 0;
 
 	// special robotize probabilities to zero
     tcc->robotize_sustain_probability = 0;
@@ -288,9 +291,9 @@ static s32 SEQ_CC_ResetGenerativeCommon(u8 track, u8 flatten)
     tcc->lfo_cc_ppqn = 0;
   }
 
-  // Robotize neutral — mirrors SEQ_CC_Init. *_probability defaults are 31
-  // (full range) so a later re-enable behaves like a fresh track; ACTIVE=0
-  // keeps the engine idle on the destination.
+  // Robotize neutral — mirrors SEQ_CC_Init: everything 0 = pass-through, so a
+  // later re-enable behaves like a fresh track; ACTIVE=0 keeps the engine idle
+  // on the destination.
   tcc->robotize_active = 0;
   tcc->robotize_probability = 0;
   tcc->robotize_note = 0;
@@ -298,10 +301,10 @@ static s32 SEQ_CC_ResetGenerativeCommon(u8 track, u8 flatten)
   tcc->robotize_vel = 0;
   tcc->robotize_len = 0;
   tcc->robotize_skip_probability = 0;
-  tcc->robotize_note_probability = 31;
-  tcc->robotize_oct_probability = 31;
-  tcc->robotize_vel_probability = 31;
-  tcc->robotize_len_probability = 31;
+  tcc->robotize_note_probability = 0;
+  tcc->robotize_oct_probability = 0;
+  tcc->robotize_vel_probability = 0;
+  tcc->robotize_len_probability = 0;
   tcc->robotize_sustain_probability = 0;
   tcc->robotize_nofx_probability = 0;
   tcc->robotize_echo_probability = 0;

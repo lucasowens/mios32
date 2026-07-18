@@ -37,6 +37,10 @@ by-ear partially confirmed; the full validation pass is the next session's job
   drum tape per-instrument write-back.
 - **Slicer manual chapter owed after GO** (use-case recipes — user asked for
   the use-case map; act-1 precedent: manual follows by-ear).
+- **Robotize regression fix + all-zero defaults (cont. 13) — by-ear GO'd**,
+  rides the next full-suite run as a bystander (no pin possible: the engage-seed
+  path is encoder-level, no harness verb — the Waypoint-pin gap). No existing
+  pin asserts the old 31 defaults (checked).
 
 ### Capture attribution fixes (2026-07-18 cont. 10-11) — VALIDATED
 

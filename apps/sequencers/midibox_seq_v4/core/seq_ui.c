@@ -1548,8 +1548,10 @@ typedef struct {
   proc_fmt_t   fmt;     // value display map (DEFAULT = derive from kind)
   s8           eng;     // engage-seed override, 0 = same as deflt (G2 defaults registry). Only
                         // needed where "make it audible on first touch" differs from the
-                        // pass-through detent (Groove Intn, LFO Amp, Robotize Note/Vel/Len/Oct)
-                        // — see SEQ_UI_PROC_SeedRowDefaults.
+                        // pass-through detent (Groove Intn, LFO Amp) — see
+                        // SEQ_UI_PROC_SeedRowDefaults. Seeds land on the param's OWN cc:
+                        // a seed aimed at a CC that is NOT on the row (Robotize's ranges)
+                        // must be a direct write in the headline's ParamWrite case.
 } proc_param_t;
 
 // The rack is an ordered list of ROWS, not a raw walk of the render-stack slots.
@@ -1756,10 +1758,10 @@ static const proc_param_t proc_params_lfo_dest[] = { // DEST plane
 // the {occ_cc,disable_mask} model can't express, so the row also carries enable_cc).
 static const proc_param_t proc_params_robo_op[] = {
   { "Prob", PROC_KIND_ROBO_PROB, SEQ_CC_ROBOTIZE_PROBABILITY,      0, 31, 0, PROC_FMT_DEFAULT },
-  { "Note", PROC_KIND_CC,        SEQ_CC_ROBOTIZE_NOTE_PROBABILITY, 0, 31, 0, PROC_FMT_DEFAULT, 5 },
-  { "Vel",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_VEL_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT, 32 },
-  { "Len",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_LEN_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT, 32 },
-  { "Oct",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_OCT_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT, 1 },
+  { "Note", PROC_KIND_CC,        SEQ_CC_ROBOTIZE_NOTE_PROBABILITY, 0, 31, 0, PROC_FMT_DEFAULT },
+  { "Vel",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_VEL_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT },
+  { "Len",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_LEN_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT },
+  { "Oct",  PROC_KIND_CC,        SEQ_CC_ROBOTIZE_OCT_PROBABILITY,  0, 31, 0, PROC_FMT_DEFAULT },
   { "Skip", PROC_KIND_CC,        SEQ_CC_ROBOTIZE_SKIP_PROBABILITY, 0, 31, 0, PROC_FMT_DEFAULT },
 };
 // Plane B (LOOP) — the ROBOLOOP bar-anchor machine. Dials Cyc/Pal/Strt/Rot shape the loop
@@ -2491,9 +2493,10 @@ static s32 SEQ_UI_PROC_ParamRead(u8 track, const proc_param_t *p)
   }
 }
 
-// Forward decl: ParamWrite's headline cases (ECHO_REP/GRV_STYLE/LFO_WAVE/ROBO_PROB) call
+// Forward decl: ParamWrite's headline cases (ECHO_REP/GRV_STYLE/LFO_WAVE/SLICE_GRID) call
 // this on their own 0->on transition; its body (below ParamWrite, once ParamWrite exists
-// to call) writes the row's OTHER dials.
+// to call) writes the row's OTHER dials. Robotize/Humanize seed directly instead — their
+// seed targets are NOT their row's own dials, which is all the registry can address.
 static void SEQ_UI_PROC_SeedRowDefaults(u8 track, const proc_param_t *headline);
 
 // Write a param's LOGICAL value (already range-clamped by the caller) to its
@@ -2683,12 +2686,18 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
     // Engage: robotize is gated on `active AND probability>0`. Turning Prob up arms
     // active, and — since the per-dimension probabilities have nothing to move unless the
     // matching RANGE is non-zero — seeds musical default ranges (Note/Vel/Len/Oct, each
-    // independently guarded on its own untouched state) if still 0. Skip is deliberately
-    // left unseeded (its `eng` is unset). The ranges also live on the stock FX-Robotize
-    // page for finer control.
+    // independently guarded on its own untouched state) if still 0. Direct writes, NOT
+    // SeedRowDefaults: the seed targets are the RANGE CCs (stock FX-Robotize page), not
+    // this row's dials — the registry can only seed a row's own params, and routing the
+    // seeds there moved the probability dials off 0 while leaving the ranges unseeded
+    // (robotize silent). Skip stays unseeded. The dim probabilities are 5-bit fields, so
+    // range-sized values (32) would truncate to 0 there anyway — the Humanize bitfield class.
     if( v > 0 ) {
       SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_ACTIVE, 1);
-      SEQ_UI_PROC_SeedRowDefaults(track, p);
+      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_NOTE) == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_NOTE, 5);
+      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_VEL)  == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_VEL, 32);
+      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_LEN)  == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_LEN, 32);
+      if( SEQ_CC_Get(track, SEQ_CC_ROBOTIZE_OCT)  == 0 ) SEQ_CC_Set(track, SEQ_CC_ROBOTIZE_OCT, 1);
     }
     break;
   }
@@ -2819,14 +2828,17 @@ static void SEQ_UI_PROC_ParamWrite(u8 track, const proc_param_t *p, s32 v)
 }
 
 // G2 defaults registry: seed a freshly-engaged row's OTHER dials (params[1..n-1] — index 0
-// is the headline the caller just wrote, e.g. Rpt/Styl/Wave/Prob, already correct) from the
+// is the headline the caller just wrote, e.g. Rpt/Styl/Wave, already correct) from the
 // table instead of a hand-written literal block per tenant. `eng` (falling back to `deflt`
 // when 0) is the seed value; a seed that resolves to 0 is a true pass-through with nothing
 // to make audible, so it's skipped. Each field is independently guarded on its own backing
 // still reading "untouched" — this is a genuine tightening, not just a refactor: Echo's old
 // gate checked ONLY Velocity before blindly overwriting all six dials, and LFO's Target had
 // no guard at all (always reset to Vel on every re-engage); both now respect a field the
-// user already shaped, the same way Robotize's per-field checks always did.
+// user already shaped. LIMIT: the registry writes a seed to the param's OWN cc — a tenant
+// whose engage-seeds target CCs that aren't on the row (Robotize's ranges, Humanize's mode
+// byte) must seed directly in its headline case, or the seeds land on the wrong CCs
+// (the 2026-07-18 Robotize regression: dials jumped, ranges stayed 0, effect silent).
 static void SEQ_UI_PROC_SeedRowDefaults(u8 track, const proc_param_t *headline)
 {
   u8 row;
