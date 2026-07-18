@@ -3177,3 +3177,190 @@ push expressiveness.
 - Still owed (unchanged): act-2 behavior pins (choke/motion/jump/ORDR/punch/
   interject) + ext-CC travel + drum transpose travel + drum tape
   per-instrument pins; by-ear verdicts per thread.
+
+**2026-07-18 (cont. 7) — Capture-fidelity determination: the two-family law, and the flatten family stops over-resetting**
+
+- Session-long deep dive (user call: "make the captured MIDI sound exactly
+  like what was captured, synth AND drum"). Read the whole engine end-to-end:
+  tape tee, re-sim sink, all five deposit verbs, both resets, render stack,
+  emission chain. **The determination — every capture path belongs to one of
+  two families with opposite bake contracts:**
+  - **FLATTEN (mirror copy)** — CaptureToSlot / CaptureToTrack /
+    CaptureToSlotTrack (the STOPPED half of the pattern-capture gesture) /
+    the chord-index route / ProcessorBounce. The deposit holds render-stack
+    output ONLY; the emission chain never touched the bytes.
+  - **TAPE (emission recording)** — live tape + stopped re-sim
+    (CaptureSpanPrepDst). The deposit holds what SOUNDED: echo repeats, LFO
+    pitch, groove timing, traversal, delays, rolls, Nth gating all baked in.
+  - **The law: a deterministic emission shaper is PRESERVED on a flatten dst
+    (re-applies identically to the un-baked bytes) and RESET on a tape dst
+    (re-applying would double). Generation (randomness) resets in both.
+    Render-stack dials reset in both (baked into the mirror).**
+- **Shipped 1 — the reset split**: SEQ_CC_ResetGenerativeForBounce is GONE;
+  SEQ_CC_ResetGenerativeForFlatten / ...ForTape wrap one common body.
+  Flatten now PRESERVES: echo (7 CCs), LFO (9 CCs), FX-MIDI duplicate,
+  SUSTAIN flag, SYNCH_TO_MEASURE, deterministic direction modes + progression
+  params (Random_Dir/Step/D_S still -> Forward), and the
+  Delay/Roll/Roll2/Nth1/Nth2/Root/Scale lane ASSIGNMENTS (values already
+  travel in the full par copy — stripping them was the "frozen drums lose
+  their rolls / painted micro-timing dies" hole). Probability + random
+  gate/value triggers strip in both. Tape flavor byte-identical to the old
+  reset. Call sites: ToSlot/ToTrack/ToSlotTrack + canvas post-tile = Flatten
+  (canvas serves both routes: chord route is mirror-family; span route
+  inherited scratch CCs already ForTape-reset — outcome-identical), PrepDst
+  = Tape. Closes OPEN_ITEMS "copies strip Echo/LFO by design" — the ear
+  raised it.
+- **Shipped 2 — stream lanes reach span deposits**: the tape tee + re-sim
+  sink hear NOTE events only, so CC/PitchBend/ProgramChange/Aftertouch par
+  lanes arrived memset-0 (painted curve lost + a spurious value-0 event at
+  the loop head). New SEQ_CORE_CaptureCopyStreamLanes: direct lane copy from
+  the source's rendered MIRROR (slice permutes travel), rotated to the
+  window phase (HEARD rot = (win_start/tps)%loop, GRID/re-sim rot 0). Ctrl
+  lanes deliberately NOT copied — their heard effect is baked in the
+  recorded notes; a copied Ctrl lane would re-modulate the frozen copy.
+- **Shipped 3 — drum tape capture is pitch-faithful when the kit opts in**:
+  when the dst kit carries a Note par lane (the fork's per-step drum-note
+  path), the write-back now stamps the taped pitch per (step, instrument) —
+  ChordMask/Tension/PitchGen drum wobble is finally capturable WHILE
+  PLAYING, not only via the stopped mirror copy. The lane carries the FINAL
+  emitted pitch, so PrepDst's static Semi/Oct travel is undone on these kits
+  (double-apply guard); FORCE_SCALE stays (idempotent + field membership).
+  Kits without a Note lane keep normalize-to-config + CC travel — the lane
+  is the opt-in. Also: taped gate -> the kit's Length lane when present
+  (memset-0 was clipping every captured hit to 1/96), capped at 94
+  (terminating — no drum Gld chains). Attribution stays nearest-expected-
+  note (tape events carry no instrument) — documented limit: a pitch push
+  past a neighbor's expected note buckets to the wrong drum.
+- **Shipped 4 — chord fence on the RAM grab**: SEQ_CORE_CaptureSpan refuses
+  CHORD event-mode sources (-13, "chord: use Pat-cap") — chord steps store
+  INDICES; the note materialize left gates+vel over an all-0 chord lane =
+  silent garbage deposit. The slot verb keeps its faithful chord-index
+  window route.
+- **Open forks boarded, not built**: groove-on-tape (tape quantize strips
+  the swing and PrepDst zeroes groove -> straightened; re-inherit would
+  re-swing but negative-delay grooves already mis-bucket a step early —
+  by-ear fork); drum->note-track deposit verb (rung 2 of the drum ladder — a
+  re-instrument mode, new gesture surface); re-sim drum sink per-instrument
+  port (stopped drum grabs still collapse to instrument 0); RAM chord-window
+  path (lift the -13); drum LIMIT travel (emission fold on kits is neither
+  baked nor travelled — rare combo, noted).
+- HIL blast radius checked before building: NO existing pin asserts the old
+  echo/LFO/direction reset state (the FTS flip was the only pinned contract)
+  — zero expected reds; new pins owed for all four ships.
+- Files: `seq_cc.c/h` (split + law comment), `seq_core.c` (call sites,
+  helper, tape write-back, fence), `seq_ui.c` (-13 msg), `seq_layer.c`
+  (comment). Compiles clean, zero warnings. Flash/by-ear/HIL pending — joins
+  the act-2 validation batch.
+
+**2026-07-18 (cont. 8) — Deterministic capture validation: pins + kit verb + the diff diagnostic**
+
+- User call: "we need a more deterministic way to do this than my by-ears" —
+  the answer is the harness we already own (SysEx testctrl reads CCs and
+  par/trg bytes back), not MIOS Studio dumps. Built the owed instrumentation:
+- **`test_capture_fidelity.py` — 7 pins that assert the cont.-7 law
+  byte-for-byte**: flatten preserves echo/LFO/direction + Roll-lane asg while
+  notes stay byte-identical; flatten still resets Random_Step (generation);
+  tape resets the same shapers (the family contrast, while playing); tape AND
+  stopped re-sim carry a painted CC lane (stream-lane copy, GRID rotation 0);
+  drum tape bakes pitch/gates/length per instrument (Semi undone on the dst,
+  source untouched, ungated cells empty); chord RAM grab refuses 0x1D.
+- **New testctrl verb `CMD_TRACK_DRUM_KIT_INIT` (0x41)** — a REAL playable
+  kit: par 32×2×16 (A=Note — the pitch-capture opt-in, B=Length), trg 32×1×16
+  (per-drum gates via trg_byte_set's instrument arg), config notes 36+d
+  (distinct -> exact-match attribution), vel 100, LENGTH 15. The old
+  `track_drum_init` stays as the generator-dispatch skeleton (its trg has ONE
+  instrument — per-drum capture can't be exercised on it).
+- **`diag_capture_fidelity.py`** — the mid-jam instrument: snapshot src,
+  capture (transport state picks the family), snapshot dst, print
+  PRESERVED/RESET/CHANGED shaper CCs + lane/gate diffs with a law-check
+  footer. "Sounds different" now produces a pasteable table instead of a
+  hunch.
+- HIL note: pins collect 7/7; they need the cont.-7 firmware FLASHED before
+  the first run (the fresh project.hex includes the kit verb). Firmware
+  rebuilt zero-warning with the verb.
+- Files: `seq_testctrl.c` (+verb), `tests/harness/{sysex,board,__init__}.py`,
+  `tests/apps/seq_v4/test_capture_fidelity.py`, `tests/diag_capture_fidelity.py`.
+
+**2026-07-18 (cont. 9) — Capture-fidelity batch VALIDATED on hardware: suite 285/285 = new baseline**
+
+- User flashed cont.-7+8 firmware and staged the real case (T5 kit, pattern
+  A1 -> A2, dedicated bank 1). The slot-capture diff on THEIR material came
+  back byte-identical on every snapshot axis (per-drum gates, Velocity lane,
+  all shaper CCs) — and the kit's own tuning (Semi -2 / Oct -3, sign-nibbles
+  14/13) plus FORCE_SCALE TRAVELLED, proving the cont.-4 "config IS the
+  pitch" rule on user content. Note: their kit has NO Note par lane (A=Vel
+  only) — the dynamic-drum-pitch story needs the lane opt-in (TrkEvnt).
+- **All 7 fidelity pins green first run (16 s)**, then the FULL suite:
+  **285 passed / 0 failed (9:11) = the new baseline** (278 + 7). The reset
+  split (the largest semantic change: flatten now preserves echo/LFO/
+  direction/lanes) drew ZERO collateral reds across the capture family.
+- Remaining for this batch: the by-ear FEEL pass only (stopped freezes of
+  echo/LFO/swung material should now sound identical — the preserved-dial
+  behavior is new to the ear even though the bytes are pinned), plus the
+  boarded forks (groove-on-tape, drum->note verb, re-sim drum sink, RAM
+  chord window, drum LIMIT travel).
+
+**2026-07-18 (cont. 10) — The user's ear was right: emitted-stream A/B finds the octave-fold clamp + kills the re-sim drum mono-collapse**
+
+- User verdict on the validated batch: "still not correct — Save matches, the
+  N-bar capture doesn't." The 285/285 suite was green because no pin covered
+  the case. Built the decisive instrument instead of arguing: an EMITTED-
+  STREAM A/B (host records the box's real MIDI for the source, runs the
+  Capture page's exact verb, loads the deposit, records again, folds both on
+  the loop grid with rotation search). On the user's T5 kit it showed:
+  - PLAYING grab: drum note 11's whole pattern MERGED onto the note-9 drum
+    (dst 9-row = union of src 9+11 rows; 11-row empty); 4 other drums exact.
+  - STOPPED grab: everything collapsed onto instrument 0 (the boarded re-sim
+    melodic-mono hole — live in the user's actual gesture).
+- Attribution probe pinned the arithmetic: kit tuned Semi-2/Oct-3 (shift
+  -38); drum cfg 36 -> -2. **Live emission OCTAVE-FOLDS negatives
+  (SEQ_CORE_TrimNote: -2 -> 10, FTS -> 11) but the grab's expected-note table
+  HARD-CLAMPED to 0** (-> FTS ~2), so note-11 events had no exact match and
+  nearest-merged onto the 9-drum. One-line class of bug: any model of the
+  emission chain must use the chain's own primitives.
+- **Fix 1**: expected-note builder hoisted to `capture_drum_expected_notes`
+  (shared) and the clamp replaced with `SEQ_CORE_TrimNote(nn, 0, 127)` — the
+  exact fold emission uses.
+- **Fix 2 (re-sim drum parity)**: the sink now writes PER INSTRUMENT for drum
+  dsts — same expected-note mapping, gates/vel/Note-lane pitch bake (dst
+  Semi/Oct zeroed when the lane exists, FORCE_SCALE stays)/measured Length
+  (capped 94, no chains), open-note entries carry the instrument, per-(step,
+  instr) supersede, no Gld tail marking for drums. Stopped kit grabs now
+  behave like playing ones; the OPEN_ITEMS "melodic-mono re-sim" line closes.
+- **Pins**: +2 in test_capture_fidelity.py (9 total): the octave-fold
+  attribution regression (shift -37 kit: folded drum keeps its own row +
+  folded pitch in the Note lane) and the stopped per-instrument contract
+  (gates/pitch/length per drum, Semi zeroed). Collected 9/9; PENDING FLASH —
+  both new pins exercise firmware-side fixes.
+- Instrumentation kept: scratchpad A/B + attribution-probe scripts promoted
+  conceptually into the session record; diag_capture_fidelity.py remains the
+  mid-jam tool. Firmware rebuilt zero-warning.
+
+**2026-07-18 (cont. 11) — Attribution fixes VALIDATED: suite 287/287 = new baseline; T5 A/B = MATCH both transports**
+
+- User flashed cont.-10. All 9 fidelity pins green (21 s). The emitted-stream
+  A/B on the REAL T5 kit: PLAYING grab = MATCH on all 7 emitted pitches (the
+  formerly-merged note-11 drum keeps its own row); STOPPED grab = all 6 drums
+  on their own gate rows, byte-identical to source (instr-0 collapse gone).
+  Full suite: **287 passed / 0 failed (9:01) = the new baseline** (285 + 2
+  attribution pins). Capture-fidelity thread closed except the by-ear FEEL
+  pass (preserved echo/LFO/dir on stopped freezes) + the remaining forks
+  (groove-on-tape, drum->note verb rung 2, RAM chord window, drum LIMIT).
+- Post-flash gotcha for the log: the reboot reloaded the session with tracks
+  2-14 MUTED (T5 silent -> the first A/B rerun recorded zero notes,
+  "MATCH" vacuously). Unmuted T5 only via the MUTE page. When an emission
+  probe reads 0 events, check muted_mask FIRST.
+
+**2026-07-18 (cont. 12) — BY-EAR GO on the capture thread ("that got it!")**
+
+- User confirmed by ear on the real rig: the Capture-page N-bar grab now
+  sounds like the source on the T5 kit — the thread that opened as "we have
+  regressions… captured MIDI should sound exactly like what was captured"
+  closes GO. Full ladder held: determination (cont. 7) → deterministic
+  instrumentation (cont. 8) → baseline validation (cont. 9) → the ear
+  overruling a green suite → emitted-stream A/B → root causes → fixes →
+  287/287 + MATCH (cont. 10-11) → by-ear GO (this).
+- Still open from the thread: the flatten-family FEEL pass (stopped freezes
+  of echo/LFO/direction material now KEEP those dials — listen when it comes
+  up in a jam) + the boarded forks (groove-on-tape, drum→note verb rung 2,
+  RAM chord window, drum LIMIT travel).

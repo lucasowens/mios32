@@ -35,14 +35,61 @@ by-ear partially confirmed; the full validation pass is the next session's job
   behavior (choke glide-cut, motion no-regression at 0, jump semantics,
   ORDR paint/punch/interject) + ext-CC travel + drum transpose travel +
   drum tape per-instrument write-back.
-- **STOPPED drum re-sim capture is still melodic-mono** (out-of-scope since
-  2026-06-26; the while-playing tape path is fixed). Lift only if stopped drum
-  grabs turn out to be a real workflow.
-- **Copies strip Echo/LFO by design** (reset-on-copy) — flagged as a possible
-  "sounds different" source for emission-FX-heavy tracks; semantics conversation
-  only if the ear raises it.
 - **Slicer manual chapter owed after GO** (use-case recipes — user asked for
   the use-case map; act-1 precedent: manual follows by-ear).
+
+### Capture attribution fixes (2026-07-18 cont. 10-11) — VALIDATED
+
+**Suite 287/287 = THE new baseline** (cont. 11; 285 + 2 attribution pins, all
+9 fidelity pins green on flashed firmware). Emitted-stream A/B on the user's
+T5 kit: PLAYING grab MATCH on every pitch row; STOPPED grab per-instrument,
+byte-identical gates. What shipped: octave-fold fix in the shared
+`capture_drum_expected_notes` (grab-time models must call the emission
+chain's own primitives — TrimNote, not a re-derived clamp) + the re-sim sink
+per-instrument drum write-back (closes the old "STOPPED drum re-sim is
+melodic-mono" line). Capture-fidelity thread now closed except the by-ear
+FEEL pass (see the cont. 7-9 entry above) and the remaining forks
+(groove-on-tape, drum→note verb, RAM chord window, drum LIMIT travel).
+Probe gotcha for future sessions: a reboot reloads session MUTE state —
+an emission probe reading 0 events means check `muted_mask` first.
+
+### Capture-fidelity batch (2026-07-18 cont. 7-9) — HIL-VALIDATED, by-ear feel pass owed
+
+**Suite = 285/285 on the cont.-7 firmware (cont. 9) = THE new baseline** (278 + 7
+fidelity pins, `test_capture_fidelity.py`, first-run green). The user-case diff
+(T5 kit A1→A2) came back byte-identical with tuning + FTS travelling. Tools that
+outlive the session: `tests/diag_capture_fidelity.py` = the mid-jam src-vs-dst
+diff table (run whenever a copy "sounds different", paste the output);
+`CMD_TRACK_DRUM_KIT_INIT` (0x41) = real playable kit for drum pins (the old
+drum init has ONE trg instrument — no per-drum gates). Still owed: **by-ear
+FEEL pass only** — stopped freezes of echo/LFO/swung/direction material now
+keep those dials (new behavior to the ear; bytes are pinned). Gotcha worth
+remembering: a kit captures dynamic pitch ONLY if it has a Note par lane
+(TrkEvnt opt-in) — static Semi/Oct+FTS travel regardless.
+
+- **Reset split** `SEQ_CC_ResetGenerativeForFlatten/ForTape` — STOPPED
+  freezes now keep echo/LFO/fx-dupl/SUSTAIN/synch/deterministic direction +
+  Delay/Roll/Nth/Root/Scale lanes (closes the old "copies strip Echo/LFO by
+  design" line — the ear raised it). By-ear: freeze an echo/LFO/swung track
+  stopped, copy should sound identical. No existing pin asserts the old
+  contract (checked); new pins owed.
+- **Stream lanes** — CC/PB/PC/AT par lanes now copy from the source mirror
+  into tape/re-sim deposits (window-rotated; Ctrl deliberately excluded).
+- **Drum tape pitch bake** — kits with a Note par lane capture their heard
+  pitch (ChordMask/Tension/PitchGen wobble) while playing; Semi/Oct travel
+  is undone on those kits (the lane carries it); taped gate → Length lane.
+  Known limit: nearest-expected-note attribution can mis-bucket a pitch
+  pushed past a neighbor drum's note.
+- **Chord fence on the RAM grab** (-13 "chord: use Pat-cap") — was a silent
+  garbage deposit; the pattern-capture verb keeps the chord-index route.
+
+Follow-up forks (boarded, not built): **groove-on-tape** (tape deposits play
+straightened — re-inherit is a by-ear fork; negative-delay grooves already
+mis-bucket a step early), **drum→note-track deposit verb** (rung 2 —
+re-instrument mode, new gesture surface), **re-sim drum sink per-instrument
+port** (would lift the melodic-mono line above), **RAM chord-window path**
+(lift -13), **drum LIMIT travel** (emission fold on kits neither baked nor
+travelled — rare).
 
 ## 2. Adversarial-review tail (2026-07-01)
 
@@ -119,6 +166,11 @@ reply-buffer bound needs a `static_assert` · idea: small undo ring (2–3 deep)
 
 ## Closed (move lines here with a date, don't delete)
 
+- **2026-07-18** | **Copies strip Echo/LFO by design** — the "semantics conversation" happened
+  (capture-fidelity deep dive, cont. 7): STOPPED freezes are mirror copies, so deterministic
+  emission shapers must be PRESERVED, not reset — `SEQ_CC_ResetGenerativeForFlatten` now keeps
+  echo/LFO/fx-dupl/SUSTAIN/synch/direction + Delay/Roll/Nth/Root/Scale lanes; tape deposits keep
+  the full reset (baked into the recorded notes). Validation pending (see the 2026-07-18 batch above).
 - **2026-07-11** | ext-CC block V5 bump — **SHIPPED, HIL 256/256 = new baseline**: tag 0x05,
   range 0x80..0xAF (voicing 0xA0..0xA3 + 12 headroom slots), frozen V3/V4 count=32, write
   ladder V5→V4→V3→none, `PhraseReadCCs` NEUTRAL-extends older records (strum/tilt off=64,

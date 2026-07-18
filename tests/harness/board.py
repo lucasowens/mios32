@@ -36,6 +36,7 @@ from .sysex import (
     CMD_FREEZE_SET,
     CMD_UI_INSTR_SET,
     CMD_TRACK_DRUM_INIT,
+    CMD_TRACK_DRUM_KIT_INIT,
     CMD_TRACK_NOTE_INIT,
     CMD_GENERATOR_QUERY,
     CMD_GENERATOR_TICK_FORCE,
@@ -623,6 +624,29 @@ class Board:
             raise RuntimeError(f"short TRACK_DRUM_INIT reply: {payload!r}")
         if payload[1] != CMD_STATUS_OK:
             raise ValueError(f"TRACK_DRUM_INIT status {payload[1]:#04x}")
+
+    def track_drum_kit_init(self, track: int, timeout: float = 1.0) -> None:
+        """Build a REAL playable 16-drum kit (capture-fidelity pins, 2026-07-18):
+        par 32 steps × 2 layers × 16 drums (A=Note lane — the drum pitch-capture
+        opt-in; B=Length lane), trg 32 steps × 1 gate layer × 16 drums (per-drum
+        gates: use trg_byte_set(..., instrument=d)). Per-drum config note =
+        36+d (distinct → exact-match instrument attribution on tape grabs),
+        velocity 100, LENGTH = 15 (16-step loop in the 32-step buffer).
+
+        track_drum_init() keeps its generator-dispatch skeleton (single trg
+        instrument — no per-drum gates); use THIS for anything that plays.
+
+        Destructive: par + trg layers are cleared.
+        """
+        if not 0 <= track <= 15:
+            raise ValueError(f"track out of range: {track}")
+        since = time.monotonic() - self._t0
+        self.send_raw(frame(CMD_TRACK_DRUM_KIT_INIT, bytes([track])))
+        payload = self.wait_for_sysex(CMD_TRACK_DRUM_KIT_INIT, timeout=timeout, since=since)
+        if len(payload) < 2:
+            raise RuntimeError(f"short TRACK_DRUM_KIT_INIT reply: {payload!r}")
+        if payload[1] != CMD_STATUS_OK:
+            raise ValueError(f"TRACK_DRUM_KIT_INIT status {payload[1]:#04x}")
 
     def track_note_init(self, track: int, timeout: float = 1.0) -> None:
         """Build a melodic Note track with Note/Velocity/Length/Roll par layers

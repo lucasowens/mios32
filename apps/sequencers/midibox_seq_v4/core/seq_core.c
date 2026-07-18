@@ -2891,7 +2891,7 @@ s32 SEQ_CORE_ProcessorBounce(u8 track)
   // bounced source already holds their output, so a re-armed slot would
   // re-apply it (double-transpose / re-snap / re-grip; the limit re-fold is
   // idempotent but the posture should clear like the others — matches
-  // SEQ_CC_ResetGenerativeForBounce on the capture path).
+  // SEQ_CC_ResetGenerativeForFlatten on the capture path).
   if( tcc->playmode == SEQ_CORE_TRKMODE_Transpose )
     tcc->playmode = SEQ_CORE_TRKMODE_Normal;
   tcc->transpose_oct  = 0;
@@ -2944,7 +2944,7 @@ static char         capture_name_snapshot[20];
 // A pattern slot stores a whole group of tracks, so the other tracks in
 // src_group are written in their current live state; only src_track is the
 // frozen capture. The destination's generative CC is reset
-// (SEQ_CC_ResetGenerativeForBounce) so the frozen output isn't re-modulated on
+// (SEQ_CC_ResetGenerativeForFlatten) so the frozen output isn't re-modulated on
 // playback, and the name gets a "BNC" prefix.
 //
 // MUST run in task context (takes MUTEX_SDCARD around the write).
@@ -2972,9 +2972,11 @@ s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_patte
   //  so the capture above already holds the heard pitches — SEQ_CORE_BakeForceScale
   //  is gone. Bounce correctness is a property of the architecture now.)
 
-  // 3. Sanitize generative CC so the frozen slot plays back as tape, not
-  //    re-modulated material.
-  SEQ_CC_ResetGenerativeForBounce(src_track);
+  // 3. Sanitize generative CC so the frozen slot plays back frozen. FLATTEN
+  //    flavor: the mirror copy holds dry render-stack output, so the
+  //    deterministic emission shapers (echo/LFO/direction/...) are preserved —
+  //    they re-apply identically and the copy keeps sounding like the source.
+  SEQ_CC_ResetGenerativeForFlatten(src_track);
 
   // 4. BNC name tag so bounced slots are visually distinct in the picker.
   seq_pattern_name[src_group][0] = 'B';
@@ -3022,7 +3024,7 @@ s32 SEQ_CORE_CaptureToSlot(u8 src_track, u8 dst_group, u8 dst_bank, u8 dst_patte
 // dropped the whole block (a living chopping track lost its chop dials on
 // recall). SEQ_CC_Get returns <0 for the unmapped headroom (0xab..0xaf) —
 // clamp to 0; SEQ_CC_Set no-ops them. Flatten paths still run
-// SEQ_CC_ResetGenerativeForBounce AFTER the inherit: generative ext CCs
+// SEQ_CC_ResetGenerativeFor{Flatten,Tape} AFTER the inherit: generative ext CCs
 // (chordmask/arp/slicer) are zeroed there, shaping ones (voicing) survive.
 #define SEQ_CORE_CC_INHERIT_COUNT 0xB0
 
@@ -3072,7 +3074,7 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
   // the source's whole CC space — 0x00..0x7f AND the fork ext block (see
   // SEQ_CORE_CC_INHERIT_COUNT) — so length/clock/groove/trigger assignments/
   // routing AND the voicing dials travel with the frozen notes.
-  // ResetGenerativeForBounce below strips the generation axis; the
+  // ResetGenerativeForFlatten below strips the generation axis; the
   // deterministic shaping (groove/length/clkdiv/structural trg-asg/voicing)
   // stays.
   SEQ_CORE_CcInherit(dst_track, src_track);
@@ -3083,12 +3085,13 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 
   // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
 
-  // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated.
+  // 3. Sanitize generative CC on dst so the frozen line isn't re-modulated
+  //    (FLATTEN flavor — deterministic emission shapers survive the mirror copy).
   //    The reset is a raw tcc write: step 1's CC replay armed dst's slots from
   //    PRE-reset values (since 2026-07-18 the inherit spans the ext block too,
   //    so those are the SRC's generative dials), so re-sync or a stale-armed
   //    ARP/CHORD_MASK/TENSION/SLICE slot re-transforms the frozen tape at render.
-  SEQ_CC_ResetGenerativeForBounce(dst_track);
+  SEQ_CC_ResetGenerativeForFlatten(dst_track);
   // Legacy-pitch-fenced sources (2026-07-18, "Semi/Oct not baked" on a drum
   // capture): DRUM content has no per-step note storage at all (gates+vel per
   // instrument; the note lives in per-drum config) and CHORD steps store
@@ -3126,7 +3129,7 @@ s32 SEQ_CORE_CaptureToTrack(u8 src_track, u8 dst_track)
 // quantizes the emitted note-ons (pitch/rhythm/velocity/traversal/wander) and now also
 // the precise gate: the sink pairs each note-off with its open note-on and writes the
 // measured length. Notes still ringing past the window keep the default gate.
-// Melodic/normal tracks (drum note-0 fence deferred).
+// Melodic AND drum (cont. 10: per-instrument sink write-back, tape parity).
 /////////////////////////////////////////////////////////////////////////////
 
 // Full live-state snapshot so the re-sim borrow is non-destructive.
@@ -3161,6 +3164,12 @@ static u32 capspan_cur_tick;     // current synthetic drive bpm-tick
 static u32 capspan_base;         // synthetic bpm-tick at the window start
 static s8  capspan_note_layer, capspan_vel_layer, capspan_len_layer;
 static u8  capspan_default_len;
+// DRUM dst support (2026-07-18 cont. 10 — the stopped grab of a kit used to
+// collapse every drum onto instrument 0): the sink maps each emitted note back
+// to its instrument via the same expected-note table the tape grab uses.
+static u8  capspan_dst_is_drum;
+static u8  capspan_n_drums;
+static u8  capspan_exp_note[16];
 
 // Open-note tracking for precise gate (re-sim path): the drive drains a note-on (vel>0)
 // then its off (vel==0) at on_tick+gatelength. Remember each open note's dst step + on
@@ -3173,7 +3182,7 @@ static u8  capspan_default_len;
 // materialize is DEFERRED — a tie's boundary onset drains AFTER its off in the same tick,
 // so the off can't probe the boundary occupancy yet (#13/#14). vel: the chain re-writes
 // it on carried steps.
-static struct { u8 note; u8 vel; u16 step; u32 on_tick; u32 gate; } capspan_open[CAPSPAN_OPEN_MAX];
+static struct { u8 note; u8 vel; u16 step; u32 on_tick; u32 gate; u8 instr; } capspan_open[CAPSPAN_OPEN_MAX];
 static u8 capspan_open_count;
 static u8 capspan_in_flush;      // 1 during the post-drive flush: those offs are past-window, skip gate
 
@@ -3201,6 +3210,52 @@ static void SEQ_CORE_CapSpanFinalizeDeferred(u16 settled_through_step)
   capspan_open_count = w;
 }
 
+// Map an emitted drum note back to its instrument via the expected-note table
+// (exact match first, else NEAREST — absorbs transforms the table doesn't
+// model, e.g. limit folds or a humanize-note wobble; ties -> lowest index).
+// Shared by the while-playing tape grab and the re-sim sink.
+static u8 capture_drum_instr_for_note(const u8 *exp_note, u8 n_drums, u8 note)
+{
+  u8 d, best = 0;
+  int best_d = 1000;
+  for(d=0; d<n_drums; ++d) {
+    int diff = (int)note - (int)exp_note[d];
+    if( diff < 0 ) diff = -diff;
+    if( diff == 0 )
+      return d;
+    if( diff < best_d ) { best_d = diff; best = d; }
+  }
+  return best;
+}
+
+// Build the per-drum EXPECTED emitted-note table: each drum's config note
+// (lay_const row A) through the same static emission pitch chain the window
+// heard — Semi/Oct sign-decoded per SEQ_CORE_Transpose, then the same
+// OCTAVE-FOLD range trim (SEQ_CORE_TrimNote — the 2026-07-18 hardware A/B
+// found a hard clamp here: a kit shifted below note 0 emits the FOLDED pitch
+// live, so the clamped table had no exact match and nearest-merged that drum
+// onto a neighbor), then the FTS snap when armed. Assumes the dials didn't
+// move mid-window (the same assumption melodic content capture makes).
+static void capture_drum_expected_notes(u8 src, seq_cc_trk_t *tcc, u8 *exp_note, u8 n_drums)
+{
+  int inc_oct  = tcc->transpose_oct;  if( inc_oct  >= 8 ) inc_oct  -= 16;
+  int inc_semi = tcc->transpose_semi; if( inc_semi >= 8 ) inc_semi -= 16;
+  u8 d;
+  for(d=0; d<n_drums; ++d) {
+    int nn = (int)tcc->lay_const[d] + 12*inc_oct + inc_semi;
+    nn = SEQ_CORE_TrimNote(nn, 0, 127); // octave-fold exactly like emission
+    if( tcc->trkmode_flags.FORCE_SCALE ) {
+      u8 scale, root_selection, root;
+      SEQ_CORE_FTS_GetScaleAndRoot(src, 0, d, tcc, &scale, &root_selection, &root);
+      mios32_midi_package_t sp;
+      sp.ALL = 0; sp.type = NoteOn; sp.event = NoteOn; sp.note = (u8)nn;
+      SEQ_SCALE_Note(&sp, scale, root);
+      nn = sp.note;
+    }
+    exp_note[d] = (u8)nn;
+  }
+}
+
 // MIDI-out hooks (run the scheduler against synthetic time + a quantizing sink).
 static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t package)
 {
@@ -3214,6 +3269,18 @@ static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t p
     for(ki=capspan_open_count; ki>0; --ki) {
       if( capspan_open[ki-1].note == package.evnt1 && capspan_open[ki-1].gate == 0 ) {
         u32 gate = capspan_cur_tick - capspan_open[ki-1].on_tick;
+        if( capspan_dst_is_drum ) {
+          // no multi-step chains on drums (tape parity): write the capped
+          // terminating length at the mapped instrument and close the entry.
+          SEQ_PAR_Set(capspan_dst, capspan_open[ki-1].step, (u8)capspan_len_layer,
+                      capspan_open[ki-1].instr,
+                      SEQ_CORE_CaptureGateToParLen(gate, capspan_tps));
+          u8 m;
+          for(m=ki-1; m+1<capspan_open_count; ++m)
+            capspan_open[m] = capspan_open[m+1];
+          --capspan_open_count;
+          break;
+        }
         if( capspan_tps && gate >= capspan_tps && (gate % capspan_tps) == 0 ) {
           // exact step-boundary gate: tie vs terminate depends on the boundary onset,
           // which (for a same-tick tie) drains AFTER this off — record and defer to
@@ -3242,6 +3309,42 @@ static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t p
   if( capspan_cur_tick < capspan_base ) return 0;
   u16 step = (u16)((capspan_cur_tick - capspan_base) / capspan_tps);
   if( step >= capspan_dst_steps ) return 0;      // outside the K-bar window
+
+  if( capspan_dst_is_drum ) {
+    // DRUM dst (2026-07-18 cont. 10): per-instrument write-back, tape parity —
+    // the old melodic-mono path funnelled every drum onto instrument 0. Map
+    // the note to its instrument, land gate + pitch (Note lane = the opt-in,
+    // ReSim zeroed the dst Semi/Oct travel when it exists) + velocity +
+    // default length (the off above back-fills the measured one). No chains,
+    // no deferred-boundary bookkeeping (drum gates are one-step).
+    u8 di = capture_drum_instr_for_note(capspan_exp_note, capspan_n_drums, package.evnt1);
+    if( capspan_note_layer >= 0 )
+      SEQ_PAR_Set(capspan_dst, step, (u8)capspan_note_layer, di, package.evnt1);
+    if( capspan_vel_layer >= 0 )
+      SEQ_PAR_Set(capspan_dst, step, (u8)capspan_vel_layer, di, package.evnt2);
+    if( capspan_len_layer >= 0 ) {
+      SEQ_PAR_Set(capspan_dst, step, (u8)capspan_len_layer, di, capspan_default_len);
+      // one open entry per (step, instrument): a same-cell retrigger (roll)
+      // supersedes; other drums' opens on this step stay live.
+      u8 w = 0, r;
+      for(r=0; r<capspan_open_count; ++r)
+        if( !(capspan_open[r].step == step && capspan_open[r].instr == di) )
+          capspan_open[w++] = capspan_open[r];
+      capspan_open_count = w;
+      if( capspan_open_count < CAPSPAN_OPEN_MAX ) {
+        capspan_open[capspan_open_count].note    = package.evnt1;
+        capspan_open[capspan_open_count].vel     = package.evnt2;
+        capspan_open[capspan_open_count].step    = step;
+        capspan_open[capspan_open_count].on_tick = capspan_cur_tick;
+        capspan_open[capspan_open_count].gate    = 0;
+        capspan_open[capspan_open_count].instr   = di;
+        ++capspan_open_count;
+      }
+    }
+    SEQ_TRG_GateSet(capspan_dst, step, di, 1);
+    return 0;
+  }
+
   if( capspan_note_layer >= 0 )
     SEQ_PAR_Set(capspan_dst, step, (u8)capspan_note_layer, 0, package.evnt1);
   if( capspan_vel_layer >= 0 )
@@ -3260,6 +3363,7 @@ static s32 SEQ_CORE_CapSpanSink(mios32_midi_port_t port, mios32_midi_package_t p
       capspan_open[capspan_open_count].step    = step;
       capspan_open[capspan_open_count].on_tick = capspan_cur_tick;
       capspan_open[capspan_open_count].gate    = 0;
+      capspan_open[capspan_open_count].instr   = 0;
       ++capspan_open_count;
     }
   }
@@ -3336,7 +3440,8 @@ static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
   // caller's trg overflow guard already reserves the ceil'd byte count ((dst_steps+7)/8).
   SEQ_TRG_TrackInit(dst, (dst_steps + 7) & ~7, trg_layers, trg_instr);
   SEQ_CORE_CcInherit(dst, src); // full span incl. the ext block (voicing travels)
-  SEQ_CC_ResetGenerativeForBounce(dst);                // forward playback, strip gen axis
+  SEQ_CC_ResetGenerativeForTape(dst);   // TAPE flavor: echo/LFO/direction/delay/roll
+                                        // are baked into the recorded notes — full reset
   // DRUM sources (2026-07-18): the tape bakes pitch for melodic material, but
   // drum steps can't store notes at all (gates+vel per instrument) — the
   // emitted pitch normalizes back to the instrument, so the transpose config
@@ -3374,6 +3479,41 @@ static void SEQ_CORE_CaptureSpanPrepDst(u8 src, u8 dst, u16 dst_steps,
   memset(seq_trg_layer_value[dst], 0, SEQ_TRG_MAX_BYTES);
 }
 
+// 2026-07-18 capture-fidelity: the tape tee and the re-sim sink hear NOTE events
+// only — a source's CC / PitchBend / ProgramChange / Aftertouch par lanes never
+// reach a span deposit, which came out with those lanes memset-0 (painted curve
+// lost, plus a spurious value-0 event at the loop head once the CC dedup saw the
+// zeroes). These lanes are loop-static step data that replays deterministically,
+// so the faithful capture is a direct lane copy from the source's rendered
+// MIRROR (slice permutes travel with it), rotated to the grab window's phase —
+// not a recording. Ctrl lanes are deliberately NOT copied: their heard effect
+// (self-bus modulation) is baked into the recorded notes, so a copied Ctrl lane
+// would re-modulate the frozen copy. Same "dials didn't move mid-window"
+// assumption as the rest of the grab; SYNCH/foreign-clkdiv rotation follows the
+// note path's documented tick-0 phase-alignment assumption.
+static void SEQ_CORE_CaptureCopyStreamLanes(u8 src, u8 dst, u16 dst_steps, u16 rot0, u16 loop_steps)
+{
+  if( !loop_steps )
+    return;
+  u8 num_layers = (u8)SEQ_PAR_NumLayersGet(src);
+  u8 num_instr  = (u8)SEQ_PAR_NumInstrumentsGet(src);
+  u8 layer, instr;
+  u16 s;
+  for(layer=0; layer<num_layers; ++layer) {
+    seq_par_layer_type_t lt = SEQ_PAR_AssignmentGet(src, layer);
+    if( lt != SEQ_PAR_Type_CC && lt != SEQ_PAR_Type_PitchBend
+        && lt != SEQ_PAR_Type_ProgramChange && lt != SEQ_PAR_Type_Aftertouch )
+      continue;
+    for(instr=0; instr<num_instr; ++instr) {
+      for(s=0; s<dst_steps; ++s) {
+        s32 v = SEQ_PAR_Get(src, (u16)((rot0 + s) % loop_steps), layer, instr);
+        if( v >= 0 )
+          SEQ_PAR_Set(dst, s, layer, instr, (u8)v);
+      }
+    }
+  }
+}
+
 // Re-simulate the last `k` bars of `src` (the ring's track) into `dst`.
 // Returns 0 on success; negative status on refusal (see CMD_CAPTURE_SPAN).
 s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
@@ -3386,11 +3526,9 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
 
   seq_cc_trk_t *tcc = &seq_cc_trk[src];
   // Arp playmode early-returns in the render-stack processors (A8 fence) — its emitted
-  // stream can't be faithfully quantized back; refuse it. Drum event_mode is by-ear
-  // out-of-scope (note-0=kit-preset on playback, per-instrument link layers) but the
-  // machinery (determinism / non-destructive / quantize of instrument-0 notes) is sound,
-  // so it is allowed and validated by the HIL pitch-gen-on-drum setup; melodic is the
-  // by-ear target.
+  // stream can't be faithfully quantized back; refuse it. Drum event_mode: since
+  // 2026-07-18 cont. 10 the sink writes PER INSTRUMENT (expected-note table, tape
+  // parity) — the old melodic-mono collapse onto instrument 0 is gone.
   if( tcc->playmode == SEQ_CORE_TRKMODE_Arpeggiator ) return -11;
 
   // STOPPED re-sim is ONE global measure only (2026-06-26). The drive phase-aligns to the
@@ -3461,6 +3599,21 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   capspan_default_len = SEQ_CORE_CAP_DEFAULT_LEN;       // fallback for notes whose off is past-window
   capspan_open_count = 0;                               // precise-gate open-note tracking starts empty
   capspan_in_flush = 0;
+  // DRUM dst (cont. 10): per-instrument write-back in the sink, tape parity —
+  // expected-note table + the same pitch-bake rule (a kit with a Note lane
+  // carries the FINAL emitted pitch there, so PrepDst's static Semi/Oct
+  // travel is undone or emission would double-transpose; FORCE_SCALE stays).
+  capspan_dst_is_drum = (dtcc->event_mode == SEQ_EVENT_MODE_Drum);
+  capspan_n_drums = 0;
+  if( capspan_dst_is_drum ) {
+    u8 ti = (u8)SEQ_TRG_NumInstrumentsGet(src);
+    capspan_n_drums = (ti < 16) ? ti : 16;
+    capture_drum_expected_notes(src, tcc, capspan_exp_note, capspan_n_drums);
+    if( capspan_note_layer >= 0 ) {
+      SEQ_CC_Set(dst, SEQ_CC_TRANSPOSE_SEMI, 0);
+      SEQ_CC_Set(dst, SEQ_CC_TRANSPOSE_OCT,  0);
+    }
+  }
 
   // (c) rewind src to the window-start frame. The frame is the state at that measure's
   // ref_step==0 prologue (BEFORE the body's NextStep advance), so we restore it verbatim
@@ -3545,8 +3698,9 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
   // tail. A note only stays open if its off was deferred past window end (its gatelength
   // exceeded the room left), i.e. it genuinely ties; a normal note's off drains in the
   // loop. Mark them as glide (95 -> len 96, the longest a step expresses) so the tie is
-  // preserved instead of collapsing to the default gate.
-  if( capspan_len_layer >= 0 ) {
+  // preserved instead of collapsing to the default gate. DRUM dst: no Gld ties —
+  // a still-ringing drum keeps the default written at note-on (tape parity).
+  if( capspan_len_layer >= 0 && !capspan_dst_is_drum ) {
     u8 oi;
     for(oi=0; oi<capspan_open_count; ++oi)
       SEQ_PAR_Set(capspan_dst, capspan_open[oi].step, (u8)capspan_len_layer, 0, 95);
@@ -3554,6 +3708,9 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
 
   // (f) restore the live engine (byte-identical) and mark only dst dirty
   SEQ_CORE_CaptureSpanRestore(src);
+  // stream lanes (CC/PB/PC/AT) from the restored src mirror — the sink heard
+  // notes only (helper header). GRID drive -> rotation 0.
+  SEQ_CORE_CaptureCopyStreamLanes(src, dst, dst_steps, 0, (u16)(tcc->length + 1));
   SEQ_PATTERN_DirtySetTrack(dst); // the capture IS a deliberate change to dst
 
   MUTEX_MIDIOUT_GIVE;
@@ -3572,23 +3729,6 @@ s32 SEQ_CORE_CaptureSpanReSim(u8 src, u8 dst, u8 k)
 // refusal codes as the re-sim path (negative; see CMD_CAPTURE_SPAN), plus -10 = the
 // span scrolled out of the tape ring (too many notes buffered). Runs under
 // MUTEX_MIDIOUT so the tape read + dst write are serialized against the live engine.
-// Map an emitted drum note back to its instrument via the expected-note table
-// (exact match first, else NEAREST — absorbs transforms the table doesn't
-// model, e.g. limit folds or a humanize-note wobble; ties -> lowest index).
-static u8 capture_drum_instr_for_note(const u8 *exp_note, u8 n_drums, u8 note)
-{
-  u8 d, best = 0;
-  int best_d = 1000;
-  for(d=0; d<n_drums; ++d) {
-    int diff = (int)note - (int)exp_note[d];
-    if( diff < 0 ) diff = -diff;
-    if( diff == 0 )
-      return d;
-    if( diff < best_d ) { best_d = diff; best = d; }
-  }
-  return best;
-}
-
 s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
 {
   if( src >= SEQ_CORE_NUM_TRACKS || dst >= SEQ_CORE_NUM_TRACKS ) return -1;
@@ -3717,35 +3857,33 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
   // capture"): the tape is a passive wire tap — events carry NO instrument,
   // and the old melodic-mono sink dumped every drum onto instrument 0
   // (last-write-wins: one drum survived, the rest came back empty). Rebuild
-  // the mapping AT GRAB TIME instead: each drum's EXPECTED emitted note = its
-  // config note (lay_const row A) through the same static emission pitch
-  // chain the window heard — Semi/Oct sign-decoded exactly like
-  // SEQ_CORE_Transpose, then the FTS snap when armed. Assumes the dials
-  // didn't move mid-window (the same assumption melodic content capture
-  // already makes). Gates land per instrument; the taped velocity goes into
-  // the kit's Vel par layer when it has one; no length chains (drum gates
-  // are one-step).
+  // the mapping AT GRAB TIME instead via the expected-note table
+  // (capture_drum_expected_notes — the static emission chain incl. the
+  // octave-fold + FTS snap). Gates land per instrument; the taped velocity
+  // goes into the kit's Vel par layer when it has one.
   u8 dst_is_drum = (dtcc->event_mode == SEQ_EVENT_MODE_Drum);
   u8 exp_note[16];
   u8 n_drums = 0;
   if( dst_is_drum ) {
     n_drums = (u8)((trg_instr < 16) ? trg_instr : 16);
-    int inc_oct  = tcc->transpose_oct;  if( inc_oct  >= 8 ) inc_oct  -= 16;
-    int inc_semi = tcc->transpose_semi; if( inc_semi >= 8 ) inc_semi -= 16;
-    u8 d;
-    for(d=0; d<n_drums; ++d) {
-      int nn = (int)tcc->lay_const[d] + 12*inc_oct + inc_semi;
-      if( nn < 0 ) nn = 0; else if( nn > 127 ) nn = 127;
-      if( tcc->trkmode_flags.FORCE_SCALE ) {
-        u8 scale, root_selection, root;
-        SEQ_CORE_FTS_GetScaleAndRoot(src, 0, d, tcc, &scale, &root_selection, &root);
-        mios32_midi_package_t sp;
-        sp.ALL = 0; sp.type = NoteOn; sp.event = NoteOn; sp.note = (u8)nn;
-        SEQ_SCALE_Note(&sp, scale, root);
-        nn = sp.note;
-      }
-      exp_note[d] = (u8)nn;
-    }
+    capture_drum_expected_notes(src, tcc, exp_note, n_drums);
+  }
+
+  // DRUM pitch bake (2026-07-18 capture-fidelity): when the kit carries a Note
+  // par lane (the fork's per-step drum-note path), the taped pitch is stamped
+  // per (step, instrument) in pass 2 — the FINAL emitted note, Semi/Oct/FTS
+  // already in it, exactly like the melodic tape. That makes the dynamic drum
+  // pitch (ChordMask/Tension/PitchGen wobble on kits) capturable while playing,
+  // not just via the stopped mirror copy. Undo PrepDst's static-transpose
+  // travel here or emission would re-add Semi/Oct on top of the baked lane
+  // (FORCE_SCALE stays: idempotent re-snap + field membership). Kits WITHOUT a
+  // Note lane keep the normalize-to-config behavior + the CC travel — the lane
+  // is the opt-in.
+  u8 drum_note_bake = 0;
+  if( dst_is_drum && note_layer >= 0 ) {
+    drum_note_bake = 1;
+    SEQ_CC_Set(dst, SEQ_CC_TRANSPOSE_SEMI, 0);
+    SEQ_CC_Set(dst, SEQ_CC_TRANSPOSE_OCT,  0);
   }
 
   // Quantize the window's note-ons -> steps. Iterate oldest..newest; collisions on a
@@ -3789,15 +3927,37 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
     u16 step = (u16)((e->tick - win_start) / tps);
     if( step >= dst_steps ) continue;
     if( dst_is_drum ) {
+      u8 di = capture_drum_instr_for_note(exp_note, n_drums, e->note);
       // gate landed per instrument in pass 1; carry the taped velocity when
       // the kit has a Vel par layer (else the fixed lay_const velocity plays)
       if( vel_layer >= 0 )
-        SEQ_PAR_Set(dst, step, (u8)vel_layer,
-                    capture_drum_instr_for_note(exp_note, n_drums, e->note), e->vel);
+        SEQ_PAR_Set(dst, step, (u8)vel_layer, di, e->vel);
+      // pitch travels when the kit has a Note lane (drum_note_bake above);
+      // nearest-match attribution is the tape's documented limit (events carry
+      // no instrument tag)
+      if( drum_note_bake )
+        SEQ_PAR_Set(dst, step, (u8)note_layer, di, e->note);
+      // gate length travels when the kit has a Length lane — without this the
+      // memset-0 lane clipped every captured hit to 1/96 (heard decay lost on
+      // kits that measure it). No multi-step chains on drums: GateToParLen
+      // caps at 94 (95/96, terminating); gate 0 (still ringing) -> default.
+      if( len_layer >= 0 )
+        SEQ_PAR_Set(dst, step, (u8)len_layer, di,
+                    SEQ_CORE_CaptureGateToParLen(e->gate, (u16)tps));
     } else {
       SEQ_CORE_CaptureMaterializeNote(dst, step, dst_steps, e->gate, (u16)tps,
                                       e->note, e->vel, note_layer, vel_layer, len_layer);
     }
+  }
+
+  // stream lanes (CC/PB/PC/AT) from the source mirror — the tape tee heard
+  // notes only (helper header). HEARD windows start mid-loop: rotate the lane
+  // read to the window phase, same tick-0 alignment assumption as the notes.
+  {
+    u16 ls = (u16)(tcc->length + 1);
+    u16 rot0 = (phase == SEQ_CORE_CAP_PHASE_HEARD && ls && tps)
+      ? (u16)((win_start / tps) % ls) : 0;
+    SEQ_CORE_CaptureCopyStreamLanes(src, dst, dst_steps, rot0, ls);
   }
 
   SEQ_PATTERN_DirtySetTrack(dst); // the capture IS a deliberate change to dst
@@ -3819,6 +3979,14 @@ s32 SEQ_CORE_CaptureSpanTape(u8 src, u8 dst, u8 k, u8 phase)
 // testctrl verb call this so the same "grab last K bars" surface works in both states.
 s32 SEQ_CORE_CaptureSpan(u8 src, u8 dst, u8 k, u8 phase)
 {
+  // CHORD event-mode fence (2026-07-18): chord steps store INDICES — the
+  // note-stream materialize can't round-trip them (a chord track has no Note
+  // par lane, so only gates+vel landed and the chord lane came out all-0:
+  // a silently garbage deposit). The slot verb routes chord sources through
+  // SEQ_CORE_CaptureChordWindow (index copy) BEFORE reaching this dispatcher;
+  // the RAM grab refuses honestly until it grows the same window path.
+  if( src < SEQ_CORE_NUM_TRACKS && seq_cc_trk[src].event_mode == SEQ_EVENT_MODE_Chord )
+    return -13;
   if( SEQ_BPM_IsRunning() )
     return SEQ_CORE_CaptureSpanTape(src, dst, k, phase);
   return SEQ_CORE_CaptureSpanReSim(src, dst, k); // STOPPED: no playhead -> always GRID
@@ -3965,7 +4133,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     // Faithful full-config inherit (mirrors PASTE_CLR_ALL in seq_ui_util.c): copy
     // the source's whole CC space (incl. the ext block — voicing travels, see
     // SEQ_CORE_CC_INHERIT_COUNT) so length/clock/groove/trigger assignments/
-    // routing travel with the frozen notes. SEQ_CC_ResetGenerativeForBounce
+    // routing travel with the frozen notes. SEQ_CC_ResetGenerativeForFlatten
     // below strips the generation axis (mode/direction/transpose/robotize/echo/
     // lfo/random/slicer) while keeping the deterministic shaping (groove,
     // length, clkdiv, structural trg-asg, voicing). EVENT_MODE re-set in the
@@ -3977,7 +4145,7 @@ s32 SEQ_CORE_CaptureToSlotTrack(u8 src_track, u8 dst_track, u8 dst_bank, u8 dst_
     memcpy(seq_par_layer_value[dst_track], capture_par_snapshot, SEQ_PAR_MAX_BYTES);
     memcpy(seq_trg_layer_value[dst_track], capture_trg_snapshot, SEQ_TRG_MAX_BYTES);
     // (Track 2: the mirror already held the snapped/planed/limited pitch — no bake.)
-    SEQ_CC_ResetGenerativeForBounce(dst_track);
+    SEQ_CC_ResetGenerativeForFlatten(dst_track); // mirror copy — emission shapers survive
     // Legacy-pitch-fenced sources (2026-07-18): drum steps store no notes and
     // chord steps store indices — the mirror can't bake their transpose, the
     // config IS the pitch. Re-apply the source's static Semi/Oct.
@@ -4323,13 +4491,18 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
       SEQ_CORE_TileWindowToCanvas(dst_track, loop_steps,
                                   capture_par_snapshot, W, cap_par_layers, cap_num_instr,
                                   capture_trg_snapshot, (u8)(cap_trg_steps/8), cap_trg_layers, cap_trg_instr);
-      SEQ_CC_ResetGenerativeForBounce(dst_track);
+      // FLATTEN flavor here serves BOTH routes: the chord route copied SOURCE
+      // chord indices (a mirror-family copy — its echo/LFO/direction were never
+      // baked, preserving them keeps the deposit as heard); the span route
+      // inherited SCRATCH's CCs, which PrepDst already ForTape-reset, so
+      // "preserving" those zeros is outcome-identical to the old full reset.
+      SEQ_CC_ResetGenerativeForFlatten(dst_track);
       SEQ_GENERATOR_TrackClear(dst_track);
       // A chord track stores ROOT indices; transpose is applied to the expanded notes at
       // render, so it's NOT baked into the captured indices the way the note path bakes it
       // into emitted notes. Same for DRUM tracks (2026-07-18): drum steps store no notes
       // at all (gates+vel per instrument; pitch = per-drum config + emission transpose),
-      // so nothing bakes there either. ResetGenerativeForBounce just zeroed it — re-apply
+      // so nothing bakes there either. ResetGenerativeForFlatten just zeroed it — re-apply
       // the source's static transpose so captured chords keep their key and captured kits
       // keep their tuning (live/global transpose still follows at playback; the held-key
       // transposer is a live gesture, not track data). slottrk_src_cc snapshots SCRATCH
@@ -4390,7 +4563,7 @@ s32 SEQ_CORE_CaptureSpanToSlotTrack(u8 src, u8 dst_track, u8 dst_bank, u8 dst_pa
 // Same staged load-modify-save as CaptureToSlotTrack, with three differences:
 // it copies the SOURCE par/trg (the editable substrate the generator wanders
 // over), NOT the rendered output mirror; it does NOT strip the generative axis
-// (no SEQ_CC_ResetGenerativeForBounce, no SEQ_GENERATOR_TrackClear); and it
+// (no SEQ_CC_ResetGenerative reset, no SEQ_GENERATOR_TrackClear); and it
 // re-homes the source's generator pool into the slot's dst_track. MUST run in
 // task context (two MUTEX_SDCARD ops). Returns the PatternWrite status (>=0 ok),
 // or the negative PatternRead status if the load failed (dst group restored).

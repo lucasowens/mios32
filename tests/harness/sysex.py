@@ -29,6 +29,7 @@ CMD_TRG_BYTE_GET = 0x58
 CMD_MSP_QUERY = 0x59
 CMD_UI_INSTR_SET = 0x5a
 CMD_TRACK_DRUM_INIT = 0x5b
+CMD_TRACK_DRUM_KIT_INIT = 0x41  # full playable kit: Note+Length lanes, per-drum gates (capture-fidelity pins)
 CMD_GENERATOR_QUERY = 0x5c
 CMD_UI_TRACK_SET = 0x5d
 CMD_TRACK_DRUM_PAR_SET = 0x5e
@@ -262,6 +263,7 @@ SESSION_NAME_MAX_LEN = 12
 # listed — add more as needed. Values >= 0x80 use the 14-bit wire encoding.
 class CC:
     LAY_CONST_A1 = 0x00  # par layer A type (seq_par_layer_type_t: 1=Note 2=Chord1 14=Chord2 18=Chord3)
+    LFO_WAVEFORM = 0x30
     LFO_AMPLITUDE = 0x31
     MODE = 0x40
     MODE_FLAGS = 0x41
@@ -283,7 +285,11 @@ class CC:
     STEPS_REPEAT = 0x5C
     STEPS_SKIP = 0x5D
     ASG_GATE = 0x60
+    PAR_ASG_DRUM_A = 0x58  # par_assignment_drum[0] type (drum tracks)
+    PAR_ASG_DRUM_B = 0x59  # par_assignment_drum[1] type
     ECHO_REPEATS = 0x70
+    ECHO_DELAY = 0x71
+    ECHO_VELOCITY = 0x72
     FX_MIDI_NUM_CHANNELS = 0x7B
     ROBOTIZE_MASK1 = 0x80
     ROBOTIZE_MASK2 = 0x81

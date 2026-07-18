@@ -812,7 +812,7 @@ s32 SEQ_LAYER_GetEvents(u8 track, u16 step, seq_layer_evnt_t layer_events[16], u
 	    // chord VOICING (fork) — inversion + spread as a pure function of the
 	    // dials: same (byte, dials) always yields the same voices, so capture/
 	    // bounce reproduce it by re-expansion (deterministic SHAPING, preserved
-	    // by SEQ_CC_ResetGenerativeForBounce). All-neutral or bypassed (spread
+	    // by the SEQ_CC_ResetGenerative flavors). All-neutral or bypassed (spread
 	    // bit 7) = byte-identical stock expansion. Muted layers skip (all-0 notes).
 	    u8 voicing_off = (tcc->voice_spread & 0x80) || chord_muted || nvoices < 2;
 

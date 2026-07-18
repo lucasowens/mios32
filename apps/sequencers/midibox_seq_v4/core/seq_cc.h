@@ -394,15 +394,21 @@ typedef struct {
 
 extern s32 SEQ_CC_Init(u32 mode);
 
-// Neutralizes every generative CC on a track (FX, direction, bus, groove,
-// transpose, morph, trigger assignments, generative par-layer types). Used by
-// the capture verbs (SEQ_CORE_CaptureToSlot / SEQ_CORE_CaptureToTrack) on the
-// destination CC after the computed output is written, so the captured pattern
-// plays the frozen tape without re-applying modulation on top. Identity (MIDI port/
-// channel, event mode, drum mapping, layer step data) and structural fields
-// (length, loop, clock divider) are preserved. When you add a new generative
-// SEQ_CC_*, extend this function in the same review.
-extern s32 SEQ_CC_ResetGenerativeForBounce(u8 track);
+// Neutralize the generative CC axis on a capture destination — two flavors,
+// one per capture family (2026-07-18 capture-fidelity determination; full law
+// in seq_cc.c above the implementation):
+//   ForFlatten — dst is a RENDER-MIRROR copy (CaptureToSlot/ToTrack/ToSlotTrack
+//     + the chord-index route): reset generation only, PRESERVE the
+//     deterministic emission shapers (echo/LFO/direction/SUSTAIN/fx-dupl +
+//     Delay/Roll/Nth/Root/Scale lanes) — they were never baked into the bytes.
+//   ForTape — dst is a recording of the EMITTED stream (live tape / re-sim
+//     via CaptureSpanPrepDst): the shapers are baked into the notes, reset
+//     them too (the historical full reset).
+// Identity (MIDI port/channel, event mode, drum mapping, step-data lanes) and
+// structure (length, loop, clkdiv, groove, voicing, FORCE_SCALE) survive both.
+// When you add a new SEQ_CC_*, classify it in the same review.
+extern s32 SEQ_CC_ResetGenerativeForFlatten(u8 track);
+extern s32 SEQ_CC_ResetGenerativeForTape(u8 track);
 
 extern s32 SEQ_CC_Set(u8 track, u8 cc, u8 value);
 extern s32 SEQ_CC_MIDI_Set(u8 track, u8 cc, u8 value);

@@ -61,6 +61,7 @@ static const u8 testctrl_header[6] = { 0xf0, 0x00, 0x00, 0x7e, 0x4f, 0x54 };
 #define CMD_MSP_QUERY         0x59
 #define CMD_UI_INSTR_SET      0x5a
 #define CMD_TRACK_DRUM_INIT   0x5b
+#define CMD_TRACK_DRUM_KIT_INIT 0x41  // full playable kit (per-drum gates) — capture-fidelity pins
 #define CMD_GENERATOR_QUERY   0x5c
 #define CMD_UI_TRACK_SET      0x5d
 #define CMD_TRACK_DRUM_PAR_SET 0x5e
@@ -584,6 +585,52 @@ static void cmd_track_drum_init(mios32_midi_port_t port, const u8 *payload, u8 p
   reply[0] = track;
   reply[1] = 0x01;
   send_reply(port, CMD_TRACK_DRUM_INIT, reply, sizeof(reply));
+}
+
+
+// CMD_TRACK_DRUM_KIT_INIT payload: [track]
+// Reply payload: [track, status]   status 0x01 = ok, 0x02 = bad payload.
+//
+// A REAL playable kit for the capture-fidelity pins (2026-07-18), unlike
+// cmd_track_drum_init's generator-dispatch skeleton (whose trg has only ONE
+// instrument — per-drum gates don't exist there, so the tape's per-instrument
+// write-back can't be exercised). Layout: par 32 steps × 2 layers × 16 drums
+// (A=Note lane — the drum pitch-capture opt-in; B=Length lane) = 1024 B; trg
+// 32 steps × 1 gate layer × 16 drums (per-drum gates via CMD_TRG_BYTE_SET's
+// instrument arg). Per-drum config: note row A = 36+d (distinct, so the
+// grab's expected-note attribution is exact-match), velocity row B = 100.
+// LENGTH = 15 (16-step loop in a 32-step buffer -> tape K<=2 fits the canvas).
+static void cmd_track_drum_kit_init(mios32_midi_port_t port, const u8 *payload, u8 plen)
+{
+  u8 reply[2] = { 0, 0x02 };
+  if( plen < 1 ) {
+    send_reply(port, CMD_TRACK_DRUM_KIT_INIT, reply, sizeof(reply));
+    return;
+  }
+  u8 track = payload[0] & 0x0f;
+
+  SEQ_PAR_TrackInit(track, 32, 2, 16);  // 32 steps × (Note,Length) × 16 drums = 1024 B
+  SEQ_TRG_TrackInit(track, 32, 1, 16);  // per-drum gate rows, 64 B
+
+  SEQ_CC_Set(track, SEQ_CC_MIDI_EVENT_MODE, SEQ_EVENT_MODE_Drum);
+  seq_cc_trk[track].par_assignment_drum[0] = SEQ_PAR_Type_Note;
+  seq_cc_trk[track].par_assignment_drum[1] = SEQ_PAR_Type_Length;
+  seq_cc_trk[track].par_assignment_drum[2] = SEQ_PAR_Type_None;
+  seq_cc_trk[track].par_assignment_drum[3] = SEQ_PAR_Type_None;
+  {
+    u8 d;
+    for(d=0; d<16; ++d) {
+      seq_cc_trk[track].lay_const[0*16 + d] = (u8)(36 + d); // per-drum note
+      seq_cc_trk[track].lay_const[1*16 + d] = 100;          // per-drum velocity
+    }
+  }
+  SEQ_CC_Set(track, SEQ_CC_LENGTH, 15);
+  SEQ_CC_LinkUpdate(track);
+  SEQ_CORE_RenderDirtySet(track);
+
+  reply[0] = track;
+  reply[1] = 0x01;
+  send_reply(port, CMD_TRACK_DRUM_KIT_INIT, reply, sizeof(reply));
 }
 
 
@@ -2851,6 +2898,9 @@ s32 SEQ_TESTCTRL_Parser(mios32_midi_port_t port, u8 midi_in)
             break;
           case CMD_TRACK_DRUM_INIT:
             cmd_track_drum_init(port, payload_buf, payload_len);
+            break;
+          case CMD_TRACK_DRUM_KIT_INIT:
+            cmd_track_drum_kit_init(port, payload_buf, payload_len);
             break;
           case CMD_GENERATOR_QUERY:
             cmd_generator_query(port, payload_buf, payload_len);

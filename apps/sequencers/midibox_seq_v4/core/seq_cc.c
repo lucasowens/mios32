@@ -121,36 +121,56 @@ s32 SEQ_CC_Init(u32 mode)
 
 
 /////////////////////////////////////////////////////////////////////////////
-// Reset every generative CC on a track to its neutral default (matching
-// SEQ_CC_Init). Called by the capture verbs (SEQ_CORE_CaptureToSlot /
-// SEQ_CORE_CaptureToTrack, seq_core.c) on the destination CC after the
-// computed output is written — so the captured pattern plays the frozen tape
-// without re-applying robotize / echo / direction / bus / par-layer modulation
-// on top.
+// Reset the generative CC axis on a capture destination — in TWO FLAVORS,
+// because the two capture families bake different things (2026-07-18 capture-
+// fidelity determination; the old single ResetGenerativeForBounce served both
+// and over-reset the flatten family):
 //
-// Two axes, only one is reset. A capture commits the GENERATION axis (generators,
-// randomness, mutation) into notes — that is correctly neutralized here. The
-// SHAPING axis (groove, …) is DETERMINISTIC: re-applying its CC on playback
-// reproduces the heard sound exactly (groove's per-step swing/velocity/length —
-// including negative delays that cannot be baked into step params), so it must be
-// PRESERVED, not reset. Groove is the first such carve-out; transpose/scale/echo/
-// LFO/direction are candidates for the same treatment (preserve), pending by-ear
-// review — left reset for now.
+//   FLATTEN family (SEQ_CC_ResetGenerativeForFlatten) — the deposit is a copy
+//   of the RENDER MIRROR (OutputActive): render-stack output is baked, but the
+//   emission chain never touched the bytes. So only the GENERATION axis resets;
+//   every DETERMINISTIC emission shaper is PRESERVED — re-applying it to the
+//   frozen copy reproduces the heard sound exactly:
+//     echo, LFO, FX-MIDI duplicate, SUSTAIN, SYNCH_TO_MEASURE, non-random
+//     direction modes + progression params (steps fwd/jump/replay/repeat/skip),
+//     and the Delay/Roll/Roll2/Nth1/Nth2/Root/Scale par-lane assignments
+//     (their values travel in the full par copy).
+//   Callers: SEQ_CORE_CaptureToSlot / CaptureToTrack / CaptureToSlotTrack /
+//   CaptureSpanToSlotTrack's post-tile reset (chord-index route = source copy).
 //
-// Preserved (identity + structural + step-data carriers + deterministic shaping):
+//   TAPE family (SEQ_CC_ResetGenerativeForTape) — the deposit is a recording
+//   of the EMITTED stream (live tape / re-sim): echo repeats, LFO pitch, groove
+//   timing, traversal order, delays, rolls and Nth gating are already IN the
+//   recorded notes. Re-applying any of them would double — so the deterministic
+//   emission shapers reset too (the old full reset, unchanged).
+//   Callers: SEQ_CORE_CaptureSpanPrepDst (tape + re-sim).
+//
+// Reset in BOTH flavors (GENERATION axis / baked-or-live-input):
+//   playmode (Transpose/Arp input is live; ChordMask is render-baked), bus
+//   assignment, transpose Semi/Oct (baked in the mirror for melodic; the
+//   drum/chord callers re-apply it — the config IS the pitch there), morph,
+//   humanize, robotize, chordmask/tension/arp/slice dials, note limits,
+//   Probability lane, random gate/value triggers.
+//
+// Preserved in BOTH (identity + structural + step-data + deterministic shaping):
 //   - MIDI port/channel, event_mode, MIDI bank/PC, name
 //   - length, loop, clock divider (incl. TRIPLETS + MANUAL bits)
 //   - lay_const slots holding Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl
 //   - par_assignment_drum slots holding Velocity/Length
 //   - groove (style + value) — deterministic shaping, re-applied identically
+//     (the tape callers zero groove separately in PrepDst: positions are baked)
+//   - FORCE_SCALE — idempotent on baked notes; keeps the copy a member of the
+//     global harmonic field (2026-07-18)
 //   - chord voicing (spread/inv/strum/drop/tilt) — deterministic shaping of the
 //     chord-layer expansion; the captured buffer still holds chord BYTES, so the
 //     voicing CCs must survive for the copy to re-expand to what was heard
 //
-// When you add a new SEQ_CC_*, classify it: GENERATION → reset here; deterministic
-// SHAPING → preserve (a frozen copy must still sound like what was heard).
+// When you add a new SEQ_CC_*, classify it on BOTH axes: GENERATION → reset in
+// both flavors; deterministic emission SHAPING → preserve in FLATTEN, reset in
+// TAPE (it is baked into the recorded notes); render-stack dial → reset in both
+// (baked into the mirror).
 /////////////////////////////////////////////////////////////////////////////
-s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
+static s32 SEQ_CC_ResetGenerativeCommon(u8 track, u8 flatten)
 {
   if( track >= SEQ_CORE_NUM_TRACKS )
     return -1;
@@ -162,37 +182,59 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   // Track mode -> Normal; clears Off / Transpose / Arpeggiator. Bounced tape
   // is just notes, no live transposer/arp input wanted.
   tcc->playmode = SEQ_CORE_TRKMODE_Normal;
-  // Mode flags: clears SUSTAIN + UNSORTED/HOLD/RESTART/FIRST_NOTE/STEP_TRG —
-  // but PRESERVES FORCE_SCALE (2026-07-18, "the pitch settings get dropped"):
-  // FTS is IDEMPOTENT on the baked tape (snapping already-snapped notes under
-  // the same scale is a no-op), and keeping it keeps the frozen copy a MEMBER
-  // OF THE GLOBAL HARMONIC FIELD — Scle/Root/Deg/Shade performance moves keep
+  // Mode flags: clears UNSORTED/HOLD/RESTART/FIRST_NOTE/STEP_TRG (transposer/
+  // arp input plumbing — inert-or-wrong once playmode is Normal) but PRESERVES
+  // FORCE_SCALE (2026-07-18, "the pitch settings get dropped"): FTS is
+  // IDEMPOTENT on the baked tape (snapping already-snapped notes under the
+  // same scale is a no-op), and keeping it keeps the frozen copy a MEMBER OF
+  // THE GLOBAL HARMONIC FIELD — Scle/Root/Deg/Shade performance moves keep
   // bending it like every live track. The capture freezes the track's own
   // generation, not its membership in the field. (Semi/Oct/grip stay zeroed
   // below: those are baked into the notes — keeping them would double-apply.)
+  // SUSTAIN: deterministic emission articulation (ties each note to the next
+  // onset) — never baked into the mirror, so the FLATTEN copy keeps it; the
+  // TAPE recorded the resulting gates, so re-sustaining would double-tie.
   {
     u8 fts = tcc->trkmode_flags.FORCE_SCALE;
+    u8 sus = flatten ? tcc->trkmode_flags.SUSTAIN : 0;
     tcc->trkmode_flags.ALL = 0;
     tcc->trkmode_flags.FORCE_SCALE = fts;
+    tcc->trkmode_flags.SUSTAIN = sus;
   }
   // Bus assignment -> bus 0.
   tcc->busasg.ALL = 0;
-  // Clock-divider flags: clear synch-to-measure only. TRIPLETS + MANUAL are
-  // clock-shape (structural), not generative — leave them alone.
-  tcc->clkdiv.SYNCH_TO_MEASURE = 0;
+  // Clock-divider flags: TRIPLETS + MANUAL are clock-shape (structural), never
+  // touched. SYNCH_TO_MEASURE is deterministic traversal shaping: the FLATTEN
+  // copy keeps its loop geometry, so the per-measure re-align reproduces the
+  // heard bar-locking; a TAPE deposit's loop is the K-bar grab (a re-align
+  // every global measure would truncate it) and its positions are baked.
+  if( !flatten )
+    tcc->clkdiv.SYNCH_TO_MEASURE = 0;
 
-  // Note-value limits off.
+  // Note-value limits off (render-stack for melodic — baked in the mirror).
   tcc->limit_lower = 0;
   tcc->limit_upper = 0;
 
-  // Direction & step traversal -> linear forward.
-  tcc->dir_mode = SEQ_CORE_TRKDIR_Forward;
-  tcc->steps_replay = 0;
-  tcc->steps_forward = 0;
-  tcc->steps_jump_back = 0;
-  tcc->steps_repeat = 0;
-  tcc->steps_skip = 0;
-  tcc->steps_rs_interval = 0;
+  // Direction & step traversal. TAPE: -> linear forward (the recorded stream
+  // already plays in heard order; re-walking would scramble it). FLATTEN: the
+  // mirror is stored in STEP order and the copy keeps the source's geometry,
+  // so the deterministic walks (Backward/PingPong/Pendulum/Waypoint modes +
+  // the progression params) are SHAPING — preserved, they reproduce the heard
+  // traversal. Only the Random* modes draw live RNG (generation) -> Forward.
+  if( flatten ) {
+    if( tcc->dir_mode == SEQ_CORE_TRKDIR_Random_Dir
+     || tcc->dir_mode == SEQ_CORE_TRKDIR_Random_Step
+     || tcc->dir_mode == SEQ_CORE_TRKDIR_Random_D_S )
+      tcc->dir_mode = SEQ_CORE_TRKDIR_Forward;
+  } else {
+    tcc->dir_mode = SEQ_CORE_TRKDIR_Forward;
+    tcc->steps_replay = 0;
+    tcc->steps_forward = 0;
+    tcc->steps_jump_back = 0;
+    tcc->steps_repeat = 0;
+    tcc->steps_skip = 0;
+    tcc->steps_rs_interval = 0;
+  }
 
   // Transpose / morph / humanize.
   // NOTE: groove (groove_style + groove_value) is deliberately NOT reset here —
@@ -218,25 +260,33 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   tcc->trg_assignments.random_gate = 0;
   tcc->trg_assignments.random_value = 0;
 
-  // Echo off.
-  tcc->echo_repeats = 0;
-  tcc->echo_delay = 0;
-  tcc->echo_velocity = 0;
-  tcc->echo_fb_velocity = 0;
-  tcc->echo_fb_note = 0;
-  tcc->echo_fb_gatelength = 0;
-  tcc->echo_fb_ticks = 0;
+  // Echo + LFO: deterministic emission shaping. FLATTEN preserves both — the
+  // mirror copy holds dry notes, so the kept dials re-echo / re-modulate the
+  // frozen material exactly as heard (the old blanket reset made every stopped
+  // freeze come out drier/static than the source — OPEN_ITEMS "copies strip
+  // Echo/LFO", closed by this split). TAPE resets both: the repeats and the
+  // LFO'd pitches are already recorded as real notes.
+  if( !flatten ) {
+    // Echo off.
+    tcc->echo_repeats = 0;
+    tcc->echo_delay = 0;
+    tcc->echo_velocity = 0;
+    tcc->echo_fb_velocity = 0;
+    tcc->echo_fb_note = 0;
+    tcc->echo_fb_gatelength = 0;
+    tcc->echo_fb_ticks = 0;
 
-  // LFO off.
-  tcc->lfo_waveform = 0;
-  tcc->lfo_amplitude = 0;
-  tcc->lfo_phase = 0;
-  tcc->lfo_steps = 0;
-  tcc->lfo_steps_rst = 0;
-  tcc->lfo_enable_flags.ALL = 0;
-  tcc->lfo_cc = 0;
-  tcc->lfo_cc_offset = 0;
-  tcc->lfo_cc_ppqn = 0;
+    // LFO off.
+    tcc->lfo_waveform = 0;
+    tcc->lfo_amplitude = 0;
+    tcc->lfo_phase = 0;
+    tcc->lfo_steps = 0;
+    tcc->lfo_steps_rst = 0;
+    tcc->lfo_enable_flags.ALL = 0;
+    tcc->lfo_cc = 0;
+    tcc->lfo_cc_offset = 0;
+    tcc->lfo_cc_ppqn = 0;
+  }
 
   // Robotize neutral — mirrors SEQ_CC_Init. *_probability defaults are 31
   // (full range) so a later re-enable behaves like a fresh track; ACTIVE=0
@@ -294,17 +344,27 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
       tcc->robotize_bar_anchors[i] = 0;
   }
 
-  // FX MIDI duplicate off.
-  tcc->fx_midi_mode.ALL = 0;
-  tcc->fx_midi_port = DEFAULT;
-  tcc->fx_midi_chn = 0;
-  tcc->fx_midi_num_chn = 0;
+  // FX MIDI duplicate: deterministic channel fan-out — FLATTEN preserves it
+  // (the copy re-duplicates identically; the Random behaviour is the one
+  // generative edge, accepted), TAPE resets (the duplicated notes were
+  // recorded on their channels... folded to the track channel, see the tape
+  // port/chn note in seq_core.c).
+  if( !flatten ) {
+    tcc->fx_midi_mode.ALL = 0;
+    tcc->fx_midi_port = DEFAULT;
+    tcc->fx_midi_chn = 0;
+    tcc->fx_midi_num_chn = 0;
+  }
 
-  // Parameter-layer assignments: change generative types (Probability, Delay,
-  // Roll, Roll2, Nth1, Nth2, Root, Scale) to None so they don't transform the
-  // captured tape. Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl are preserved
-  // since they carry step data. Non-drum stores types in lay_const[0..15];
-  // drum stores them in par_assignment_drum[0..3].
+  // Parameter-layer assignments. Note/Chord/Velocity/Length/CC/PB/PC/AT/Ctrl
+  // always survive (step-data carriers). Probability is GENERATION (live coin
+  // flips) — stripped in both flavors. Delay/Roll/Roll2/Nth1/Nth2/Root/Scale
+  // are DETERMINISTIC lanes: FLATTEN preserves them (their values travel in
+  // the full par copy, so the frozen copy replays the same micro-delays,
+  // ratchets, bar-gating and per-step scale bends — stripping them was the
+  // "frozen drums lose their rolls" hole); TAPE strips them (their effect is
+  // baked into the recorded notes — and the lane bytes start zeroed anyway).
+  // Non-drum stores types in lay_const[0..15]; drum in par_assignment_drum[0..3].
   {
     u8 *par_asg;
     u8 num_layers;
@@ -318,7 +378,6 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
     u8 i;
     for(i=0; i<num_layers; ++i) {
       switch( (seq_par_layer_type_t)par_asg[i] ) {
-        case SEQ_PAR_Type_Probability:
         case SEQ_PAR_Type_Delay:
         case SEQ_PAR_Type_Roll:
         case SEQ_PAR_Type_Roll2:
@@ -326,6 +385,10 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
         case SEQ_PAR_Type_Nth2:
         case SEQ_PAR_Type_Root:
         case SEQ_PAR_Type_Scale:
+          if( !flatten )                    // FLATTEN preserves the deterministic lanes;
+            par_asg[i] = SEQ_PAR_Type_None; // TAPE strips (baked into the recorded notes)
+          break;
+        case SEQ_PAR_Type_Probability:      // GENERATION — strip in both flavors
           par_asg[i] = SEQ_PAR_Type_None;
           break;
         // SEQ_PAR_Type_Waypoint: deliberately PRESERVED (hand-painted path =
@@ -353,6 +416,20 @@ s32 SEQ_CC_ResetGenerativeForBounce(u8 track)
   SEQ_CC_LinkUpdate(track);
 
   return 0;
+}
+
+// FLATTEN family: the deposit is a render-mirror copy — preserve every
+// deterministic emission shaper (see the flavor law above).
+s32 SEQ_CC_ResetGenerativeForFlatten(u8 track)
+{
+  return SEQ_CC_ResetGenerativeCommon(track, 1);
+}
+
+// TAPE family: the deposit is a recording of the emitted stream — the
+// deterministic shapers are baked into the notes, reset them too.
+s32 SEQ_CC_ResetGenerativeForTape(u8 track)
+{
+  return SEQ_CC_ResetGenerativeCommon(track, 0);
 }
 
 

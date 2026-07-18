@@ -764,6 +764,8 @@ static void capture_span_msg(u8 src, u8 dst, u8 k)
       case -9:  why = "dst par full";  break;
       case -11: why = "arp track";     break;
       case -12: why = "dst trg full";  break;
+      case -13: why = "chord: use Pat-cap"; break; // chord indices can't round-trip the tape;
+                                                   // the pattern-capture verb has the index path
       default:  why = "refused";       break;
     }
     SEQ_UI_Msg_Track("capture refused");
