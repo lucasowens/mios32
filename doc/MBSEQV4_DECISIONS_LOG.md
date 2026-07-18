@@ -3159,3 +3159,21 @@ push expressiveness.
 - Files: `seq_core.c` (capture_drum_instr_for_note + expected-note table +
   both write-back passes). Compiles clean. HIL pin owed: drum tape capture
   with transpose+FTS armed -> per-instrument gates match the source pattern.
+
+**2026-07-18 (cont. 6) — First HIL run against act 2: 275/278 → 278/278**
+
+- Full suite vs the act-2 firmware: **275 passed, 3 failed — all three the
+  SAME root**: legacy pins asserting "FORCE_SCALE must be RESET on the frozen
+  copy" (test_capture_force_scale.py ×2, test_pitch_chain.py planed-groove),
+  i.e. the exact contract the cont.-3 field-membership decision deliberately
+  inverted. NO content assertion failed anywhere — baked notes byte-faithful
+  suite-wide, shifted GRID pins + all 10 slicer pins green on the remapped
+  firmware. The capture-fix batch drew zero collateral reds.
+- Pins flipped to the new contract (flag must SURVIVE; docstrings updated —
+  the old "immune to later key changes" rationale is now the explicitly
+  unwanted behavior). Re-run: 4/4 green → **suite = 278/278 on act-2
+  firmware = the working baseline** (same count, three pins now guard FTS
+  SURVIVAL instead of FTS reset).
+- Still owed (unchanged): act-2 behavior pins (choke/motion/jump/ORDR/punch/
+  interject) + ext-CC travel + drum transpose travel + drum tape
+  per-instrument pins; by-ear verdicts per thread.

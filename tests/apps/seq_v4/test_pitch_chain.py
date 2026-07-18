@@ -479,8 +479,10 @@ def test_capture_planed_groove_is_faithful(board):
         assert board.cc_get(VERIFY_TRACK, CC.MODE) != TRKMODE_TRANSPOSE, (
             "frozen copy must not stay in Transpose playmode"
         )
-        assert board.cc_get(VERIFY_TRACK, CC.MODE_FLAGS) & FLAG_FORCE_SCALE == 0, (
-            "FORCE_SCALE must be reset on the frozen copy"
+        assert board.cc_get(VERIFY_TRACK, CC.MODE_FLAGS) & FLAG_FORCE_SCALE, (
+            "FORCE_SCALE must SURVIVE on the frozen copy (field membership, "
+            "2026-07-18 — idempotent on the baked tape, keeps the copy following "
+            "the global harmonic field)"
         )
 
         got = {s: board.track_par_get(VERIFY_TRACK, NOTE_LAYER, INSTR, s)

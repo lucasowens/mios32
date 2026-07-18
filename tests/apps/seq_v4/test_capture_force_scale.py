@@ -1,5 +1,8 @@
 """Freeze faithfulness — a frozen FORCE_SCALE track holds the HEARD pitches and
-plays back with FORCE_SCALE reset (the §9 "bake heard pitches" decision).
+plays back with FORCE_SCALE PRESERVED (2026-07-18: the copy stays a member of
+the global harmonic field; before that, the §9 "bake heard pitches" decision
+also reset the flag, which made captures go harmonically deaf to Scle/Root/Deg
+performance — the bake itself is unchanged, FTS is idempotent on it).
 
 Track 2 (pitch-chain migration, plan 2026-06-10) changed HOW this is achieved
 without changing WHAT these pins assert:
@@ -10,10 +13,11 @@ without changing WHAT these pins assert:
     only reproduces the still-emission-side note limit (gone entirely with the
     Stage-B LIMIT processor + Stage-D bake deletion).
 
-The observable contract is identical either way and is what these pins protect:
-a seeded off-scale note comes back SNAPPED in the frozen copy, an in-scale note
-is unchanged, and FORCE_SCALE is RESET on the copy (the snap lives in the notes,
-immune to later global-key changes).
+The observable contract these pins protect: a seeded off-scale note comes back
+SNAPPED in the frozen copy, an in-scale note is unchanged, and FORCE_SCALE
+SURVIVES on the copy (the snap lives in the notes AND the copy keeps following
+the global field — a later key change re-pitches it deliberately, in step with
+every live track; content under the pinned C-Major key is identical either way).
 
 Key = C Major, pinned via board.global_scale_set (board.reset does not touch the
 global scale). Major snap (root C): C#->D, D#->E, F#->G, A#->B; C/D/E/G unchanged.
@@ -97,10 +101,15 @@ def _setup_force_scale_source(board: Board) -> None:
 
 def _assert_frozen_is_baked(board: Board) -> None:
     """Read the frozen copy (loaded into a fresh group) and assert the heard
-    pitches were baked in and FORCE_SCALE was reset."""
-    assert board.cc_get(VERIFY_TRACK, CC.MODE_FLAGS) & FORCE_SCALE_BIT == 0, (
-        "FORCE_SCALE must be RESET on the frozen copy — the snap is baked into the "
-        "notes, not re-applied live (else a later key change would re-pitch it)"
+    pitches were baked in and FORCE_SCALE SURVIVED (field membership,
+    2026-07-18: the capture freezes the track's own generation, not its
+    membership in the global harmonic field — FTS is idempotent on the baked
+    tape under the same scale, and keeping it lets Scle/Root/Deg performance
+    moves keep bending the copy like every live track)."""
+    assert board.cc_get(VERIFY_TRACK, CC.MODE_FLAGS) & FORCE_SCALE_BIT, (
+        "FORCE_SCALE must SURVIVE on the frozen copy — the copy stays a member "
+        "of the global harmonic field (2026-07-18 decision; the snap is ALSO "
+        "baked into the notes, so re-applying under the same scale is a no-op)"
     )
     for step, (raw, snapped) in SEED_TO_SNAPPED.items():
         v = board.track_par_get(VERIFY_TRACK, NOTE_LAYER, 0, step)
