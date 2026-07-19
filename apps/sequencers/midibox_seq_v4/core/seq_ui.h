@@ -166,6 +166,7 @@ typedef enum {
   SEQ_UI_EDIT_VIEW_TRG = 1,
   SEQ_UI_EDIT_VIEW_LAYERS = 2,
   SEQ_UI_EDIT_VIEW_303 = 3,
+  SEQ_UI_EDIT_VIEW_DRUMS = 4,
   SEQ_UI_EDIT_VIEW_STEPSEL = 8,
 } seq_ui_edit_view_t;
 

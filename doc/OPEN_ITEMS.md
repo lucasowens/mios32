@@ -19,6 +19,7 @@ From the 2026-07-10 whole-fork review (report artifact linked in the session mem
 
 *(all closed — see the Closed section)*
 
+
 ### Pending validation — slicer act 2 + capture-fix batch (2026-07-17/18)
 
 Everything below is BUILT + compiled, flashed incrementally during the session,
@@ -169,6 +170,15 @@ reply-buffer bound needs a `static_assert` · idea: small undo ring (2–3 deep)
 ---
 
 ## Closed (move lines here with a date, don't delete)
+
+- **2026-07-19** | **Kit mode (EDIT view 5) — SHIPPED, by-eye GO same day** ("one of the most
+  useful features we've added yet"): hold EDIT → GP5 on drum tracks = stock step-view LCDs +
+  stock programming, TPD becomes the whole-kit grid (row pulse = armed drum, inverting green
+  playhead tracer, 8-drum window follows selection), datawheel/Up/Down = drum scroll. Two
+  durable fixes en route: LCD bit-7 transfer-flag (chars ≥0x80 never render; in auto-memory)
+  and the promiscuous EDIT-RECORDING learn hook (now note-gesture-only, loopback excluded).
+  UI-grain only → full HIL suite rides the next run as a bystander. Full block: decisions
+  log 2026-07-19.
 
 - **2026-07-18** | **Copies strip Echo/LFO by design** — the "semantics conversation" happened
   (capture-fidelity deep dive, cont. 7): STOPPED freezes are mirror copies, so deterministic

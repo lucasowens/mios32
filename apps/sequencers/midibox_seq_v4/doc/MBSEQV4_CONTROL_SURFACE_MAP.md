@@ -92,7 +92,7 @@ These pick a *dimension* for the B-row; they do **not** navigate pages.
 | Element | What it is |
 |---|---|
 | **LCD-L / LCD-R** | Two 2×40 char panels = logical **2×80**, with **the seam** at col 39/40 (never straddle it). |
-| **TPD** | 8×8 Track Position Display (green/red), play position. |
+| **TPD** | 8×8 Track Position Display (green/red), play position. **[fork]** In EDIT **Kit mode** it becomes the kit grid: steps × drums, selected row pulses, inverting playhead tracer (§3). |
 | **GP LEDs** | tri-colour ring per GP key (`ui_gp_leds`), via BLM8x8. |
 | **BEAT / MEASURE LEDs** | `LED_BEAT` / `LED_MEASURE`. |
 
@@ -199,6 +199,8 @@ Every non-trivial combo. "✓" = shipped/committed.
 | **PHRASE → B-row waypoint** tap | **[fork]** RECALL phrase (whole-organism snapshot) | B-row dispatch (PHRASE sel-view) | ✓ |
 | **PHRASE → B-row waypoint** hold ≥1s | **[fork]** CAPTURE live organism into waypoint | same | ✓ |
 | **SELECT + B-row waypoint** | **[fork]** arm POSTURE-MORPH toward that phrase | same; ride on **datawheel** / GP-bar | ✓ |
+| **EDIT held + GP1–5/8** | edit-view selector (Step/Trg/Layer/303·Par/StepSel); **GP5 = Kit [fork]** (drum tracks) | `seq_ui_edit_view` | ✓ |
+| **KIT mode: datawheel / Up/Down** | **[fork]** scroll drums; LCDs stay stock step view; TPD = kit grid (16-step window × 8-drum window, row pulse = armed drum, inverting column = playhead) | `SEQ_UI_EDIT_VIEW_DRUMS` / `SEQ_TPD_KitGridHandler` | ✓ |
 
 ### Capture page (CAPTURE/Song button) control map ✓
 
@@ -262,6 +264,11 @@ learn behavior (the step is replayed as it now sounds).
 *The stock SELECT-tap learn latch on the EDIT page is REMOVED* **[fork]** — SELECT is
 the play surface's modifier (octave/layout/fold/velocity), and every tap was arming a
 latch that then swallowed the keys. **Hold-a-step is the only learn gesture.**
+
+*Punch-in is a NOTE gesture* **[fork, 2026-07-19]** — the learn hook ignores CC /
+aftertouch / pitchbend chatter, stray note-offs without a punch in progress, and
+bus/loopback pseudo-ports. Before this, any ambient traffic on a record port during a
+step-tap converted the tap into a step-record that overwrote the freshly toggled gate.
 
 ---
 

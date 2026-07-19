@@ -3399,3 +3399,47 @@ push expressiveness.
   defaults change). No suite pin asserts the old defaults (checked); the seed
   path is encoder-level — no harness verb (the Waypoint-pin gap), so this
   stays by-ear + full-suite-as-bystander. Zero-warning build.
+
+**2026-07-19 — Kit mode: the whole-kit drum overview (EDIT view 5)**
+
+- User pull: "see all drum instruments at one time, even if very low fidelity",
+  refined live to LINEAR stacked rows on one shared timeline so rhythm POCKETS
+  (empty columns) read at a glance.
+- Landed shape after 3 same-day hardware iterations: **hold EDIT → GP5 "Kit"**
+  (drum tracks; `SEQ_UI_EDIT_VIEW_DRUMS = 4`, non-drum falls back to Step
+  everywhere). The mode is an OVERLAY, not a screen: the LCDs render the stock
+  step view untouched; the **TPD becomes the kit grid**
+  (`SEQ_TPD_KitGridHandler` overrides the configured TPD mode while active):
+  16-step window × 8-drum window (follows the selected instrument on >8-drum
+  kits), green dot = gate, selected row PULSES at cursor-flash rate, playhead
+  = INVERTING green tracer column (red/orange enrichment on duo-colour TPDs);
+  **datawheel (+Up/Down) = drum scroll**, intercepted ABOVE the datawheel-mode
+  dispatch (which early-returns for every mode except Value — first placement
+  below it was dead code, caught on hardware). GP buttons / encoders keep
+  stock step-view semantics (`view_steps` extended with the DRUMS view).
+- Iteration history (why this shape): v1 = 20×16px runtime-CGRAM radar on the
+  LCDs + block lanes — by-eye NO-GO ("extremely weird"); v2 = TPD grid + LCD
+  lanes — grid GO'd but red-only playhead invisible (green-only TPD suspected;
+  tracer re-cut as green XOR) and lanes showed stale-text garbage; v3 = LCD
+  custom rendering deleted per user ("program like normal, use the little
+  screens as an overview").
+- **Durable bug 1 — LCD buffer bit 7 = transfer flag** (seq_lcd.c): chars
+  ≥0x80 store pre-flagged "already sent" and NEVER render — stale content
+  shows through at those cells (v2 lanes printed ROM 0xFF blocks → fragments
+  of the EDIT overlay's "Generator" remained). Blocks/bars must use custom
+  chars ≤0x7F: VBars char 7 + `SEQ_LCD_PrintVBar`. Memorialized in auto-memory.
+- **Durable bug 2 — promiscuous EDIT-RECORDING learn hook** (symptom: GP taps
+  "instantly go into Edit Recording and don't toggle"): the hold-a-step
+  MIDI-learn accepted ANY package on a record port — CC/aftertouch/pitchbend
+  chatter or a stray NoteOff converted a plain tap into a step-record that
+  overwrote the freshly toggled gate. Hardened: punch-in is a NOTE gesture —
+  note events only, only NoteOn vel>0 arms `midi_learn_mode_used`, releases
+  without a punch in progress are ignored, bus/loopback pseudo-ports excluded.
+  Panel pads/iso keys inject via `SEQ_UI_NotifyMIDIINCallback(DEFAULT, …)`
+  directly and are unaffected.
+- Infra kept: `SEQ_LCD_InitRuntimeSpecialChars` (content-cached runtime-CGRAM
+  upload, seq_lcd.c) stays despite the radar's removal — currently
+  caller-less, the enabling tool for any future band-stack/bitmap LCD idea.
+- Validation: by-eye/by-feel GO same session ("one of the most useful features
+  we've added yet"); zero-warning builds throughout; UI-grain only → full
+  suite rides the next run as a bystander (no harness verb for panel gestures).

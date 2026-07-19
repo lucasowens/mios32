@@ -35,6 +35,7 @@
 
 #include <mios32.h>
 #include <stdarg.h>
+#include <string.h>
 #include "tasks.h"
 
 #include "seq_lcd.h"
@@ -139,6 +140,9 @@ static const u8 charset_drum_symbols_small[64] = {
   0x00, 0x00, 0x00, 0x14, 0x14, 0x00, 0x00, 0x00, // 6
   0x00, 0x00, 0x00, 0x15, 0x15, 0x00, 0x00, 0x00, // 7
 };
+
+// runtime-generated charset (SEQ_LCD_CHARSET_Runtime), e.g. the EDIT kit view radar
+static u8 charset_runtime[64];
 
 static u8 lcd_buffer[LCD_MAX_LINES][LCD_MAX_COLUMNS];
 
@@ -345,6 +349,9 @@ s32 SEQ_LCD_InitSpecialChars(seq_lcd_charset_t charset)
         case SEQ_LCD_CHARSET_DrumSymbolsSmall:
 	  MIOS32_LCD_SpecialCharsInit((u8 *)charset_drum_symbols_small);
 	  break;
+        case SEQ_LCD_CHARSET_Runtime:
+	  MIOS32_LCD_SpecialCharsInit((u8 *)charset_runtime);
+	  break;
         default:
 	  status = -1; // charset doesn't exist
       }
@@ -359,6 +366,34 @@ s32 SEQ_LCD_InitSpecialChars(seq_lcd_charset_t charset)
 
   return status; // no error
 }
+
+/////////////////////////////////////////////////////////////////////////////
+// initialise a runtime-generated character set (8 chars x 8 rows, same 64
+// byte format as the const tables above). Content-compared against the last
+// uploaded set, so callers may invoke this on every LCD update cycle without
+// causing redundant CGRAM transfers.
+// Note: intentionally NOT forwarded to MBSEQ Remote clients (dynamic content)
+/////////////////////////////////////////////////////////////////////////////
+s32 SEQ_LCD_InitRuntimeSpecialChars(const u8 *charset)
+{
+  if( seq_lcd_current_charset == SEQ_LCD_CHARSET_Runtime &&
+      memcmp(charset_runtime, charset, 64) == 0 )
+    return 0; // no change
+
+  memcpy(charset_runtime, charset, 64);
+  seq_lcd_current_charset = SEQ_LCD_CHARSET_Runtime;
+
+  MUTEX_LCD_TAKE;
+  int dev;
+  for(dev=0; dev<LCD_NUM_DEVICES; ++dev) {
+    MIOS32_LCD_DeviceSet(dev);
+    MIOS32_LCD_SpecialCharsInit((u8 *)charset_runtime);
+  }
+  MUTEX_LCD_GIVE;
+
+  return 0; // no error
+}
+
 
 /////////////////////////////////////////////////////////////////////////////
 // re-initialise character set

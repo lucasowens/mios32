@@ -97,6 +97,7 @@ s32 SEQ_UI_EDIT_LED_Handler(u16 *gp_leds)
     case SEQ_UI_EDIT_VIEW_TRG: *gp_leds = (1 << 1); break;
     case SEQ_UI_EDIT_VIEW_LAYERS: *gp_leds = (1 << 2); break;
     case SEQ_UI_EDIT_VIEW_303: *gp_leds = (1 << 3); break;
+    case SEQ_UI_EDIT_VIEW_DRUMS: *gp_leds = (1 << 4); break;
     case SEQ_UI_EDIT_VIEW_STEPSEL: *gp_leds = (1 << 8); break;
     }
   } else {
@@ -175,6 +176,21 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
   if( encoder == SEQ_UI_ENCODER_Datawheel ) {
     u16 num_steps = SEQ_TRG_NumStepsGet(visible_track);
 
+    // Kit view: the datawheel scrolls through the drums (TPD grid highlight
+    // and drum edit screen follow) — overrides the configured datawheel mode
+    // while this view is active; must sit above the mode dispatch, which
+    // returns early for every mode except CHANGE_VALUE
+    if( seq_ui_edit_view == SEQ_UI_EDIT_VIEW_DRUMS &&
+	SEQ_CC_Get(visible_track, SEQ_CC_MIDI_EVENT_MODE) == SEQ_EVENT_MODE_Drum ) {
+      u8 num_drums = SEQ_TRG_NumInstrumentsGet(visible_track);
+      if( num_drums > 16 )
+	num_drums = 16;
+      if( SEQ_UI_Var8_Inc(&ui_selected_instrument, 0, num_drums-1, incrementer) >= 1 )
+	return 1;
+      else
+	return 0;
+    }
+
     switch( seq_ui_edit_datawheel_mode ) {
     case SEQ_UI_EDIT_DATAWHEEL_MODE_SCROLL_CURSOR:
       if( SEQ_UI_Var8_Inc(&ui_selected_step, 0, num_steps-1, incrementer) >= 1 ) {
@@ -239,6 +255,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
       case SEQ_UI_ENCODER_GP2: seq_ui_edit_view = SEQ_UI_EDIT_VIEW_TRG; break;
       case SEQ_UI_ENCODER_GP3: seq_ui_edit_view = SEQ_UI_EDIT_VIEW_LAYERS; break;
       case SEQ_UI_ENCODER_GP4: seq_ui_edit_view = SEQ_UI_EDIT_VIEW_303; break;
+      case SEQ_UI_ENCODER_GP5: seq_ui_edit_view = SEQ_UI_EDIT_VIEW_DRUMS; break;
       case SEQ_UI_ENCODER_GP8: seq_ui_edit_view = SEQ_UI_EDIT_VIEW_STEPSEL; break;
 
       case SEQ_UI_ENCODER_GP9:
@@ -396,7 +413,7 @@ static s32 Encoder_Handler(seq_ui_encoder_t encoder, s32 incrementer)
     }
 
     u8 changed_step;
-    u8 view_steps = seq_ui_edit_view == SEQ_UI_EDIT_VIEW_STEPS || (seq_ui_edit_view == SEQ_UI_EDIT_VIEW_303 && event_mode == SEQ_EVENT_MODE_Drum);
+    u8 view_steps = seq_ui_edit_view == SEQ_UI_EDIT_VIEW_STEPS || seq_ui_edit_view == SEQ_UI_EDIT_VIEW_DRUMS || (seq_ui_edit_view == SEQ_UI_EDIT_VIEW_303 && event_mode == SEQ_EVENT_MODE_Drum);
     if( view_steps ) {
       changed_step = ((encoder == SEQ_UI_ENCODER_Datawheel) ? (ui_selected_step%16) : encoder) + ui_selected_step_view*16;
     } else {
@@ -811,11 +828,13 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
     if( event_mode != SEQ_EVENT_MODE_Drum ) {
       SEQ_LCD_PrintString("Step Trg  Layer 303                ");
     } else {
-      SEQ_LCD_PrintString("Step Trg  Layer Par                ");
+      SEQ_LCD_PrintString("Step Trg  Layer Par  Kit           ");
     }
     SEQ_LCD_PrintString("Step Datawheel:  Record   Random    Track    ");
     SEQ_LCD_CursorSet(0, 1);
-    SEQ_LCD_PrintString("View View View View               Select");
+    SEQ_LCD_PrintString((event_mode == SEQ_EVENT_MODE_Drum) ?
+			"View View View View View          Select" :
+			"View View View View               Select");
     SEQ_LCD_PrintString((char *)seq_ui_edit_datawheel_mode_str[seq_ui_edit_datawheel_mode]);
     SEQ_LCD_PrintString("  Config  Generator Generator ");
     return 0; // no error
@@ -832,6 +851,10 @@ s32 SEQ_UI_EDIT_LCD_Handler(u8 high_prio, seq_ui_edit_mode_t edit_mode)
     return 0; // no error
   }
 
+
+  // note: SEQ_UI_EDIT_VIEW_DRUMS ("Kit") intentionally has no own LCD layout —
+  // it renders the normal step view; the whole-kit overview + selected-row
+  // highlight live on the TPD (SEQ_TPD_KitGridHandler) while it's active
 
   if( event_mode != SEQ_EVENT_MODE_Drum && seq_ui_edit_view == SEQ_UI_EDIT_VIEW_303 ) {
 
@@ -1338,6 +1361,20 @@ static s32 LCD_Handler(u8 high_prio)
 static s32 MIDI_IN_Handler(mios32_midi_port_t port, mios32_midi_package_t p)
 {
   if( midi_learn_mode == MIDI_LEARN_MODE_ON ) {
+    // Hold-a-step punch-in is a NOTE gesture. Ambient traffic on the record
+    // port must never convert a plain step-tap into a recording that
+    // overwrites the freshly toggled step:
+    // - bus/loopback pseudo-ports are self-generated, not a performance
+    // - CCs / aftertouch / pitchbend from a controller don't punch in
+    // - a stray NoteOff (or NoteOn vel 0) without a punch in progress is
+    //   ignored; with one in progress it passes through to finish it
+    if( (port & 0xf0) == 0xf0 )
+      return 0; // continue normal processing
+    if( p.type != NoteOn && p.type != NoteOff )
+      return 0;
+    if( !(p.type == NoteOn && p.velocity > 0) && !midi_learn_mode_used )
+      return 0;
+
     u8 visible_track = SEQ_UI_VisibleTrackGet();
 
     // quick & dirty for evaluation purposes

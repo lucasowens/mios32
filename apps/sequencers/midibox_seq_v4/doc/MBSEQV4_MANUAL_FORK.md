@@ -899,6 +899,32 @@ layouts are in-key by construction and ignore it.
 
 ---
 
+## Kit Mode — the whole-kit drum overview (hold EDIT → GP5)
+
+*(drum tracks only; on other tracks GP5 simply behaves like Step view)*
+
+Kit mode answers one question at a glance: **where is every drum hitting, and
+where are the pockets?** It changes nothing about how you program — it's an
+overlay, not a different screen:
+
+- **The LCDs stay the normal EDIT step view.** GP buttons toggle steps, GP
+  encoders edit velocity/params, hold-a-step + pad/key punches in — all stock.
+- **The TPD becomes the kit grid.** Columns = the current 16-step window
+  (follows STEPVIEW paging and follow mode), rows = drums, a lit LED = a gate.
+  The **selected drum's row pulses**, and the **playhead sweeps as an
+  inverting column** — empty cells light up, hits wink dark — so pockets read
+  as gaps the sweep visibly falls through. Kits with more than 8 drums scroll:
+  the 8-row window follows your selection.
+- **The datawheel scrolls through the drums** (Up/Down buttons too). The
+  wheel's configured function (cursor / step view / …) is suspended while Kit
+  mode is active and returns the moment you leave.
+
+The full loop: pad or wheel to pick a row, GP row to program it, TPD to watch
+the whole kit react. Leave with hold EDIT → GP1 (Step view); the TPD returns
+to its configured display.
+
+---
+
 ## Cross-Cutting Notes
 
 ### Where files live

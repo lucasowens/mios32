@@ -28,6 +28,8 @@
 #include "seq_bpm.h"
 #include "seq_led.h"
 #include "seq_cc.h"
+#include "seq_trg.h"
+#include "seq_layer.h"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -64,6 +66,7 @@ static u16 tpd_logo[8] = { // prints "SEQ+" by default; note: horizontal is mirr
 // Local Prototypes
 /////////////////////////////////////////////////////////////////////////////
 static s32 SEQ_TPD_ScrollTextHandler(s8 static_offset);
+static s32 SEQ_TPD_KitGridHandler(void);
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -204,6 +207,11 @@ s32 SEQ_TPD_Handler(void)
     return 0; // no error
   }
 
+  // fork: while the EDIT Kit view is active on a drum track, the TPD becomes
+  // a steps x drums grid and overrides the configured mode
+  if( SEQ_TPD_KitGridHandler() )
+    return 0; // no error
+
   // display pattern depending on mode
   switch( tpd_mode ) {
   case SEQ_TPD_Mode_MeterAndPos:
@@ -336,6 +344,90 @@ s32 SEQ_TPD_Handler(void)
   }
   
   return 0; // no error
+}
+
+
+/////////////////////////////////////////////////////////////////////////////
+// fork: EDIT Kit view companion — whole-kit grid on the TPD.
+// x = 16 steps of the selected step view (left half = steps 1-8, same
+// bit-per-column convention as the stock non-rotated modes), y = 8-drum
+// window that follows the selected instrument for kits with more drums.
+// Green = gate; selected drum = row pulse (plus orange gates on duo-colour
+// TPDs); playhead = inverting green tracer column (plus red on duo-colour).
+// Returns 1 when active (Kit view on a drum track).
+/////////////////////////////////////////////////////////////////////////////
+static s32 SEQ_TPD_KitGridHandler(void)
+{
+  if( ui_page != SEQ_UI_PAGE_EDIT || seq_ui_edit_view != SEQ_UI_EDIT_VIEW_DRUMS )
+    return 0;
+
+  u8 visible_track = SEQ_UI_VisibleTrackGet();
+  if( SEQ_CC_Get(visible_track, SEQ_CC_MIDI_EVENT_MODE) != SEQ_EVENT_MODE_Drum )
+    return 0;
+
+  u8 num_drums = SEQ_TRG_NumInstrumentsGet(visible_track);
+  if( num_drums > 16 )
+    num_drums = 16;
+  if( !num_drums )
+    num_drums = 1;
+
+  u8 sel_drum = (ui_selected_instrument < num_drums) ? ui_selected_instrument : 0;
+
+  // 8-drum window follows the selection (kept centered where possible)
+  u8 drum_offset = 0;
+  if( num_drums > 8 ) {
+    if( sel_drum > 3 )
+      drum_offset = sel_drum - 3;
+    if( drum_offset > num_drums - 8 )
+      drum_offset = num_drums - 8;
+  }
+
+  u16 step_offset = 16*ui_selected_step_view;
+
+  // clear display
+  memset(tpd_display, 0, sizeof(tpd_display));
+
+  u8 y;
+  for(y=0; y<TPD_NUM_ROWS; ++y) {
+    u8 drum = drum_offset + y;
+    if( drum >= num_drums )
+      break;
+
+    u16 gates = (SEQ_TRG_Get8(visible_track, (step_offset >> 3) + 1, 0, drum) << 8) |
+                 SEQ_TRG_Get8(visible_track, (step_offset >> 3) + 0, 0, drum);
+
+    tpd_display[0][TPD_GREEN][y] = gates & 0xff;
+    tpd_display[1][TPD_GREEN][y] = gates >> 8;
+
+    if( drum == sel_drum ) { // selected drum: gates in orange
+      tpd_display[0][TPD_RED][y] = gates & 0xff;
+      tpd_display[1][TPD_RED][y] = gates >> 8;
+    }
+  }
+
+  // selected drum: row pulse at cursor-flash rate — readable on green-only
+  // TPDs and on rows that have no gates yet (orange alone can't show those)
+  if( ui_cursor_flash && sel_drum >= drum_offset && sel_drum < drum_offset+TPD_NUM_ROWS ) {
+    u8 y_sel = sel_drum - drum_offset;
+    tpd_display[0][TPD_GREEN][y_sel] = 0xff;
+    tpd_display[1][TPD_GREEN][y_sel] = 0xff;
+  }
+
+  // playhead tracer: inverting green column (visible on green-only TPDs:
+  // empty cells light up, gates wink dark) + red overlay for duo-colour
+  // units (orange sweep with gates popping red beneath it)
+  int played_step = SEQ_BPM_IsRunning() ? seq_core_trk[visible_track].step : -1;
+  if( played_step >= (int)step_offset && played_step < (int)(step_offset+16) ) {
+    u8 x = played_step - step_offset;
+    u8 half = x >> 3;
+    u8 mask = 1 << (x & 7);
+    for(y=0; y<TPD_NUM_ROWS; ++y) {
+      tpd_display[half][TPD_GREEN][y] ^= mask;
+      tpd_display[half][TPD_RED][y] |= mask;
+    }
+  }
+
+  return 1; // grid rendered, configured mode overridden
 }
 
 

@@ -34,7 +34,8 @@ typedef enum {
   SEQ_LCD_CHARSET_HBars,
   SEQ_LCD_CHARSET_DrumSymbolsBig,
   SEQ_LCD_CHARSET_DrumSymbolsMedium,
-  SEQ_LCD_CHARSET_DrumSymbolsSmall
+  SEQ_LCD_CHARSET_DrumSymbolsSmall,
+  SEQ_LCD_CHARSET_Runtime // content uploaded via SEQ_LCD_InitRuntimeSpecialChars, never forwarded to remote
 } seq_lcd_charset_t;
 
 
@@ -43,6 +44,7 @@ typedef enum {
 /////////////////////////////////////////////////////////////////////////////
 
 extern s32 SEQ_LCD_Init(u32 mode);
+extern s32 SEQ_LCD_InitRuntimeSpecialChars(const u8 *charset);
 
 extern s32 SEQ_LCD_Clear(void);
 extern s32 SEQ_LCD_PrintChar(char c);
