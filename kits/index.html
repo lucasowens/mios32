@@ -1,0 +1,1596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEQ Editor</title>
+<!--
+  MIDIbox SEQ V4+ web editor (fork, 2026-10-18): kits, kit library, track settings.
+  Talks to the SEQ over Web MIDI (Chrome / Edge; SysEx permission) with the
+  CMD_KIT / CMD_EDITOR verbs in core/seq_testctrl.c — the firmware must be built with
+  TESTCTRL=1 (the default). Open this file directly, or from the emulator at
+  http://127.0.0.1:8080/editor. Add ?demo to try it without a SEQ.
+-->
+<style>
+  :root {
+    --bg: #15161a; --panel: #1f2125; --panel2: #24272c; --edge: #33363c; --edge2: #4a5160;
+    --text: #d8dbe0; --dim: #8a9099; --faint: #5f656e;
+    --accent: #6ab0ff; --g: #3ddc63; --r: #ff5a3c; --y: #ffd23c;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+               font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+           padding: 8px 16px; background: rgba(21,22,26,.94); backdrop-filter: blur(6px); border-bottom: 1px solid var(--edge); }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
+  header .spacer { flex: 1; }
+  .stat { color: var(--dim); white-space: nowrap; }
+  .stat b { color: var(--text); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #444; margin-right: 6px; vertical-align: middle; }
+  .dot.ok { background: var(--g); } .dot.bad { background: var(--r); } .dot.demo { background: var(--y); }
+
+  .btn { height: 26px; padding: 0 10px; border-radius: 5px; border: 1px solid var(--edge); background: #23262b; color: var(--text);
+         cursor: pointer; white-space: nowrap; }
+  .btn:hover { border-color: var(--edge2); background: #2a2e34; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary { border-color: #2f5c8c; background: #20364f; }
+  .btn.primary:hover { background: #26425f; }
+  .btn.danger:hover { border-color: #7a3328; background: #3a2220; }
+  select.btn { padding-right: 4px; }
+  .field { height: 26px; padding: 0 8px; border-radius: 5px; border: 1px solid var(--edge); background: #121316; }
+
+  .tabs { display: inline-flex; border: 1px solid var(--edge); border-radius: 6px; overflow: hidden; }
+  .tabs button { all: unset; cursor: pointer; padding: 4px 12px; color: var(--dim); }
+  .tabs button[aria-selected="true"] { background: #2c3036; color: var(--text); }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--dim); user-select: none; white-space: nowrap; }
+  .switch input { appearance: none; width: 30px; height: 16px; border-radius: 8px; background: #3a3d44; position: relative; margin: 0; cursor: pointer; }
+  .switch input::after { content: ""; position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #cfd3d9; transition: left .15s; }
+  .switch input:checked { background: var(--g); }
+  .switch input:checked::after { left: 16px; }
+
+  main { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; padding: 16px; max-width: 1280px; margin: 0 auto; }
+  aside { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  section.pane { background: var(--panel); border: 1px solid var(--edge); border-radius: 9px; padding: 14px 16px 16px; min-width: 0; }
+  .label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
+
+  /* ---- track list */
+  .grp { background: var(--panel); border: 1px solid var(--edge); border-radius: 9px; overflow: hidden; }
+  .grp h3 { margin: 0; padding: 7px 10px; display: flex; gap: 8px; align-items: baseline; font-size: 11px; font-weight: 600;
+            color: var(--dim); background: #1a1c20; border-bottom: 1px solid var(--edge); }
+  .grp h3 .pat { color: var(--text); font-family: var(--mono); }
+  .grp h3 .pname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+  .grp h3 .unsaved { color: var(--y); }
+  .trk { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 42px 44px 1fr; gap: 6px; align-items: center;
+         width: 100%; padding: 6px 10px; cursor: pointer; border-top: 1px solid #26292e; }
+  .trk:first-of-type { border-top: 0; }
+  .trk:hover { background: #262a30; }
+  .trk[aria-current="true"] { background: #23344a; box-shadow: inset 3px 0 0 var(--accent); }
+  .trk:disabled { cursor: default; color: var(--faint); }
+  .trk:disabled:hover { background: none; }
+  .trk:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .trk .tn { font-weight: 600; }
+  .trk .mode { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+  .trk .mode.drum { color: var(--g); }
+  .trk .peek { font-family: var(--mono); font-size: 11px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .trk .here { color: var(--accent); font-size: 8px; margin-left: 4px; vertical-align: 2px; }
+
+  /* ---- kit header + tools */
+  .kithead { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .kithead .title { font-size: 22px; font-weight: 600; line-height: 1; }
+  .kithead .meta { color: var(--dim); }
+  .kithead .spacer { flex: 1; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--edge); color: var(--dim); white-space: nowrap; }
+  .pill.warn { color: var(--y); border-color: #6b5a22; background: #2c2716; }
+  .pill.ok { color: var(--g); border-color: #245c35; background: #16281c; }
+  .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 0; border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); }
+  .tools .sep { width: 1px; height: 20px; background: var(--edge); margin: 0 4px; }
+  .tools input.field { width: 104px; font-family: var(--mono); text-transform: uppercase; }
+  .hints { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 0; color: var(--dim); font-size: 12px; }
+  .hints p { margin: 0; }
+  .hints p::before { content: "i"; display: inline-grid; place-items: center; width: 14px; height: 14px; margin-right: 7px; border-radius: 50%;
+                     border: 1px solid var(--faint); font-size: 9px; font-weight: 700; font-style: italic; vertical-align: 1px; }
+
+  /* ---- the drum table */
+  .drums { margin-top: 12px; }
+  .row { display: grid; grid-template-columns: 22px 38px 88px 118px minmax(120px, 1fr) minmax(120px, 1fr) 52px; gap: 10px;
+         align-items: center; padding: 5px 6px; border-radius: 6px; }
+  .row.head { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; font-weight: 600; padding-bottom: 6px; }
+  .row:not(.head):hover { background: #25282d; }
+  .row:not(.head):focus-within { background: #232a33; }
+  .row .idx { font-family: var(--mono); color: var(--dim); text-align: center; }
+  .pad { width: 38px; height: 28px; border-radius: 5px; border: 1px solid var(--edge); background: #2a2d33; color: var(--dim); cursor: pointer;
+         touch-action: none; display: grid; place-items: center; padding: 0; }
+  .pad svg { width: 11px; height: 11px; fill: currentColor; }
+  .pad:hover { color: var(--text); border-color: var(--edge2); }
+  .pad.down { background: var(--g); color: #0d2414; border-color: var(--g); }
+  input.name { width: 88px; height: 28px; padding: 0 8px; border-radius: 5px; border: 1px solid var(--edge); background: #121316;
+               font-family: var(--mono); font-size: 14px; letter-spacing: .06em; white-space: pre; }
+  input.name:focus { border-color: var(--accent); }
+  input.name::-webkit-calendar-picker-indicator { display: none !important; } /* preset suggestions still pop while typing */
+  input.num { width: 52px; height: 28px; padding: 0 4px 0 8px; border-radius: 5px; border: 1px solid var(--edge); background: #121316;
+              font-variant-numeric: tabular-nums; }
+  .note { display: flex; gap: 8px; align-items: center; }
+  .note .nn { font-family: var(--mono); color: var(--dim); min-width: 3ch; }
+  .vel { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .vel input[type=range] { flex: 1; min-width: 50px; accent-color: var(--accent); }
+  .unused { opacity: .45; }
+  .chk { display: grid; place-items: center; }
+  .chk input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .flash { animation: flash .6s ease-out; }
+  @keyframes flash { from { background: #2b4a2f; } to { background: transparent; } }
+  .empty { color: var(--dim); padding: 28px 8px; text-align: center; }
+  .empty b { color: var(--text); }
+
+  /* ---- paste panel */
+  .paste { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .paste textarea { width: 100%; min-height: 110px; padding: 8px; border-radius: 6px; border: 1px solid var(--edge); background: #121316;
+                    font-family: var(--mono); resize: vertical; }
+  .paste .row2 { display: flex; gap: 8px; align-items: center; color: var(--dim); font-size: 12px; }
+  .paste .row2 .spacer { flex: 1; }
+
+  /* ---- track settings */
+  .tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; margin-top: 12px; }
+  .card { background: var(--panel2); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 12px 12px; min-width: 0; }
+  .card h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--dim); font-weight: 600; }
+  .card .note-line { color: var(--faint); font-size: 11px; margin: -4px 0 8px; }
+  .fld { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: center; min-height: 32px; }
+  .fld > label, .fld > .lbl { color: var(--dim); }
+  .fld .ctl { display: flex; gap: 8px; align-items: center; min-width: 0; flex-wrap: wrap; }
+  .fld select, .fld input.num { height: 28px; border-radius: 5px; border: 1px solid var(--edge); background: #121316; }
+  .fld select { padding: 0 6px; max-width: 100%; }
+  .fld .ro { font-family: var(--mono); color: var(--text); }
+  .fld .unit { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .fld .bits { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .fld .bits label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; color: var(--text); }
+  .fld .bits input { accent-color: var(--accent); }
+  .fld.off { opacity: .45; }
+  .fld.saved .ctl { animation: flash .6s ease-out; border-radius: 5px; }
+
+  /* ---- library */
+  .files { background: var(--panel); border: 1px solid var(--edge); border-radius: 9px; overflow: hidden; }
+  .files .fhead { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: #1a1c20; border-bottom: 1px solid var(--edge); }
+  .files .fhead .label { flex: 1; }
+  .file { all: unset; box-sizing: border-box; display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 10px; cursor: pointer;
+          border-top: 1px solid #26292e; font-family: var(--mono); }
+  .file:first-of-type { border-top: 0; }
+  .file:hover { background: #262a30; }
+  .file[aria-current="true"] { background: #23344a; box-shadow: inset 3px 0 0 var(--accent); }
+  .file .mode { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+  .file .mode.drum { color: var(--g); }
+  .file:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .libnote { color: var(--dim); font-size: 12px; padding: 0 2px; }
+
+  /* ---- no-MIDI / toast */
+  .notice { max-width: 640px; margin: 48px auto; padding: 22px 24px; background: var(--panel); border: 1px solid var(--edge); border-radius: 9px; }
+  .notice h2 { margin: 0 0 8px; font-size: 17px; }
+  .notice p { color: var(--dim); margin: 8px 0; }
+  .notice code { font-family: var(--mono); color: var(--text); }
+  .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
+  .toast { padding: 9px 12px; border-radius: 7px; background: #23262b; border: 1px solid var(--edge2); box-shadow: 0 8px 30px rgba(0,0,0,.45);
+           max-width: 360px; animation: tin .15s ease-out; }
+  .toast.err { border-color: #7a3328; background: #2e1b19; }
+  .toast.ok { border-color: #245c35; }
+  @keyframes tin { from { transform: translateY(6px); opacity: 0; } }
+
+  @media (max-width: 860px) {
+    main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
+    aside.tracklist { flex-direction: row; overflow-x: auto; }
+    aside.tracklist .grp { min-width: 210px; }
+    .row { grid-template-columns: 20px 38px 80px 104px minmax(0, 1fr) 40px; }
+    .row > .acc { grid-column: 5; }
+    .row.head > .acc { display: none; }
+    .row > .vel.acc { grid-row: 2; grid-column: 5; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>SEQ editor</h1>
+  <span class="stat"><span id="dot" class="dot"></span><span id="connTxt">starting…</span></span>
+  <select id="port" class="btn" aria-label="MIDI port" hidden></select>
+  <span class="stat" id="sessionStat" hidden>Session <b id="session"></b></span>
+  <span class="spacer"></span>
+  <label class="switch" title="Play a drum when you change its note or velocity"><input type="checkbox" id="audEdits" role="switch"> Audition edits</label>
+  <div class="tabs" role="tablist" aria-label="View">
+    <button role="tab" id="tabKits" aria-selected="true" aria-controls="work">Kits</button>
+    <button role="tab" id="tabLib" aria-selected="false" aria-controls="lib">Kit library</button>
+    <button role="tab" id="tabTrack" aria-selected="false" aria-controls="work">Track</button>
+  </div>
+</header>
+
+<div id="nomidi" class="notice" hidden>
+  <h2 id="nmTitle">No SEQ found</h2>
+  <p id="nmText"></p>
+  <p>The SEQ answers on any of its MIDI ports, as long as its firmware was built with <code>TESTCTRL=1</code> (the default).</p>
+  <p><button class="btn" id="retry">Look again</button> <button class="btn" id="demoBtn">Try the demo device</button></p>
+</div>
+
+<main id="work" role="tabpanel" hidden>
+  <aside class="tracklist" id="tracks" aria-label="Tracks"></aside>
+  <section class="pane" id="kitPane" aria-live="off"></section>
+  <section class="pane" id="trackPane" aria-live="off" hidden></section>
+</main>
+
+<main id="lib" role="tabpanel" aria-labelledby="tabLib" hidden>
+  <aside>
+    <div class="files">
+      <div class="fhead"><span class="label">/PRESETS</span><button class="btn" id="libRefresh" title="Read the folder again">Refresh</button></div>
+      <div id="fileList"></div>
+    </div>
+    <p class="libnote">Kits are track presets (<code>.V4T</code>). Loading one replaces a drum track's names, notes and velocities; its steps stay.</p>
+  </aside>
+  <section class="pane" id="libPane"></section>
+</main>
+
+<datalist id="presetNames"></datalist>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+// ===================================================================== protocol
+// CMD_KIT in core/seq_testctrl.c: F0 00 00 7E 4F 54 33 <sub> args.. F7,
+// reply F0 00 00 7E 4F 54 33 <sub> <status> data.. F7
+const HDR = [0xF0, 0x00, 0x00, 0x7E, 0x4F, 0x54], CMD_KIT = 0x33;
+const SUB = { INFO: 0x00, GET: 0x01, NAME: 0x02, FIELD: 0x03, AUDITION: 0x04, SAVE_NOW: 0x05, PRESETS: 0x06,
+              LIST: 0x10, OPEN: 0x11, STAGE: 0x12, COMMIT: 0x13, LOAD: 0x14, SAVE: 0x15, RENAME: 0x16, DELETE: 0x17 };
+const ST = { OK: 1, PAYLOAD: 2, TRACK: 3, NOTDRUM: 4, RANGE: 5, SD: 6, EXISTS: 7, FORMAT: 8, NOFILE: 9, NAME: 10 };
+const ST_MSG = { 2: 'the SEQ rejected a malformed request', 3: 'no such track', 4: 'not a drum track',
+                 5: 'value out of range', 6: 'SD card error', 7: 'a kit with that name already exists',
+                 8: 'this preset has no kit lines to edit', 9: 'file not found',
+                 10: 'kit names are 1–8 characters: A–Z, 0–9, _ and -' };
+const MODES = ['Note', 'Chord', 'CC', 'Drum', 'Comb'];
+const EV_DRUM = 3;
+const FIELD = { NOTE: 0, VEL_N: 1, VEL_A: 2, CHORD: 3 };
+const LETTERS = 'ABCDEFGHIJKLMNOP';
+const SD_TIMEOUT = 8000;
+const CMD_EDITOR = 0x34, CMD_CC_GET = 0x50, CMD_CC_SET = 0x51;
+
+class KitError extends Error {
+  constructor(st) { super(ST_MSG[st] || `status ${st}`); this.st = st; }
+}
+
+// One request in flight at a time; a reply matches by sub-op.
+class MidiLink {
+  constructor(out, ins) {
+    this.out = out; this.ins = ins; this.waiter = null; this.chain = Promise.resolve();
+    this.label = out.name;
+    for (const i of ins) i.onmidimessage = e => this.onMsg(e.data);
+  }
+  onMsg(d) {
+    if (d.length < 8 || d[d.length - 1] !== 0xF7) return;
+    for (let i = 0; i < 6; i++) if (d[i] !== HDR[i]) return;
+    const w = this.waiter;
+    if (!w || d[6] !== w.cmd || (w.sub != null && d[7] !== w.sub)) return;
+    this.waiter = null; clearTimeout(w.timer);
+    w.resolve(d.slice(7, d.length - 1));
+  }
+  send(cmd, sub, bytes, timeout) {
+    const run = () => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.waiter = null; reject(new Error('timeout')); }, timeout);
+      this.waiter = { cmd, sub, resolve, timer };
+      try { this.out.send([...HDR, cmd, ...bytes, 0xF7]); }
+      catch (e) { clearTimeout(timer); this.waiter = null; reject(e); }
+    });
+    const p = this.chain.then(run, run);
+    this.chain = p.catch(() => {});
+    return p;
+  }
+  request(sub, args = [], timeout = 1500) { return this.send(CMD_KIT, sub, [sub, ...args], timeout); }
+  // testctrl PING (0x01): any SEQ with test control answers it, kit verb or not
+  ping(timeout = 700) { return this.send(0x01, null, [], timeout); }
+  close() { for (const i of this.ins) i.onmidimessage = null; }
+}
+
+const enc = s => Array.from(s, c => { const x = c.charCodeAt(0); return (x >= 0x20 && x <= 0x7e) ? x : 0x20; });
+const dec = a => String.fromCharCode(...a);
+const name5 = s => enc(s.padEnd(5).slice(0, 5));
+const name8 = s => enc(s.toUpperCase().padEnd(8).slice(0, 8));
+const ok = p => { if (p[1] !== ST.OK) throw new KitError(p[1]); return p; };
+
+let link = null;
+const req = (sub, args, t) => {
+  if (!link) return Promise.reject(new Error('not connected'));
+  return link.request(sub, args, t);
+};
+// any other testctrl command (sub = null for the ones without a sub-op)
+const reqCmd = (cmd, sub, bytes, t = 1500) => {
+  if (!link) return Promise.reject(new Error('not connected'));
+  return link.send(cmd, sub, bytes, t);
+};
+function unpack7(b) {
+  const out = [];
+  for (let i = 0; i < b.length; ) {
+    const msbs = b[i++], n = Math.min(7, b.length - i);
+    for (let j = 0; j < n; j++) out.push(b[i + j] | (((msbs >> j) & 1) << 7));
+    i += n;
+  }
+  return out;
+}
+
+const api = {
+  async info() {
+    const d = ok(await req(SUB.INFO)).subarray(2);
+    const slen = d[18];
+    const groups = [];
+    let p = 19 + slen;
+    for (let g = 0; g < 4; g++, p += 22)
+      groups.push({ bank: d[p], pattern: d[p + 1], name: dec(d.subarray(p + 2, p + 22)) });
+    return { visible: d[0], dirty: d[1], modes: Array.from(d.subarray(2, 18)), session: dec(d.subarray(19, 19 + slen)), groups };
+  },
+  async get(t) {
+    const p = await req(SUB.GET, [t]);
+    if (p[1] === ST.NOTDRUM) return { track: t, mode: p[3], drum: false };
+    const d = ok(p).subarray(2);
+    const drums = [];
+    for (let i = 0; i < 16; i++) {
+      const r = d.subarray(12 + 9 * i, 21 + 9 * i);
+      drums.push({ name: dec(r.subarray(0, 5)), note: r[5], vel_n: r[6], vel_a: r[7], chord: !!(r[8] & 1) });
+    }
+    return { track: t, mode: d[1], drum: true, num: d[2], port: (d[3] << 7) | d[4], chn: d[5], flags: d[6],
+             portName: dec(d.subarray(7, 11)).trim(), dirty: !!d[11], drums };
+  },
+  async name(t, drum, s) { ok(await req(SUB.NAME, [t, drum, ...name5(s)])); },
+  async field(t, drum, f, v) { return ok(await req(SUB.FIELD, [t, drum, f, v & 0x7f]))[5]; },
+  async audition(t, drum, vel, on) { ok(await req(SUB.AUDITION, [t, drum, vel & 0x7f, on ? 1 : 0])); },
+  async saveNow(t) { const p = ok(await req(SUB.SAVE_NOW, [t], SD_TIMEOUT)); return { group: p[2], wrote: !!p[3] }; },
+  async presets() {
+    const out = [];
+    for (let off = 0; ; ) {
+      const p = ok(await req(SUB.PRESETS, [off], SD_TIMEOUT)), total = p[2], n = p[4];
+      for (let i = 0; i < n; i++) out.push({ name: dec(p.subarray(5 + 6 * i, 10 + 6 * i)), note: p[10 + 6 * i] });
+      off += n;
+      if (!n || off >= total) return out;
+    }
+  },
+  async list() {
+    const out = [];
+    for (let off = 0; ; ) {
+      const p = ok(await req(SUB.LIST, [off], SD_TIMEOUT)), total = p[2], n = p[4];
+      for (let i = 0; i < n; i++) {
+        const e = p.subarray(5 + 9 * i, 14 + 9 * i);
+        out.push({ name: dec(e.subarray(0, 8)).trim(), mode: e[8] });
+      }
+      off += n;
+      if (!n || off >= total) return out;
+    }
+  },
+  async open(name) {
+    const p = await req(SUB.OPEN, name8(name), SD_TIMEOUT);
+    if (p[1] === ST.NOTDRUM) return { name, mode: p[2], drum: false };
+    if (p[1] !== ST.OK && p[1] !== ST.FORMAT) throw new KitError(p[1]);
+    const drums = [];
+    for (let i = 0; i < 16; i++) {
+      const r = p.subarray(4 + 8 * i, 12 + 8 * i);
+      drums.push({ name: dec(r.subarray(0, 5)), note: r[5], vel_n: r[6], vel_a: r[7] });
+    }
+    return { name, mode: p[2], drum: true, num: Math.min(16, p[3] || 16), editable: p[1] === ST.OK, drums };
+  },
+  async stage(i, d) { ok(await req(SUB.STAGE, [i, ...name5(d.name), d.note & 0x7f, d.vel_n & 0x7f, d.vel_a & 0x7f])); },
+  async commit() { ok(await req(SUB.COMMIT, [], SD_TIMEOUT)); },
+  async load(t, name) { ok(await req(SUB.LOAD, [t, ...name8(name)], SD_TIMEOUT)); },
+  async save(t, name, overwrite) {
+    const p = await req(SUB.SAVE, [t, overwrite ? 1 : 0, ...name8(name)], SD_TIMEOUT);
+    if (p[1] === ST.EXISTS) return false;
+    ok(p); return true;
+  },
+  async rename(a, b) { ok(await req(SUB.RENAME, [...name8(a), ...name8(b)], SD_TIMEOUT)); },
+  async del(name) { ok(await req(SUB.DELETE, name8(name), SD_TIMEOUT)); },
+
+  // ---- track settings (CMD_EDITOR / CMD_CC_GET / CMD_CC_SET)
+  async ccs(t, first = 0x30, count = 0x80) {   // -> Map(cc -> value), unmapped CCs left out
+    const p = await reqCmd(CMD_EDITOR, 0x00, [0x00, t, first & 0x7f, (first >> 7) & 1, count]);
+    ok(p);
+    const n = p[5], nv = Math.ceil(n / 7), valid = p.subarray(6, 6 + nv), vals = unpack7(p.subarray(6 + nv));
+    const base = p[3] | (p[4] << 7), out = new Map();
+    for (let i = 0; i < n; i++) if ((valid[(i / 7) | 0] >> (i % 7)) & 1) out.set(base + i, vals[i]);
+    return out;
+  },
+  async ports(kind = 0) {                      // the panel's port list: 0 = out, 1 = in, 2 = clock
+    const out = [];
+    for (let off = 0; ; ) {
+      const p = ok(await reqCmd(CMD_EDITOR, 0x01, [0x01, kind, off])), total = p[3], n = p[5];
+      for (let i = 0; i < n; i++) {
+        const e = p.subarray(6 + 7 * i, 13 + 7 * i);
+        out.push({ port: (e[0] << 7) | e[1], avail: !!e[2], name: dec(e.subarray(3, 7)).trim() });
+      }
+      off += n;
+      if (!n || off >= total) return out;
+    }
+  },
+  async ccGet(t, cc) {                         // [track, cc_hi, cc_lo, v_hi, v_lo, status]
+    const p = await reqCmd(CMD_CC_GET, null, [t, (cc >> 7) & 1, cc & 0x7f]);
+    if (p[5] !== 1) throw new Error(`can't read setting ${cc}`);
+    return (p[3] << 7) | p[4];
+  },
+  async ccSet(t, cc, v) {                      // through SEQ_CC_Set; returns what was STORED
+    const p = await reqCmd(CMD_CC_SET, null, [t, (cc >> 7) & 1, cc & 0x7f, (v >> 7) & 1, v & 0x7f]);
+    if (p[5] !== 1) throw new Error(`the SEQ refused setting ${cc}`);
+    return api.ccGet(t, cc);
+  },
+};
+
+// ===================================================================== demo device
+// Same bytes as the firmware, so the whole page runs without a SEQ (?demo).
+class DemoLink {
+  constructor() {
+    this.label = 'demo device';
+    const kit = (names, base, vel, acc) => ({ names: names.map(n => n.padEnd(5).slice(0, 5)),
+      notes: names.map((_, i) => base[i] ?? 36 + i), vn: names.map(() => vel), va: names.map(() => acc), scope: 0xffff });
+    const n909 = [' BD  ', ' SD  ', ' LT  ', ' MT  ', ' HT  ', ' RS  ', ' CP  ', ' CH  ', ' OH  ', ' CR  ', ' RD  ', 'Shkr ', 'Clav ', ' CB  ', 'Smp1 ', 'Smp2 '];
+    const notes909 = [36, 38, 41, 45, 48, 37, 39, 42, 46, 49, 51, 70, 75, 56, 60, 62];
+    this.tracks = Array.from({ length: 16 }, (_, t) => ({ mode: 0 }));
+    Object.assign(this.tracks[0], { mode: 3, num: 16, port: 0x20, chn: 9, flags: 1, ...kit(n909, notes909, 100, 127) });
+    Object.assign(this.tracks[4], { mode: 3, num: 8, port: 0x21, chn: 9, flags: 6,
+      ...kit(['Kick ', 'Snare', 'Clap ', 'Hat C', 'Hat O', 'Perc1', 'Perc2', 'Tom  '], [36, 40, 39, 42, 46, 67, 68, 47], 96, 120) });
+    this.tracks[8].mode = 3; Object.assign(this.tracks[8], { num: 16, port: 0x10, chn: 0, flags: 1,
+      ...kit(Array.from({ length: 16 }, (_, i) => `Pad${i + 1}`), [], 100, 127) });
+    this.tracks[1].mode = 0; this.tracks[2].mode = 1; this.tracks[12].mode = 2;
+    this.dirty = 0; this.visible = 0;
+    this.groups = [[0, 0, 'Warehouse groove'], [0, 9, 'Bass + chords'], [1, 1, 'Pad kit'], [0, 3, '']]
+      .map(([b, p, n]) => ({ bank: b, pattern: p, name: n.padEnd(20) }));
+    this.presets = [' BD  ', ' SD  ', ' CH  ', ' PH  ', ' OH  ', ' MA  ', ' CP  ', ' CY  ', ' LT  ', ' MT  ', ' HT  ', ' RS  ', ' CB  ', 'Smp1 ', 'Smp2 ', 'Smp3 ']
+      .map((n, i) => [n, [36, 38, 42, 44, 46, 49, 39, 51, 41, 45, 48, 37, 56, 60, 62, 64][i]]);
+    this.files = new Map([
+      ['TR909', { mode: 3, ...kit(n909, notes909, 100, 127), num: 16 }],
+      ['LINN', { mode: 3, ...kit(['Kick ', 'Snare', 'Rim  ', 'Clap ', 'HH Cl', 'HH Op', 'Cowbl', 'Tamb ', 'Cabas', 'Conga', 'Tom 1', 'Tom 2', 'Tom 3', 'Crash', 'Ride ', 'Shkr '], [], 100, 127), num: 16 }],
+      ['BASSLINE', { mode: 0 }],
+    ]);
+    this.stage = null;
+  }
+  request(sub, a = []) {
+    return new Promise(res => setTimeout(() => res(Uint8Array.from(this.handle(sub, a))), sub >= 0x10 ? 60 : 8));
+  }
+  // everything that isn't CMD_KIT: track settings, ports, ping
+  send(cmd, sub, b) {
+    if (cmd === CMD_KIT) return this.request(sub, b.slice(1));
+    return new Promise(res => setTimeout(() => res(Uint8Array.from(this.handleCmd(cmd, b))), 8));
+  }
+  ccArr(t) {
+    if (!this.cc) {
+      this.cc = this.tracks.map(k => {
+        const a = new Uint8Array(256);
+        for (const f of TRACK_FIELDS) if (f.def != null) a[f.cc] = (a[f.cc] & ~(f.mask ?? 0xff)) | ((f.def << (f.shift || 0)) & (f.mask ?? 0xff));
+        a[CC.EVENT_MODE] = k.mode;
+        return a;
+      });
+    }
+    return this.cc[t];
+  }
+  handleCmd(cmd, b) {
+    if (cmd === 0x01) return [...enc('SEQv4')];
+    if (cmd === CMD_CC_GET || cmd === CMD_CC_SET) {
+      const [t, hi, lo, vh, vl] = b, cc = (hi << 7) | lo, a = this.ccArr(t);
+      if (cmd === CMD_CC_SET) {
+        a[cc] = ((vh << 7) | vl) & 0xff;
+        if (cc === CC.MIDI_PORT) this.tracks[t].port = a[cc];
+        if (cc === CC.MIDI_CHANNEL) this.tracks[t].chn = a[cc];
+        this.dirty |= 1 << (t >> 2);
+      }
+      return [t, hi, lo, a[cc] >> 7, a[cc] & 0x7f, 1];
+    }
+    if (cmd === CMD_EDITOR && b[0] === 0x00) {
+      const [, t, flo, fhi, n] = b, first = flo | (fhi << 7), a = this.ccArr(t);
+      const valid = new Array(Math.ceil(n / 7)).fill(0), vals = [];
+      for (let i = 0; i < n; i++) { if (TRACK_CC_SET.has(first + i)) valid[(i / 7) | 0] |= 1 << (i % 7); vals.push(a[first + i]); }
+      const packed = [];
+      for (let i = 0; i < vals.length; i += 7) {
+        const g = vals.slice(i, i + 7);
+        packed.push(g.reduce((m, v, j) => m | (((v >> 7) & 1) << j), 0), ...g.map(v => v & 0x7f));
+      }
+      return [0x00, ST.OK, t, flo, fhi, n, ...valid, ...packed];
+    }
+    if (cmd === CMD_EDITOR && b[0] === 0x01) {
+      const list = [[0x00, 'Def.'], [0x10, 'USB1'], [0x11, 'USB2'], [0x12, 'USB3'], [0x13, 'USB4'], [0x20, 'OUT1'], [0x21, 'OUT2'],
+                    [0x22, 'OUT3'], [0x23, 'OUT4'], [0xf0, 'Bus1'], [0xf1, 'Bus2'], [0xf2, 'Bus3'], [0xf3, 'Bus4']];
+      const off = b[2], items = list.slice(off, off + 24), out = [0x01, ST.OK, b[1], list.length, off, items.length];
+      for (const [pt, nm] of items) out.push(pt >> 7, pt & 0x7f, 1, ...enc(nm.padEnd(4)));
+      return out;
+    }
+    return [b[0] ?? 0, ST.PAYLOAD];
+  }
+  handle(sub, a) {
+    const T = this.tracks, r = st => [sub, st];
+    const nm8 = b => { const s = dec(b).replace(/[\s\0]+$/, '').toUpperCase(); return /^[A-Z0-9_-]{1,8}$/.test(s) ? s : null; };
+    const drumOk = (t, d) => t >= 16 ? ST.TRACK : T[t].mode !== EV_DRUM ? ST.NOTDRUM : d >= T[t].num ? ST.RANGE : ST.OK;
+    const mark = t => { this.dirty |= 1 << (t >> 2); };
+    switch (sub) {
+      case SUB.INFO: {
+        const out = [sub, ST.OK, this.visible, this.dirty, ...T.map(t => t.mode), 4, ...enc('DEMO')];
+        for (const g of this.groups) out.push(g.bank, g.pattern, ...enc(g.name));
+        return out;
+      }
+      case SUB.GET: {
+        const t = a[0], k = T[t];
+        if (!k) return [sub, ST.TRACK, t];
+        if (k.mode !== EV_DRUM) return [sub, ST.NOTDRUM, t, k.mode];
+        const pn = { 0x10: 'USB1', 0x20: 'OUT1', 0x21: 'OUT2' }[k.port] || 'OUT3';
+        const out = [sub, ST.OK, t, k.mode, k.num, k.port >> 7, k.port & 0x7f, k.chn, k.flags, ...enc(pn), (this.dirty >> (t >> 2)) & 1];
+        for (let d = 0; d < 16; d++)
+          out.push(...enc(k.names[d] || '     '), k.notes[d] ?? 0, k.vn[d] ?? 0, k.va[d] ?? 0, (k.scope >> d) & 1);
+        return out;
+      }
+      case SUB.NAME: { const st = drumOk(a[0], a[1]); if (st === ST.OK) { T[a[0]].names[a[1]] = dec(a.slice(2, 7)); mark(a[0]); } return [sub, st, a[0], a[1]]; }
+      case SUB.FIELD: {
+        const [t, d, f, v] = a; let st = drumOk(t, d), now = 0;
+        if (st === ST.OK) {
+          const k = T[t];
+          if (f <= 2) { [k.notes, k.vn, k.va][f][d] = v; now = v; }
+          else if (f === 3) { k.scope = v ? k.scope | (1 << d) : k.scope & ~(1 << d); now = v ? 1 : 0; }
+          else st = ST.RANGE;
+          if (st === ST.OK) mark(t);
+        }
+        return [sub, st, t, d, f, now];
+      }
+      case SUB.AUDITION: return [sub, drumOk(a[0], a[1]), a[0], a[1]];
+      case SUB.SAVE_NOW: { const g = a[0] >> 2, w = (this.dirty >> g) & 1; this.dirty &= ~(1 << g); return [sub, ST.OK, g, w]; }
+      case SUB.PRESETS: {
+        const off = a[0], items = this.presets.slice(off, off + 16), out = [sub, ST.OK, this.presets.length, off, items.length];
+        for (const [n, note] of items) out.push(...enc(n), note);
+        return out;
+      }
+      case SUB.LIST: {
+        const all = [...this.files.entries()].sort(), off = a[0], items = all.slice(off, off + 16);
+        const out = [sub, ST.OK, all.length, off, items.length];
+        for (const [n, f] of items) out.push(...enc(n.padEnd(8)), f.mode);
+        return out;
+      }
+      case SUB.OPEN: {
+        const n = nm8(a); if (!n) return r(ST.NAME);
+        const f = this.files.get(n); if (!f) return r(ST.NOFILE);
+        if (f.mode !== EV_DRUM) { this.stage = null; return [sub, ST.NOTDRUM, f.mode, 0]; }
+        this.stage = { n, names: [...f.names], notes: [...f.notes], vn: [...f.vn], va: [...f.va] };
+        const out = [sub, ST.OK, f.mode, f.num];
+        for (let d = 0; d < 16; d++) out.push(...enc(f.names[d] || '     '), f.notes[d] ?? 0, f.vn[d] ?? 0, f.va[d] ?? 0);
+        return out;
+      }
+      case SUB.STAGE: {
+        if (!this.stage) return [sub, ST.NOFILE, a[0]];
+        const d = a[0], s = this.stage;
+        s.names[d] = dec(a.slice(1, 6)); s.notes[d] = a[6]; s.vn[d] = a[7]; s.va[d] = a[8];
+        return [sub, ST.OK, d];
+      }
+      case SUB.COMMIT: {
+        const s = this.stage; if (!s || !this.files.has(s.n)) return r(ST.NOFILE);
+        Object.assign(this.files.get(s.n), { names: [...s.names], notes: [...s.notes], vn: [...s.vn], va: [...s.va] });
+        return r(ST.OK);
+      }
+      case SUB.LOAD: {
+        const t = a[0]; if (T[t].mode !== EV_DRUM) return [sub, ST.NOTDRUM, t];
+        const n = nm8(a.slice(1)); if (!n) return [sub, ST.NAME, t];
+        const f = this.files.get(n); if (!f) return [sub, ST.NOFILE, t];
+        if (f.mode !== EV_DRUM) return [sub, ST.NOTDRUM, t];
+        Object.assign(T[t], { names: [...f.names], notes: [...f.notes], vn: [...f.vn], va: [...f.va] }); mark(t);
+        return [sub, ST.OK, t];
+      }
+      case SUB.SAVE: {
+        const t = a[0], n = nm8(a.slice(2)); if (T[t].mode !== EV_DRUM) return [sub, ST.NOTDRUM, t];
+        if (!n) return [sub, ST.NAME, t];
+        if (!a[1] && this.files.has(n)) return [sub, ST.EXISTS, t];
+        const k = T[t];
+        this.files.set(n, { mode: 3, num: k.num, names: [...k.names], notes: [...k.notes], vn: [...k.vn], va: [...k.va] });
+        if (this.stage && this.stage.n === n) this.stage = null;
+        return [sub, ST.OK, t];
+      }
+      case SUB.RENAME: {
+        const s = nm8(a.slice(0, 8)), d = nm8(a.slice(8, 16)); if (!s || !d) return r(ST.NAME);
+        if (!this.files.has(s)) return r(ST.NOFILE);
+        if (s !== d && this.files.has(d)) return r(ST.EXISTS);
+        const f = this.files.get(s); this.files.delete(s); this.files.set(d, f);
+        if (this.stage && this.stage.n === s) this.stage.n = d;
+        return r(ST.OK);
+      }
+      case SUB.DELETE: {
+        const n = nm8(a); if (!n) return r(ST.NAME);
+        if (!this.files.delete(n)) return r(ST.NOFILE);
+        if (this.stage && this.stage.n === n) this.stage = null;
+        return r(ST.OK);
+      }
+    }
+    return r(ST.PAYLOAD);
+  }
+  close() {}
+}
+
+// ===================================================================== state + helpers
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('kitEditor.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('kitEditor.' + k, JSON.stringify(v)); } catch { /* private window */ } },
+};
+
+const S = {
+  access: null, demo: false,
+  info: null,                 // last INFO
+  kits: new Map(),            // track -> GET result (drum tracks)
+  sel: null,                  // selected live track
+  presets: [],
+  files: null,                // library listing
+  lib: null,                  // { name, orig, kit, changed:Set } — the open library kit
+  tab: ({ live: 'kits' })[store.get('tab', 'kits')] || store.get('tab', 'kits'),
+  tsel: store.get('ttrack', 0),  // the Track tab's track (any event mode)
+  ccs: null,                     // its settings: Map(cc -> value)
+  tpending: new Set(),           // CCs being written (a poll never overwrites them)
+  ports: null,                   // the panel's out-port list
+  pending: new Set(),         // "drum:field" writes not yet confirmed (never overwrite them from a poll)
+};
+
+function noteName(n) { // SEQ_LCD_PrintNote: lower-case letter = octave -2 / -1
+  if (!n) return '---';
+  const tab = ['c-', 'c#', 'd-', 'd#', 'e-', 'f-', 'f#', 'g-', 'g#', 'a-', 'a#', 'b-'];
+  const o = Math.floor(n / 12), s = tab[n % 12];
+  return (o >= 2 ? s[0].toUpperCase() : s[0]) + s[1] + (o === 0 ? '2' : o === 1 ? '1' : String(o - 2));
+}
+function patLabel(g) {
+  const p = g.pattern, letters = (p >> 6) & 1 ? 'abcdefgh' : 'ABCDEFGH';
+  return `${g.bank + 1}:${letters[(p >> 3) & 7]}${(p & 7) + 1}`;
+}
+const clamp = v => Math.max(0, Math.min(127, v | 0));
+const sanitizeName = s => s.replace(/[^\x20-\x7e]/g, '').slice(0, 5);
+
+function toast(msg, kind = 'ok', ms = 3200) {
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.textContent = msg;
+  $('toasts').append(el);
+  setTimeout(() => el.remove(), ms);
+}
+function fail(e, what) {
+  console.error(what, e);
+  if (e && e.message === 'timeout') { setConn('bad', 'No answer from the SEQ'); toast(`${what}: the SEQ didn't answer`, 'err'); }
+  else toast(`${what}: ${e && e.message ? e.message : e}`, 'err', 4500);
+}
+function setConn(kind, text) {
+  $('dot').className = 'dot ' + (kind || '');
+  $('connTxt').textContent = text;
+}
+
+// ===================================================================== connection
+async function probe(out) {
+  const same = [...S.access.inputs.values()].filter(i => i.name === out.name);
+  const ins = same.length ? same : [...S.access.inputs.values()];
+  const l = new MidiLink(out, ins);
+  try { await l.request(SUB.INFO, [], 700); return l; }
+  catch { /* no kit verb — is it a SEQ at all? */ }
+  try { await l.ping(); S.oldFirmware = S.oldFirmware || out.name; } catch { /* not a SEQ, or no test control */ }
+  l.close();
+  return null;
+}
+const OLD_FW_TEXT = name => `${name} answers, but its firmware is older than the kit editor. ` +
+  'Flash the latest project.hex (2026-10-18 or later), then look again.';
+
+// Which ports to try. ?port=<part of a name> narrows it; served by the emulator
+// (/kits on loopback) it only ever tries the emulator's own ports, so a real SEQ
+// on the same computer is never touched by accident.
+const PREFER = (new URLSearchParams(location.search).get('port') ||
+  (/^(127\.0\.0\.1|localhost)$/.test(location.hostname) && location.pathname.startsWith('/kits') ? 'emu' : '')).toLowerCase();
+
+function rankOutputs() {
+  const saved = store.get('port', null);
+  const score = o => {
+    const n = o.name, low = n.toLowerCase(), p1 = /port 1\b/i.test(n) ? 0 : 0.5;
+    if (PREFER && !low.includes(PREFER)) return 9;
+    if (n === saved) return 0;
+    if (PREFER) return 1 + p1;
+    return /seq|midibox/i.test(n) ? 2 + p1 : 9;
+  };
+  return [...S.access.outputs.values()].map(o => [score(o), o]).filter(([s]) => s < 9)
+    .sort((a, b) => a[0] - b[0]).map(([, o]) => o);
+}
+
+function fillPorts(current) {
+  const sel = $('port');
+  sel.innerHTML = (current ? '' : '<option value="" selected disabled>Choose the SEQ’s port…</option>') +
+    [...S.access.outputs.values()].map(o =>
+      `<option value="${esc(o.id)}"${current && o.id === current.id ? ' selected' : ''}>${esc(o.name)}</option>`).join('');
+  sel.hidden = !S.access.outputs.size;
+}
+
+async function autoConnect() {
+  setConn('', 'looking for the SEQ…');
+  $('nomidi').hidden = true;
+  S.oldFirmware = null;
+  for (const out of rankOutputs()) {
+    const l = await probe(out);
+    if (l) return attach(l, out);
+  }
+  fillPorts(null);
+  if (S.oldFirmware) { showNoSeq('This SEQ needs newer firmware', OLD_FW_TEXT(S.oldFirmware)); return; }
+  showNoSeq('No SEQ answered', !S.access.outputs.size
+    ? 'No MIDI ports at all. Connect the SEQ over USB (or start the emulator), then look again.'
+    : PREFER ? `No port matching “${PREFER}” answered. Pick one from the menu above.`
+    : 'None of the MIDI ports that look like a SEQ answered. Its firmware needs the kit editor verb (2026-10-18 or later). Pick its port from the menu above, or check the cable.');
+}
+
+async function connectTo(id) {
+  const out = S.access.outputs.get(id);
+  if (!out) return;
+  if (link) link.close();
+  link = null;
+  setConn('', `trying ${out.name}…`);
+  S.oldFirmware = null;
+  const l = await probe(out);
+  if (l) attach(l, out);
+  else if (S.oldFirmware) { setConn('bad', `${out.name}: firmware too old`); showNoSeq('This SEQ needs newer firmware', OLD_FW_TEXT(out.name)); }
+  else { setConn('bad', `${out.name} didn't answer`); toast(`${out.name} didn't answer as a SEQ`, 'err'); }
+}
+
+async function attach(l, out) {
+  if (link && link !== l) link.close();
+  link = l;
+  if (out) { store.set('port', out.name); fillPorts(out); }
+  setConn(S.demo ? 'demo' : 'ok', S.demo ? 'Demo device (nothing is sent)' : `Connected · ${l.label}`);
+  $('nomidi').hidden = true;
+  showTab(S.tab);
+  try {
+    await refreshAll(true);
+    api.presets().then(p => { S.presets = p; fillPresets(); }).catch(() => {});
+    if (S.tab === 'lib') await loadFiles();
+  } catch (e) { fail(e, 'Reading the SEQ'); }
+}
+
+function showNoSeq(title, text) {
+  setConn('bad', title);
+  $('nmTitle').textContent = title;
+  $('nmText').textContent = text;
+  $('nomidi').hidden = false;
+  $('work').hidden = $('lib').hidden = true;
+}
+
+async function startMidi() {
+  if (!navigator.requestMIDIAccess) {
+    showNoSeq('This browser has no Web MIDI', 'Open this page in Chrome or Edge — Safari and Firefox (without an add-on) can’t talk to MIDI devices.');
+    return;
+  }
+  try {
+    S.access = await navigator.requestMIDIAccess({ sysex: true });
+  } catch (e) {
+    showNoSeq('MIDI access was blocked', 'The kit editor needs MIDI with SysEx. Allow it in the browser’s site settings, then look again.');
+    return;
+  }
+  let replug = null;
+  S.access.onstatechange = () => {
+    if (S.demo) return;
+    fillPorts(link && link.out);
+    if (!link) { clearTimeout(replug); replug = setTimeout(autoConnect, 800); } // a SEQ plugged in while waiting
+  };
+  await autoConnect();
+}
+
+function startDemo() {
+  S.demo = true;
+  if (link) link.close();
+  $('port').hidden = true;
+  attach(new DemoLink(), null);
+}
+
+// ===================================================================== reading the SEQ
+async function refreshAll(first) {
+  const info = await api.info();
+  const prev = S.info;
+  S.info = info;
+  $('session').textContent = info.session;
+  $('sessionStat').hidden = false;
+  const kits = new Map();
+  for (let t = 0; t < 16; t++) if (info.modes[t] === EV_DRUM) kits.set(t, await api.get(t));
+  S.kits = kits;
+  if (first || S.sel == null || !kits.has(S.sel)) {
+    const want = store.get('track', null);
+    S.sel = kits.has(info.visible) ? info.visible : kits.has(want) ? want : (kits.keys().next().value ?? null);
+  }
+  renderTracks();
+  renderKit();
+  return prev;
+}
+
+// polling: picks up panel-side edits, pattern switches and the dirty flags
+let polling = false;
+async function poll() {
+  if (polling || !link || document.hidden || S.tab === 'lib') return;
+  polling = true;
+  try {
+    const prev = S.info;
+    const info = await api.info();
+    S.info = info;
+    const changed = !prev || prev.modes.join() !== info.modes.join() ||
+      JSON.stringify(prev.groups) !== JSON.stringify(info.groups) || prev.session !== info.session;
+    if (changed) {
+      await refreshAll(false);
+      if (S.tab === 'track') await loadTrack(S.tsel);
+    } else {
+      if (S.tab === 'kits' && S.sel != null && S.kits.has(S.sel)) {
+        const k = await api.get(S.sel);
+        if (k.drum) mergeKit(k); else await refreshAll(false);
+      }
+      if (S.tab === 'track' && S.ccs) mergeTrack(S.tsel, await api.ccs(S.tsel));
+      renderTracks();
+      renderKitMeta();
+      renderTrackMeta();
+    }
+    if (!S.demo) setConn('ok', `Connected · ${link.label}`);
+  } catch (e) {
+    if (e.message === 'timeout') setConn('bad', 'No answer from the SEQ — retrying');
+  } finally { polling = false; }
+}
+setInterval(poll, 2000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+// ===================================================================== live: track list
+function drumPeek(k) {
+  return k.drums.slice(0, k.num).map(d => d.name.trim()).filter(Boolean).slice(0, 6).join(' ');
+}
+
+function renderTracks() {
+  const el = $('tracks'), info = S.info;
+  if (!info) { el.innerHTML = ''; return; }
+  let h = '';
+  for (let g = 0; g < 4; g++) {
+    const grp = info.groups[g], dirty = (info.dirty >> g) & 1;
+    h += `<div class="grp"><h3><span>G${g + 1}</span><span class="pat">${esc(patLabel(grp))}</span>` +
+         `<span class="pname" title="${esc(grp.name.trim())}">${esc(grp.name.trim())}</span>` +
+         (dirty ? '<span class="unsaved" title="Edited since the pattern was last written">●</span>' : '') + '</h3>';
+    for (let t = g * 4; t < g * 4 + 4; t++) {
+      const k = S.kits.get(t), mode = info.modes[t];
+      const here = info.visible === t ? '<span class="here" title="The track selected on the SEQ">●</span>' : '';
+      const pickable = S.tab === 'track' || k, cur = S.tab === 'track' ? S.tsel : S.sel;
+      h += `<button class="trk" data-t="${t}" ${pickable ? '' : 'disabled title="Not a drum track"'} aria-current="${cur === t}">` +
+           `<span class="tn">T${t + 1}${here}</span><span class="mode ${k ? 'drum' : ''}">${esc(MODES[mode] || '?')}</span>` +
+           `<span class="peek">${k ? esc(drumPeek(k)) : ''}</span></button>`;
+    }
+    h += '</div>';
+  }
+  el.innerHTML = h;
+}
+
+$('tracks').addEventListener('click', e => {
+  const b = e.target.closest('.trk');
+  if (!b || b.disabled) return;
+  if (S.tab === 'track') selectTrackTab(+b.dataset.t);
+  else selectTrack(+b.dataset.t);
+});
+
+function selectTrack(t) {
+  if (S.sel === t) return;
+  S.sel = t;
+  store.set('track', t);
+  S.pending.clear();
+  renderTracks();
+  renderKit();
+}
+
+// ===================================================================== live: the kit
+const PLAY_ICON = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1l7 4-7 4z"/></svg>';
+
+function renderKit() {
+  const pane = $('kitPane'), k = S.kits.get(S.sel);
+  if (!S.info) { pane.innerHTML = ''; return; }
+  if (!k) {
+    pane.innerHTML = `<div class="empty"><b>No drum tracks in the loaded patterns.</b><br>` +
+      `Set a track's event mode to Drum on the SEQ (Track Event page) — it shows up here.</div>`;
+    return;
+  }
+  const kitOptions = (S.files || []).filter(f => f.mode === EV_DRUM)
+    .map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join('');
+  let rows = `<div class="row head"><span>#</span><span></span><span>Name</span><span>Note</span>` +
+             `<span>Velocity</span><span class="acc">Accent</span><span title="In ChordMask's scope">Chord</span></div>`;
+  for (let d = 0; d < k.num; d++) {
+    const L = LETTERS[d];
+    rows += `<div class="row" data-d="${d}">` +
+      `<span class="idx">${L}</span>` +
+      `<button class="pad" data-act="pad" aria-label="Play drum ${L}" title="Hold to play · Shift = accent velocity">${PLAY_ICON}</button>` +
+      `<input class="name" data-f="name" maxlength="5" spellcheck="false" autocomplete="off" list="presetNames" aria-label="Drum ${L} name">` +
+      `<span class="note"><input class="num" type="number" min="0" max="127" data-f="0" aria-label="Drum ${L} note"><span class="nn"></span></span>` +
+      `<span class="vel"><input class="num" type="number" min="0" max="127" data-f="1" aria-label="Drum ${L} velocity">` +
+        `<input type="range" min="0" max="127" data-f="1" tabindex="-1" aria-hidden="true"></span>` +
+      `<span class="vel acc"><input class="num" type="number" min="0" max="127" data-f="2" aria-label="Drum ${L} accent velocity">` +
+        `<input type="range" min="0" max="127" data-f="2" tabindex="-1" aria-hidden="true"></span>` +
+      `<span class="chk"><input type="checkbox" data-f="3" aria-label="Drum ${L} in ChordMask scope"></span></div>`;
+  }
+  pane.innerHTML =
+    `<div class="kithead"><span class="title">T${k.track + 1}</span><span class="meta" id="kMeta"></span><span class="spacer"></span>` +
+      `<span class="pill" id="kDirty"></span>` +
+      `<button class="btn primary" id="saveNow" title="Write this group's pattern to the SD card now (otherwise it's written on the next pattern switch)">Save to pattern</button></div>` +
+    `<div class="tools">` +
+      `<button class="btn" id="pasteBtn" title="Rename every drum at once">Paste names…</button>` +
+      `<button class="btn" id="copyBtn">Copy names</button><span class="sep"></span>` +
+      `<select class="btn" id="loadSel" aria-label="Kit to load">${kitOptions || '<option value="">no kits yet</option>'}</select>` +
+      `<button class="btn" id="loadBtn" ${kitOptions ? '' : 'disabled'} title="Replace names, notes and velocities with a saved kit (steps stay)">Load kit</button><span class="sep"></span>` +
+      `<input class="field" id="saveName" maxlength="8" placeholder="KITNAME" aria-label="Kit file name" spellcheck="false" autocomplete="off">` +
+      `<button class="btn" id="saveAsBtn" title="Save this track as /PRESETS/NAME.V4T">Save as kit</button></div>` +
+    `<div class="paste" id="pastePanel" hidden><textarea id="pasteText" spellcheck="false" ` +
+      `placeholder="One name per line (or comma separated), from drum A down. Up to 5 characters each."></textarea>` +
+      `<div class="row2"><span>Blank lines keep a drum's name.</span><span class="spacer"></span>` +
+      `<button class="btn" id="pasteCancel">Cancel</button><button class="btn primary" id="pasteApply">Rename</button></div></div>` +
+    `<div class="hints" id="hints"></div>` +
+    `<div class="drums" id="drums" aria-label="Drums">${rows}</div>`;
+  if (S.files == null) loadFiles(true);
+  renderKitMeta();
+  fillKitValues(true);
+}
+
+function renderKitMeta() {
+  const k = S.kits.get(S.sel);
+  if (!k || !$('kMeta')) return;
+  const g = k.track >> 2, grp = S.info.groups[g];
+  $('kMeta').textContent = `G${g + 1} · ${patLabel(grp)} · ${k.portName} ch ${k.chn + 1} · ${k.num} drums`;
+  const dirty = (S.info.dirty >> g) & 1;
+  const pill = $('kDirty');
+  pill.className = 'pill ' + (dirty ? 'warn' : 'ok');
+  pill.textContent = dirty ? 'Unsaved — written on the next pattern switch' : 'Saved in the pattern';
+  $('saveNow').disabled = !dirty;
+  const hints = [];
+  if (k.flags & 2) hints.push('This kit has a Velocity layer, so every step sets its own velocity — the Velocity column isn’t used.');
+  if (!(k.flags & 1)) hints.push('No Accent trigger layer on this kit, so the Accent column isn’t used.');
+  if (k.flags & 4) hints.push('This kit has a Note layer: a step that carries its own note plays that instead of the drum’s note.');
+  $('hints').innerHTML = hints.map(h => `<p>${esc(h)}</p>`).join('');
+  document.querySelectorAll('#drums .vel:not(.acc), #drums .row.head > span:nth-child(5)')
+    .forEach(e => e.classList.toggle('unused', !!(k.flags & 2)));
+  document.querySelectorAll('#drums .vel.acc, #drums .row.head > .acc')
+    .forEach(e => e.classList.toggle('unused', !(k.flags & 1)));
+}
+
+// write the cached values into the inputs (skipping what's being edited)
+function fillKitValues(all) {
+  const k = S.kits.get(S.sel);
+  if (!k) return;
+  const active = document.activeElement;
+  document.querySelectorAll('#drums .row[data-d]').forEach(row => {
+    const d = +row.dataset.d, v = k.drums[d];
+    for (const inp of row.querySelectorAll('[data-f]')) {
+      const f = inp.dataset.f;
+      if (!all && (inp === active || S.pending.has(`${d}:${f}`))) continue;
+      if (f === 'name') inp.value = v.name.trimEnd();
+      else if (f === '3') inp.checked = v.chord;
+      else inp.value = [v.note, v.vel_n, v.vel_a][+f];
+    }
+    row.querySelector('.nn').textContent = noteName(v.note);
+  });
+}
+
+function mergeKit(k) {
+  const old = S.kits.get(k.track);
+  S.kits.set(k.track, k);
+  if (!old || old.num !== k.num) { renderKit(); return; }
+  // keep pending writes authoritative in the cache too
+  for (const key of S.pending) {
+    const [d, f] = key.split(':');
+    if (f === 'name') k.drums[d].name = old.drums[d].name;
+    else if (f === '3') k.drums[d].chord = old.drums[d].chord;
+    else k.drums[d][['note', 'vel_n', 'vel_a'][+f]] = old.drums[d][['note', 'vel_n', 'vel_a'][+f]];
+  }
+  fillKitValues(false);
+}
+
+function markDirtyLocal(t) {
+  if (S.info) S.info.dirty |= 1 << (t >> 2);
+  const k = S.kits.get(t);
+  if (k) k.dirty = true;
+  renderKitMeta();
+  renderTracks();
+}
+
+function flashRow(d) {
+  const row = document.querySelector(`#drums .row[data-d="${d}"]`);
+  if (!row) return;
+  row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+}
+
+// ---- names
+async function commitName(inp) {
+  const t = S.sel, k = S.kits.get(t), d = +inp.closest('.row').dataset.d;
+  const v = sanitizeName(inp.value).padEnd(5);
+  if (!k || v === k.drums[d].name.padEnd(5)) return;
+  const key = `${d}:name`;
+  S.pending.add(key);
+  try {
+    await api.name(t, d, v);
+    k.drums[d].name = v;
+    markDirtyLocal(t);
+    flashRow(d);
+  } catch (e) { fail(e, `Renaming drum ${LETTERS[d]}`); inp.value = k.drums[d].name.trimEnd(); }
+  finally { S.pending.delete(key); }
+}
+
+// ---- numeric fields (debounced while dragging / spinning)
+const timers = new Map();
+function scheduleField(d, f, v) {
+  const key = `${d}:${f}`, t = S.sel;
+  S.pending.add(key);
+  clearTimeout(timers.get(key));
+  timers.set(key, setTimeout(async () => {
+    timers.delete(key);
+    const k = S.kits.get(t);
+    try {
+      const now = await api.field(t, d, f, v);
+      if (k) { k.drums[d][['note', 'vel_n', 'vel_a'][f]] = now; markDirtyLocal(t); }
+      if ($('audEdits').checked && t === S.sel) hit(d, f === FIELD.VEL_A);
+    } catch (e) { fail(e, `Setting drum ${LETTERS[d]}`); }
+    finally { if (!timers.has(key)) S.pending.delete(key); if (t === S.sel) fillKitValues(false); }
+  }, 90));
+}
+
+async function setChord(d, on) {
+  const t = S.sel, k = S.kits.get(t);
+  try {
+    const now = await api.field(t, d, FIELD.CHORD, on ? 1 : 0);
+    if (k) { k.drums[d].chord = !!now; markDirtyLocal(t); }
+  } catch (e) { fail(e, `Chord scope of drum ${LETTERS[d]}`); }
+}
+
+// ---- audition
+function velFor(k, d, accent) {
+  const v = accent ? k.drums[d].vel_a : k.drums[d].vel_n;
+  return v || 100;
+}
+function hit(d, accent) {
+  const t = S.sel, k = S.kits.get(t);
+  if (!k) return;
+  api.audition(t, d, velFor(k, d, accent), true)
+    .then(() => new Promise(r => setTimeout(r, 160)))
+    .then(() => api.audition(t, d, 0, false))
+    .catch(e => fail(e, 'Audition'));
+}
+const held = new Map(); // pad element -> {t, d}
+function padDown(pad, accent) {
+  if (held.has(pad)) return;
+  const t = S.sel, k = S.kits.get(t), d = +pad.closest('.row').dataset.d;
+  if (!k) return;
+  held.set(pad, { t, d });
+  pad.classList.add('down');
+  api.audition(t, d, velFor(k, d, accent), true).catch(e => fail(e, 'Audition'));
+}
+function padUp(pad) {
+  const h = held.get(pad);
+  if (!h) return;
+  held.delete(pad);
+  pad.classList.remove('down');
+  api.audition(h.t, h.d, 0, false).catch(() => {});
+}
+function releaseAllPads() { for (const pad of [...held.keys()]) padUp(pad); }
+window.addEventListener('blur', releaseAllPads);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAllPads(); });
+
+// ---- events on the kit pane (delegated: the pane re-renders per track)
+const pane = $('kitPane');
+pane.addEventListener('input', e => {
+  const inp = e.target, f = inp.dataset.f;
+  if (f == null || !inp.closest('.row[data-d]')) return;
+  const row = inp.closest('.row'), d = +row.dataset.d;
+  if (f === 'name') {
+    const s = sanitizeName(inp.value);
+    if (s !== inp.value) inp.value = s;
+    return;
+  }
+  if (f === '3') return;
+  if (inp.value === '') return;
+  const v = clamp(+inp.value);
+  row.querySelectorAll(`[data-f="${f}"]`).forEach(x => { if (x !== inp) x.value = v; });
+  if (f === '0') row.querySelector('.nn').textContent = noteName(v);
+  scheduleField(d, +f, v);
+});
+pane.addEventListener('change', e => {
+  const inp = e.target, f = inp.dataset.f;
+  if (f == null || !inp.closest('.row[data-d]')) return;
+  const d = +inp.closest('.row').dataset.d;
+  if (f === 'name') commitName(inp);
+  else if (f === '3') setChord(d, inp.checked);
+  else if (inp.value === '') fillKitValues(true);   // cleared + left: back to the kit's value
+  else if (+inp.value !== clamp(+inp.value)) { inp.value = clamp(+inp.value); inp.dispatchEvent(new Event('input', { bubbles: true })); }
+});
+pane.addEventListener('keydown', e => {
+  const inp = e.target;
+  if (inp.dataset && inp.dataset.f === 'name') {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitName(inp);
+      const row = inp.closest('.row');
+      const next = e.shiftKey ? row.previousElementSibling : row.nextElementSibling;
+      const ni = next && next.querySelector('input.name');
+      if (ni) { ni.focus(); ni.select(); } else inp.blur();
+    } else if (e.key === 'Escape') {
+      const k = S.kits.get(S.sel), d = +inp.closest('.row').dataset.d;
+      if (k) inp.value = k.drums[d].name.trimEnd();
+      inp.blur();
+    }
+  } else if (inp.classList && inp.classList.contains('pad') && (e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+    e.preventDefault(); padDown(inp, e.shiftKey);
+  }
+});
+pane.addEventListener('keyup', e => {
+  if (e.target.classList && e.target.classList.contains('pad') && (e.key === ' ' || e.key === 'Enter')) padUp(e.target);
+});
+pane.addEventListener('pointerdown', e => {
+  const pad = e.target.closest('.pad');
+  if (!pad) return;
+  e.preventDefault();
+  pad.setPointerCapture(e.pointerId);
+  padDown(pad, e.shiftKey);
+});
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'])
+  pane.addEventListener(ev, e => { const pad = e.target.closest && e.target.closest('.pad'); if (pad) padUp(pad); });
+
+pane.addEventListener('click', async e => {
+  const id = e.target.id;
+  const t = S.sel, k = S.kits.get(t);
+  if (!k) return;
+  if (id === 'saveNow') {
+    try {
+      const r = await api.saveNow(t);
+      S.info.dirty &= ~(1 << r.group);
+      renderTracks(); renderKitMeta();
+      toast(r.wrote ? `G${r.group + 1}'s pattern written to the SD card` : 'Nothing to write — already saved');
+    } catch (err) { fail(err, 'Saving the pattern'); }
+  } else if (id === 'pasteBtn') {
+    const p = $('pastePanel');
+    p.hidden = !p.hidden;
+    if (!p.hidden) { $('pasteText').value = ''; $('pasteText').focus(); }
+  } else if (id === 'pasteCancel') {
+    $('pastePanel').hidden = true;
+  } else if (id === 'pasteApply') {
+    const raw = $('pasteText').value;
+    const parts = (raw.includes('\n') ? raw.split(/\r?\n/) : raw.split(/[,\t]/));
+    let n = 0;
+    for (let d = 0; d < Math.min(k.num, parts.length); d++) {
+      const s = sanitizeName(parts[d].trim());
+      if (!s) continue;
+      const v = s.padEnd(5);
+      if (v === k.drums[d].name) continue;
+      try { await api.name(t, d, v); k.drums[d].name = v; n++; } catch (err) { fail(err, `Renaming drum ${LETTERS[d]}`); break; }
+    }
+    $('pastePanel').hidden = true;
+    if (n) markDirtyLocal(t);
+    fillKitValues(true);
+    toast(n ? `Renamed ${n} drum${n > 1 ? 's' : ''}` : 'Nothing changed');
+  } else if (id === 'copyBtn') {
+    const text = k.drums.slice(0, k.num).map(d => d.name.trim()).join('\n');
+    try { await navigator.clipboard.writeText(text); toast('Names copied — one per line'); }
+    catch { toast('The browser blocked the clipboard', 'err'); }
+  } else if (id === 'loadBtn') {
+    const name = $('loadSel').value;
+    if (!name || !confirm(`Load kit ${name} into T${t + 1}?\n\nIts names, notes and velocities replace this track's. The steps stay.`)) return;
+    try {
+      await api.load(t, name);
+      const nk = await api.get(t);
+      S.kits.set(t, nk); markDirtyLocal(t); renderKit();
+      toast(`${name} loaded into T${t + 1}`);
+    } catch (err) { fail(err, `Loading ${name}`); }
+  } else if (id === 'saveAsBtn') {
+    const name = $('saveName').value.trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{1,8}$/.test(name)) { toast(ST_MSG[ST.NAME], 'err'); $('saveName').focus(); return; }
+    try {
+      let done = await api.save(t, name, false);
+      if (!done) {
+        if (!confirm(`${name}.V4T already exists. Replace it with T${t + 1}?`)) return;
+        done = await api.save(t, name, true);
+      }
+      $('saveName').value = '';
+      toast(`Saved /PRESETS/${name}.V4T`);
+      await loadFiles(true);
+    } catch (err) { fail(err, `Saving ${name}`); }
+  }
+});
+pane.addEventListener('keydown', e => {
+  if (e.target.id === 'saveName' && e.key === 'Enter') { e.preventDefault(); $('saveAsBtn').click(); }
+  if (e.target.id === 'pasteText' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('pasteApply').click(); }
+});
+
+function fillPresets() {
+  const seen = new Set();
+  $('presetNames').innerHTML = S.presets.map(p => p.name.trim()).filter(n => n && !seen.has(n) && seen.add(n))
+    .map(n => `<option value="${esc(n)}"></option>`).join('');
+}
+
+// ===================================================================== track settings
+// TRACK_GROUPS (below) describes every per-track setting the panel's TRK + FX pages
+// edit: the CC (internal SEQ_CC_* number), how its raw value maps to what the panel
+// shows, and when it applies. Writes go through CMD_CC_SET (= SEQ_CC_Set, the panel's
+// own chokepoint) and the stored value is read back, so a field the firmware clamps
+// or truncates shows what the SEQ actually kept.
+const TRACK_FIELDS = TRACK_GROUPS.flatMap(g => g.fields);
+const TRACK_CC_SET = new Set(TRACK_FIELDS.map(f => f.cc));
+
+function fieldRaw(f, ccs) { const v = ccs.get(f.cc) ?? 0; return (v & (f.mask ?? 0xff)) >> (f.shift || 0); }
+function fieldApplies(f, t) {
+  if (!f.when) return true;
+  return f.when({ ccs: S.ccs, mode: S.info ? S.info.modes[t] : 0, get: cc => S.ccs.get(cc) ?? 0 });
+}
+function portOptions(cur) {
+  const list = S.ports || [];
+  const known = list.some(p => p.port === cur);
+  return (known ? '' : `<option value="${cur}" selected>0x${cur.toString(16)}</option>`) +
+    list.map(p => `<option value="${p.port}"${p.port === cur ? ' selected' : ''}>${esc(p.name)}${p.avail ? '' : ' (n/a)'}</option>`).join('');
+}
+
+function fieldControl(f, i, raw) {
+  const id = `tf${i}`;
+  switch (f.kind) {
+    case 'enum':
+      return `<select id="${id}" data-fi="${i}">` + f.options.map(([v, l]) =>
+        `<option value="${v}"${v === raw ? ' selected' : ''}>${esc(l)}</option>`).join('') +
+        (f.options.some(([v]) => v === raw) ? '' : `<option value="${raw}" selected>${raw} (?)</option>`) + '</select>';
+    case 'port':
+      return `<select id="${id}" data-fi="${i}">${portOptions(raw)}</select>`;
+    case 'bits':
+      return `<span class="bits">` + f.bits.map(([b, l, inv]) => {
+        const on = (((raw >> b) & 1) ^ (inv ? 1 : 0)) === 1;
+        return `<label><input type="checkbox" data-fi="${i}" data-bit="${b}"${inv ? ' data-inv="1"' : ''}${on ? ' checked' : ''}>${esc(l)}</label>`;
+      }).join('') + '</span>';
+    case 'bool':
+      return `<label class="switch"><input type="checkbox" id="${id}" data-fi="${i}" role="switch"${raw ? ' checked' : ''}></label>`;
+    case 'snib': { // signed nibble: 0..7 = +0..+7, 8..15 = -8..-1 (the transpose fields)
+      const opts = [];
+      for (let v = -8; v <= 7; v++) opts.push([v & 15, (v > 0 ? '+' : '') + v + (f.unit ? ' ' + f.unit : '')]);
+      return `<select id="${id}" data-fi="${i}">` + opts.map(([v, l]) => `<option value="${v}"${v === raw ? ' selected' : ''}>${l}</option>`).join('') + '</select>';
+    }
+    case 'ro':
+      return `<span class="ro">${esc(f.fmt ? f.fmt(raw) : String(raw))}</span>`;
+    default: { // 'int' (incl. note / channel / 1-based counts via off + fmt)
+      const off = f.off || 0;
+      return `<input class="num" type="number" id="${id}" data-fi="${i}" min="${f.lo + off}" max="${f.hi + off}" value="${raw + off}">` +
+             `<span class="unit" data-fmt="${i}">${esc(f.fmt ? f.fmt(raw) : (f.unit || ''))}</span>`;
+    }
+  }
+}
+
+function renderTrack() {
+  const pane = $('trackPane'), t = S.tsel;
+  if (!S.info || !S.ccs) { pane.innerHTML = '<div class="empty">Reading the track…</div>'; return; }
+  let cards = '';
+  TRACK_GROUPS.forEach(g => {
+    if (g.when && !g.when({ ccs: S.ccs, mode: S.info.modes[t], get: cc => S.ccs.get(cc) ?? 0 })) return;
+    let rows = '';
+    for (const f of g.fields) {
+      const i = TRACK_FIELDS.indexOf(f);
+      if (!S.ccs.has(f.cc)) continue;                       // firmware doesn't map it
+      const applies = fieldApplies(f, t);
+      if (!applies && f.hideWhenOff) continue;
+      rows += `<div class="fld${applies ? '' : ' off'}" data-row="${i}"${f.tip ? ` title="${esc(f.tip)}"` : ''}>` +
+              `<label for="tf${i}">${esc(f.label)}</label><span class="ctl">${fieldControl(f, i, fieldRaw(f, S.ccs))}</span></div>`;
+    }
+    if (rows) cards += `<div class="card"><h3>${esc(g.title)}</h3>${g.note ? `<p class="note-line">${esc(g.note)}</p>` : ''}${rows}</div>`;
+  });
+  pane.innerHTML =
+    `<div class="kithead"><span class="title">T${t + 1}</span><span class="meta" id="tMeta"></span><span class="spacer"></span>` +
+      `<span class="pill" id="tDirty"></span>` +
+      `<button class="btn primary" id="tSaveNow" title="Write this group's pattern to the SD card now (otherwise it's written on the next pattern switch)">Save to pattern</button></div>` +
+    `<div class="tgrid">${cards}</div>`;
+  renderTrackMeta();
+}
+
+function renderTrackMeta() {
+  if (!$('tMeta') || !S.info) return;
+  const t = S.tsel, g = t >> 2, grp = S.info.groups[g];
+  const port = (S.ports || []).find(p => p.port === S.ccs.get(CC.MIDI_PORT));
+  $('tMeta').textContent = `${MODES[S.info.modes[t]] || '?'} · G${g + 1} · ${patLabel(grp)} · ` +
+    `${port ? port.name : '?'} ch ${(S.ccs.get(CC.MIDI_CHANNEL) ?? 0) + 1}`;
+  const dirty = (S.info.dirty >> g) & 1;
+  $('tDirty').className = 'pill ' + (dirty ? 'warn' : 'ok');
+  $('tDirty').textContent = dirty ? 'Unsaved — written on the next pattern switch' : 'Saved in the pattern';
+  $('tSaveNow').disabled = !dirty;
+}
+
+// refresh the values in place (a poll / another surface edited them)
+function mergeTrack(t, ccs) {
+  if (t !== S.tsel) return;
+  const before = S.ccs;
+  for (const k of S.tpending) if (before && before.has(+k)) ccs.set(+k, before.get(+k));
+  S.ccs = ccs;
+  // structure (which fields apply) can change with a value — re-render unless typing
+  const active = document.activeElement;
+  if (active && active.closest && active.closest('#trackPane .fld')) {
+    for (const el of $('trackPane').querySelectorAll('[data-fi]')) {
+      if (el === active) continue;
+      const f = TRACK_FIELDS[+el.dataset.fi], raw = fieldRaw(f, ccs);
+      if (el.type === 'checkbox') el.checked = el.dataset.bit != null ? ((((raw >> +el.dataset.bit) & 1) ^ (el.dataset.inv ? 1 : 0)) === 1) : !!raw;
+      else el.value = raw + (f.off || 0);
+    }
+    return;
+  }
+  if (!before || [...ccs].some(([k, v]) => before.get(k) !== v)) renderTrack();
+}
+
+async function loadTrack(t) {
+  try {
+    if (!S.ports) S.ports = await api.ports(0);
+    const ccs = await api.ccs(t);
+    if (t !== S.tsel) return;
+    S.ccs = ccs;
+    renderTrack();
+  } catch (e) { fail(e, `Reading T${t + 1}`); }
+}
+
+function selectTrackTab(t) {
+  if (S.tsel === t && S.ccs) return;
+  S.tsel = t;
+  store.set('ttrack', t);
+  S.ccs = null;
+  S.tpending.clear();
+  renderTracks();
+  renderTrack();
+  loadTrack(t);
+}
+
+async function writeField(f, t, newRaw) {
+  const mask = f.mask ?? 0xff, shift = f.shift || 0;
+  const cur = S.ccs.get(f.cc) ?? 0;
+  const v = (cur & ~mask & 0xff) | ((newRaw << shift) & mask);
+  if (v === cur) return;
+  S.tpending.add(String(f.cc));
+  try {
+    const stored = await api.ccSet(t, f.cc, v);
+    if (t !== S.tsel) return;
+    S.ccs.set(f.cc, stored);
+    if (S.info) S.info.dirty |= 1 << (t >> 2);
+    if (stored !== v) toast(`${f.label}: the SEQ kept ${(stored & mask) >> shift}`, 'err');
+    if (f.affects || stored !== v) renderTrack();
+    else {
+      const row = $('trackPane').querySelector(`[data-row="${TRACK_FIELDS.indexOf(f)}"]`);
+      if (row) { row.classList.remove('saved'); void row.offsetWidth; row.classList.add('saved'); }
+      const u = $('trackPane').querySelector(`[data-fmt="${TRACK_FIELDS.indexOf(f)}"]`);
+      if (u && f.fmt) u.textContent = f.fmt((stored & mask) >> shift);
+    }
+    renderTrackMeta(); renderTracks();
+  } catch (e) { fail(e, `Setting ${f.label}`); renderTrack(); }
+  finally { S.tpending.delete(String(f.cc)); }
+}
+
+const tPane = $('trackPane');
+const tTimers = new Map();
+tPane.addEventListener('change', e => {
+  const el = e.target, fi = el.dataset && el.dataset.fi;
+  if (fi == null) return;
+  const f = TRACK_FIELDS[+fi], t = S.tsel;
+  if (el.type === 'checkbox' && el.dataset.bit != null) {
+    let raw = fieldRaw(f, S.ccs);
+    const b = +el.dataset.bit, on = el.checked !== !!el.dataset.inv;
+    raw = on ? raw | (1 << b) : raw & ~(1 << b);
+    writeField(f, t, raw);
+  } else if (el.type === 'checkbox') {
+    writeField(f, t, el.checked ? 1 : 0);
+  } else if (el.tagName === 'SELECT') {
+    writeField(f, t, +el.value);
+  } else if (el.value === '') {
+    el.value = fieldRaw(f, S.ccs) + (f.off || 0);
+  }
+});
+tPane.addEventListener('input', e => {
+  const el = e.target, fi = el.dataset && el.dataset.fi;
+  if (fi == null || el.type !== 'number' || el.value === '') return;
+  const f = TRACK_FIELDS[+fi], t = S.tsel;
+  const raw = Math.max(f.lo, Math.min(f.hi, Math.round(+el.value) - (f.off || 0)));
+  const u = tPane.querySelector(`[data-fmt="${fi}"]`);
+  if (u && f.fmt) u.textContent = f.fmt(raw);
+  clearTimeout(tTimers.get(fi));
+  tTimers.set(fi, setTimeout(() => { tTimers.delete(fi); writeField(f, t, raw); }, 150));
+});
+tPane.addEventListener('click', async e => {
+  if (e.target.id !== 'tSaveNow') return;
+  try {
+    const r = await api.saveNow(S.tsel);
+    S.info.dirty &= ~(1 << r.group);
+    renderTracks(); renderTrackMeta(); renderKitMeta();
+    toast(r.wrote ? `G${r.group + 1}'s pattern written to the SD card` : 'Nothing to write — already saved');
+  } catch (err) { fail(err, 'Saving the pattern'); }
+});
+
+// ===================================================================== library
+async function loadFiles(quiet) {
+  try {
+    S.files = await api.list();
+  } catch (e) {
+    if (!quiet) fail(e, 'Reading /PRESETS');
+    S.files = S.files || [];
+  }
+  renderFiles();
+  if ($('loadSel')) {
+    const opts = S.files.filter(f => f.mode === EV_DRUM).map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join('');
+    const cur = $('loadSel').value;
+    $('loadSel').innerHTML = opts || '<option value="">no kits yet</option>';
+    if (cur) $('loadSel').value = cur;
+    $('loadBtn').disabled = !opts;
+  }
+}
+
+function renderFiles() {
+  const files = S.files || [];
+  $('fileList').innerHTML = files.length ? files.map(f =>
+    `<button class="file" data-n="${esc(f.name)}" aria-current="${!!(S.lib && S.lib.name === f.name)}">` +
+    `<span>${esc(f.name)}</span><span class="mode ${f.mode === EV_DRUM ? 'drum' : ''}">${esc(MODES[f.mode] || '?')}</span></button>`).join('')
+    : '<div class="empty">No .V4T files yet. Save a kit from the Live tab.</div>';
+  renderLib();
+}
+
+$('fileList').addEventListener('click', e => {
+  const b = e.target.closest('.file');
+  if (b) openFile(b.dataset.n);
+});
+$('libRefresh').addEventListener('click', () => loadFiles(false));
+
+function libChanged() { return S.lib && S.lib.changed && S.lib.changed.size > 0; }
+
+async function openFile(name) {
+  if (libChanged() && S.lib.name !== name && !confirm(`Discard your unsaved changes to ${S.lib.name}?`)) return;
+  try {
+    const k = await api.open(name);
+    S.lib = { name, kit: k, orig: k.drum ? structuredClone(k.drums) : null, changed: new Set() };
+  } catch (e) { fail(e, `Opening ${name}`); S.lib = null; }
+  renderFiles();
+}
+
+function drumTrackOptions() {
+  return [...S.kits.keys()].map(t => `<option value="${t}"${t === S.sel ? ' selected' : ''}>T${t + 1} · ${esc(drumPeek(S.kits.get(t)).slice(0, 18))}</option>`).join('');
+}
+
+function renderLib() {
+  const pane = $('libPane'), L = S.lib;
+  if (!L) {
+    pane.innerHTML = `<div class="empty">Pick a kit on the left.</div>`;
+    return;
+  }
+  const k = L.kit;
+  let body;
+  if (!k.drum) {
+    body = `<div class="empty"><b>${esc(L.name)} is a ${esc(MODES[k.mode] || '?')} track preset, not a kit.</b><br>` +
+           `Its note columns hold layer assignments, so it can't be edited or loaded here.</div>`;
+  } else {
+    let rows = `<div class="row head"><span>#</span><span></span><span>Name</span><span>Note</span>` +
+               `<span>Velocity</span><span class="acc">Accent</span><span></span></div>`;
+    for (let d = 0; d < k.num; d++) {
+      const v = k.drums[d], L2 = LETTERS[d];
+      rows += `<div class="row" data-d="${d}"><span class="idx">${L2}</span><span></span>` +
+        `<input class="name" data-f="name" maxlength="5" spellcheck="false" autocomplete="off" list="presetNames" value="${esc(v.name.trimEnd())}" aria-label="Drum ${L2} name">` +
+        `<span class="note"><input class="num" type="number" min="0" max="127" data-f="0" value="${v.note}" aria-label="Drum ${L2} note"><span class="nn">${noteName(v.note)}</span></span>` +
+        `<span class="vel"><input class="num" type="number" min="0" max="127" data-f="1" value="${v.vel_n}" aria-label="Drum ${L2} velocity">` +
+          `<input type="range" min="0" max="127" data-f="1" value="${v.vel_n}" tabindex="-1" aria-hidden="true"></span>` +
+        `<span class="vel acc"><input class="num" type="number" min="0" max="127" data-f="2" value="${v.vel_a}" aria-label="Drum ${L2} accent velocity">` +
+          `<input type="range" min="0" max="127" data-f="2" value="${v.vel_a}" tabindex="-1" aria-hidden="true"></span><span></span></div>`;
+    }
+    body =
+      (k.editable ? '' : `<div class="hints"><p>This file is missing some kit lines, so it can be loaded but not edited here.</p></div>`) +
+      `<div class="drums" id="libDrums" aria-label="Drums in ${esc(L.name)}">${rows}</div>`;
+  }
+  const tracks = drumTrackOptions();
+  const kitTools = !k.drum ? '' :
+    `<button class="btn primary" id="libSave" ${libChanged() && k.editable ? '' : 'disabled'}>Save changes</button>` +
+    `<button class="btn" id="libRevert" ${libChanged() ? '' : 'disabled'}>Revert</button><span class="sep"></span>` +
+    `<select class="btn" id="libTrack" aria-label="Drum track to load into" ${tracks ? '' : 'disabled'}>${tracks || '<option>no drum tracks</option>'}</select>` +
+    `<button class="btn" id="libLoad" ${tracks ? '' : 'disabled'} title="Replace that track's names, notes and velocities (steps stay)">Load into track</button><span class="sep"></span>`;
+  pane.innerHTML =
+    `<div class="kithead"><span class="title">${esc(L.name)}</span><span class="meta">/PRESETS/${esc(L.name)}.V4T${k.drum ? ` · ${k.num} drums` : ''}</span>` +
+      `<span class="spacer"></span>${libChanged() ? '<span class="pill warn">Unsaved changes</span>' : ''}</div>` +
+    `<div class="tools">${kitTools}` +
+      `<input class="field" id="libNewName" maxlength="8" value="${esc(L.name)}" aria-label="File name" spellcheck="false" autocomplete="off">` +
+      `<button class="btn" id="libRename">Rename</button><span style="flex:1"></span>` +
+      `<button class="btn danger" id="libDelete">Delete</button></div>` + body;
+}
+
+const libPane = $('libPane');
+libPane.addEventListener('input', e => {
+  const inp = e.target, f = inp.dataset.f, L = S.lib;
+  if (f == null || !L || !L.kit.drum) return;
+  const row = inp.closest('.row'), d = +row.dataset.d, v = L.kit.drums[d];
+  if (f === 'name') {
+    const s = sanitizeName(inp.value);
+    if (s !== inp.value) inp.value = s;
+    v.name = s.padEnd(5);
+  } else {
+    if (inp.value === '') return;
+    const n = clamp(+inp.value);
+    row.querySelectorAll(`[data-f="${f}"]`).forEach(x => { if (x !== inp) x.value = n; });
+    if (f === '0') row.querySelector('.nn').textContent = noteName(n);
+    v[['note', 'vel_n', 'vel_a'][+f]] = n;
+  }
+  const o = L.orig[d];
+  if (v.name !== o.name || v.note !== o.note || v.vel_n !== o.vel_n || v.vel_a !== o.vel_a) L.changed.add(d); else L.changed.delete(d);
+  const head = libPane.querySelector('.kithead .pill');
+  if (!!head !== libChanged()) renderLibChrome();
+  else { $('libSave').disabled = !(libChanged() && L.kit.editable); $('libRevert').disabled = !libChanged(); }
+});
+function renderLibChrome() { // re-render but keep focus + caret
+  const a = document.activeElement, sel = a && a.closest && a.closest('#libDrums .row') ? [a.closest('.row').dataset.d, a.dataset.f, a.selectionStart] : null;
+  renderLib();
+  if (sel) {
+    const el = libPane.querySelector(`.row[data-d="${sel[0]}"] [data-f="${sel[1]}"]`);
+    if (el) { el.focus(); try { if (sel[2] != null) el.setSelectionRange(sel[2], sel[2]); } catch { /* number inputs */ } }
+  }
+}
+libPane.addEventListener('keydown', e => {
+  const inp = e.target;
+  if (inp.dataset && inp.dataset.f === 'name' && e.key === 'Enter') {
+    e.preventDefault();
+    const row = inp.closest('.row'), next = e.shiftKey ? row.previousElementSibling : row.nextElementSibling;
+    const ni = next && next.querySelector('input.name');
+    if (ni) { ni.focus(); ni.select(); }
+  }
+  if (inp.id === 'libNewName' && e.key === 'Enter') { e.preventDefault(); $('libRename').click(); }
+});
+libPane.addEventListener('click', async e => {
+  const id = e.target.id, L = S.lib;
+  if (!L) return;
+  if (id === 'libSave') {
+    try {
+      // re-open right before staging: the staged base is the file as it is NOW
+      const fresh = await api.open(L.name);
+      if (!fresh.drum || !fresh.editable) throw new KitError(ST.FORMAT);
+      for (const d of [...L.changed].sort((a, b) => a - b)) await api.stage(d, L.kit.drums[d]);
+      await api.commit();
+      const n = L.changed.size;
+      await openFile(L.name);
+      toast(`Saved ${n} drum${n > 1 ? 's' : ''} to ${L.name}.V4T`);
+    } catch (err) { fail(err, `Saving ${L.name}`); }
+  } else if (id === 'libRevert') {
+    L.changed.clear();
+    await openFile(L.name);
+  } else if (id === 'libLoad') {
+    const t = +$('libTrack').value;
+    if (libChanged() && !confirm(`${L.name} has unsaved changes. Load the version on the SD card into T${t + 1}?`)) return;
+    if (!confirm(`Load ${L.name} into T${t + 1}?\n\nIts names, notes and velocities replace the track's. The steps stay.`)) return;
+    try {
+      await api.load(t, L.name);
+      S.kits.set(t, await api.get(t));
+      markDirtyLocal(t);
+      toast(`${L.name} loaded into T${t + 1}`);
+    } catch (err) { fail(err, `Loading ${L.name}`); }
+  } else if (id === 'libRename') {
+    const nn = $('libNewName').value.trim().toUpperCase();
+    if (nn === L.name) return;
+    if (!/^[A-Z0-9_-]{1,8}$/.test(nn)) { toast(ST_MSG[ST.NAME], 'err'); return; }
+    try {
+      await api.rename(L.name, nn);
+      L.name = nn;
+      toast(`Renamed to ${nn}.V4T`);
+      await loadFiles(false);
+    } catch (err) { fail(err, 'Renaming'); }
+  } else if (id === 'libDelete') {
+    if (!confirm(`Delete /PRESETS/${L.name}.V4T from the SD card? This can't be undone.`)) return;
+    try {
+      await api.del(L.name);
+      toast(`Deleted ${L.name}.V4T`);
+      S.lib = null;
+      await loadFiles(false);
+    } catch (err) { fail(err, 'Deleting'); }
+  }
+});
+
+// ===================================================================== tabs + boot
+const TABS = [['kits', 'tabKits'], ['lib', 'tabLib'], ['track', 'tabTrack']];
+function showTab(tab) {
+  if (!TABS.some(([t]) => t === tab)) tab = 'kits';
+  S.tab = tab;
+  store.set('tab', tab);
+  for (const [t, id] of TABS) $(id).setAttribute('aria-selected', t === tab);
+  $('work').hidden = tab === 'lib' || !link;
+  $('lib').hidden = tab !== 'lib' || !link;
+  $('kitPane').hidden = tab !== 'kits';
+  $('trackPane').hidden = tab !== 'track';
+  if (!link) return;
+  if (tab === 'lib') loadFiles(false);
+  if (tab === 'kits' && S.info) { renderTracks(); renderKit(); }
+  if (tab === 'track' && S.info) { renderTracks(); loadTrack(S.tsel); }
+}
+for (const [t, id] of TABS) $(id).addEventListener('click', () => showTab(t));
+document.querySelector('.tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const i = TABS.findIndex(([t]) => t === S.tab), n = TABS.length;
+  const [t, id] = TABS[(i + (e.key === 'ArrowRight' ? 1 : n - 1)) % n];
+  showTab(t); $(id).focus();
+});
+$('port').addEventListener('change', e => connectTo(e.target.value));
+$('retry').addEventListener('click', () => { S.access ? autoConnect() : startMidi(); });
+$('demoBtn').addEventListener('click', startDemo);
+$('audEdits').checked = store.get('audEdits', true);
+$('audEdits').addEventListener('change', e => store.set('audEdits', e.target.checked));
+window.addEventListener('beforeunload', e => { releaseAllPads(); if (libChanged()) { e.preventDefault(); e.returnValue = ''; } });
+
+if (new URLSearchParams(location.search).has('demo')) startDemo();
+else startMidi();
+</script>
+</body>
+</html>
