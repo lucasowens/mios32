@@ -1,0 +1,1541 @@
+<!doctype html>
+<html lang="en">
+<head><script src="shim.js" data-device="seq"></script><script src="boot.js"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEQ V4+ emu</title>
+<style>
+  :root {
+    --bg: #15161a; --panel: #1f2125; --edge: #33363c; --text: #d8dbe0; --dim: #8a9099;
+    --face: #ecebe6; --face-edge: #d6d4cd; --ink: #4a4c50;
+    --oled-bg: #050607; --oled-on: #dff1ff; --oled-off: #101418;
+    --cap: #f4f4f1; --cap-edge: #cfcfca;
+    --gp-off: #1e5a45; --gp-g: #34f5a6; --gp-r: #ff4b3a; --gp-y: #f6e35a;
+    --btn-off: #c9c7c0; --btn-lit: #ffcf6b;
+    --tpd-on: #cfe8ff; --tpd-red: #ff6b5a; --tpd-off: #3a3f47;
+    --g: #3ddc63; --r: #ff5a3c; --y: #ffd23c; --accent: #6ab0ff;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 100000; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+           padding: 8px 16px; background: rgba(21,22,26,.92); backdrop-filter: blur(6px); border-bottom: 1px solid var(--edge); }
+  header .spacer { flex: 1; }
+  header .tog { height: 24px; padding: 0 9px; border-radius: 5px; border: 1px solid var(--edge); background: #23262b; color: var(--dim);
+                font: inherit; font-size: 11px; cursor: pointer; }
+  header .tog.on { color: var(--text); border-color: #4a5160; background: #2c3036; }
+  header a.tog { display: inline-flex; align-items: center; text-decoration: none; }
+  .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--dim); user-select: none; font-size: 11px; }
+  .switch input { appearance: none; width: 30px; height: 16px; border-radius: 8px; background: #3a3d44; position: relative; margin: 0; cursor: pointer; transition: background .15s; }
+  .switch input::after { content: ""; position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #cfd3d9; transition: left .15s; }
+  .switch input:checked { background: var(--g); }
+  .switch input:checked::after { left: 16px; }
+  .switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch.on { color: var(--text); }
+  header .tog:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* ---------------- desktop: every part is a movable / resizable window */
+  .desk { position: relative; min-height: calc(100vh - 44px); }
+  .win { position: absolute; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--edge);
+         border-radius: 9px; box-shadow: 0 12px 40px rgba(0,0,0,.45); overflow: hidden; min-width: 240px; }
+  .win.front { border-color: #4a5160; }
+  .win .tbar { flex: none; height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px; cursor: grab; user-select: none;
+               touch-action: none; background: #1a1c20; border-bottom: 1px solid var(--edge); color: var(--dim);
+               font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
+  .win .tbar:active { cursor: grabbing; }
+  .win .tbar .ttl { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .win .tbar button { all: unset; cursor: pointer; color: var(--dim); font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+  .win .tbar button:hover { color: var(--text); background: #2c3036; }
+  .win .tbar button:focus-visible { outline: 2px solid var(--accent); }
+  .win .body { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; }
+  .win.free .body { overflow: hidden; }
+  .win .grip { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; touch-action: none;
+               background: linear-gradient(135deg, transparent 50%, #4a5160 50%, #4a5160 58%, transparent 58%, transparent 70%, #4a5160 70%, #4a5160 78%, transparent 78%); }
+  .win.aspect .grip { cursor: ew-resize; }
+  .desk.moving iframe { pointer-events: none; }
+  /* snap-to-grid guide while a window moves (Snap on) */
+  .desk.moving.snapping { background-image:
+      linear-gradient(to right, rgba(106,176,255,.10) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(106,176,255,.10) 1px, transparent 1px);
+    background-size: var(--snap-grid, 20px) var(--snap-grid, 20px); }
+  .desk.moving { user-select: none; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  header .stat { color: var(--dim); font-variant-numeric: tabular-nums; }
+  header .stat b { color: var(--text); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #444; vertical-align: middle; margin-right: 5px; }
+  .dot.ok { background: var(--g); } .dot.bad { background: var(--r); }
+
+  /* ---------------- faceplate: laid out in panel pixels (1820 x 545), scaled to fit */
+  .faceholder { width: 100%; position: relative; }
+  .face { position: absolute; left: 0; top: 0; width: 1820px; height: 545px; transform-origin: 0 0;
+          background: linear-gradient(180deg, #f3f2ee, var(--face) 60%, #e3e1db); border-radius: 6px;
+          border: 1px solid var(--face-edge); box-shadow: 0 10px 40px rgba(0,0,0,.45); user-select: none; }
+  .screw { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: radial-gradient(circle at 40% 35%, #555, #111); }
+
+  canvas.oled { position: absolute; border-radius: 4px; background: var(--oled-bg); box-shadow: inset 0 0 0 2px #000; }
+  canvas.tpd { position: absolute; background: #2b2e33; border-radius: 2px; }
+
+  .knob { position: absolute; transform: translate(-50%, -50%); border-radius: 50%; cursor: ns-resize; touch-action: none;
+          background: radial-gradient(circle at 38% 30%, #3a3b3e, #0e0f10 62%); box-shadow: 0 3px 6px rgba(0,0,0,.45), inset 0 -2px 3px rgba(255,255,255,.06); }
+  .knob .ptr { position: absolute; inset: 0; transform: rotate(var(--rot, 0deg)); pointer-events: none; }
+  .knob .ptr::after { content: ""; position: absolute; left: 50%; top: 7%; width: 3px; height: 20%; margin-left: -1.5px; background: #6d6f73; border-radius: 2px; }
+  .knob.pushed { box-shadow: 0 1px 2px rgba(0,0,0,.45), inset 0 2px 6px rgba(0,0,0,.6); }
+  .knob:focus-visible, .cap:focus-visible, .rb:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+  .cap { position: absolute; width: 74px; height: 74px; transform: translate(-50%, -50%); border-radius: 5px; cursor: pointer; touch-action: none;
+         background: linear-gradient(180deg, #fff, var(--cap)); border: 1px solid var(--cap-edge); box-shadow: 0 3px 0 #bdbcb6, 0 5px 8px rgba(0,0,0,.18);
+         color: var(--gp-off); display: grid; place-items: center; }
+  .cap svg { width: 40px; height: 40px; }
+  .cap.g { color: var(--gp-g); } .cap.r { color: var(--gp-r); } .cap.y { color: var(--gp-y); }
+  .cap.g svg, .cap.r svg, .cap.y svg { filter: drop-shadow(0 0 4px currentColor) drop-shadow(0 0 10px currentColor); }
+  .cap.g, .cap.r, .cap.y { background: radial-gradient(circle, color-mix(in srgb, currentColor 18%, #fff) 0%, #fff 70%); }
+  .cap.down { transform: translate(-50%, calc(-50% + 2px)); box-shadow: 0 1px 0 #bdbcb6, 0 2px 4px rgba(0,0,0,.2); }
+
+  .rb { position: absolute; width: 30px; height: 30px; transform: translate(-50%, -50%); border-radius: 50%; cursor: pointer; touch-action: none;
+        background: radial-gradient(circle at 45% 40%, #f7f6f2, var(--btn-off) 75%); border: 1px solid #9c9a94;
+        box-shadow: 0 2px 3px rgba(0,0,0,.3), inset 0 0 0 4px rgba(255,255,255,.35); }
+  .rb.lit { background: radial-gradient(circle at 45% 40%, #fffbe8, var(--btn-lit) 70%); box-shadow: 0 0 10px 2px rgba(255,190,80,.75), inset 0 0 0 4px rgba(255,255,255,.35); }
+  .rb.down { box-shadow: inset 0 2px 5px rgba(0,0,0,.45); }
+  .off { opacity: .35; cursor: not-allowed; }
+  .latched { outline: 3px solid #e0a020; outline-offset: 3px; }
+
+  .lab { position: absolute; transform: translate(-50%, -50%); color: var(--ink); font-size: 15px; white-space: nowrap; pointer-events: none; }
+  .lab.icon { line-height: 0; }
+  .bracket { position: absolute; border: 1.5px solid #8b8c8e; pointer-events: none; }
+  .brand { position: absolute; color: #333; font-size: 23px; font-weight: 300; letter-spacing: .5px; transform: translate(-50%, -50%) rotate(90deg); white-space: nowrap; }
+  .logo { position: absolute; transform: translate(-50%, -50%); font-size: 22px; color: #222; font-weight: 500; letter-spacing: .3px; }
+  .beat { position: absolute; width: 12px; height: 12px; transform: translate(-50%, -50%); border-radius: 50%; background: #c8c6c0; border: 1px solid #999; }
+  .beat.lit { background: #ffd56b; box-shadow: 0 0 8px 2px rgba(255,190,80,.8); }
+
+  /* ---------------- below the panel */
+  /* ---------------- MatriX: laid out in device pixels (1180 x 1015, measured off the midiphy photo), scaled */
+  .mxholder { width: 100%; position: relative; }
+  .mx { position: absolute; left: 0; top: 0; width: 1180px; height: 1015px; transform-origin: 0 0; user-select: none;
+        background: linear-gradient(180deg, #f2f1ec, #e9e8e2 70%, #dfddd6); border: 1px solid #d0cec7; border-radius: 6px;
+        box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  .mx .frame { position: absolute; border: 2px solid #9a9a96; border-radius: 3px; background: #b9b8b2; }
+  .key { position: absolute; width: 50px; height: 50px; transform: translate(-50%, -50%); border-radius: 4px; cursor: pointer; touch-action: none;
+         background: linear-gradient(180deg, #fbfbf9, #e7e6e1); box-shadow: 0 2px 0 #a9a8a2, 0 3px 5px rgba(0,0,0,.18); }
+  .key::after { content: ""; position: absolute; inset: 11px; border-radius: 5px; background: #cfcfcc;
+                box-shadow: inset 0 1px 3px rgba(0,0,0,.25); }
+  .key.lit::after { background: var(--kc); box-shadow: 0 0 10px 3px var(--kc), inset 0 0 6px rgba(255,255,255,.7); }
+  .key.lit { background: radial-gradient(circle, color-mix(in srgb, var(--kc) 30%, #fff) 0%, #f4f4f1 75%); }
+  .key.pressed { transform: translate(-50%, calc(-50% + 2px)); box-shadow: 0 0 0 #a9a8a2, 0 1px 2px rgba(0,0,0,.2); }
+  .key.held { outline: 3px solid #e0a020; outline-offset: 2px; }
+  .mlab { position: absolute; transform: translate(-50%, -50%); color: #6a6b6e; font-size: 11px; pointer-events: none; white-space: nowrap; }
+  .mlogo1 { font-size: 15px; color: #333; } .mlogo2 { font-size: 32px; color: #222; letter-spacing: .5px; } .mlogo3 { font-size: 13px; color: #444; }
+  canvas.moled { position: absolute; background: #000; border: 3px solid #111; border-radius: 2px; }
+  .fader { position: absolute; background: #1b1b1c; border-radius: 3px; cursor: pointer; touch-action: none; }
+  .fader .fcap { position: absolute; background: linear-gradient(180deg, #fafafa, #cfcfcf); border: 1px solid #777;
+                border-radius: 2px; box-shadow: 0 1px 3px rgba(0,0,0,.5); pointer-events: none; }
+  .fader.v { width: 6px; } .fader.v .fcap { left: -6px; width: 16px; height: 9px; }
+  .fader.h { height: 6px; } .fader.h .fcap { top: -6px; width: 9px; height: 16px; }
+  .mbtn { position: absolute; width: 22px; height: 22px; transform: translate(-50%, -50%); border-radius: 50%;
+          background: radial-gradient(circle at 40% 35%, #8a8a88, #3c3c3b 70%); border: 1px solid #222; opacity: .55; cursor: not-allowed; }
+  .mbtn.led { background: radial-gradient(circle at 40% 35%, #c9f7c9, #36c24a 70%); opacity: .8; }
+  .menc { position: absolute; width: 74px; height: 74px; transform: translate(-50%, -50%); border-radius: 50%;
+          background: radial-gradient(circle at 40% 32%, #fafafa, #d8d8d6 55%, #9c9c9a); border: 5px solid #1d1d1d; opacity: .7; cursor: not-allowed; }
+  .mbtn.live { opacity: 1; cursor: pointer; }
+  .mbtn.live:hover { filter: brightness(1.25); }
+  .mbtn.live.down { background: radial-gradient(circle at 40% 35%, #fff6d8, #ffb43c 70%); box-shadow: 0 0 10px 2px rgba(255,180,60,.8); }
+  .joy { position: absolute; width: 78px; height: 78px; transform: translate(-50%, -50%); border-radius: 50%; background: #1d1d1d; touch-action: none; cursor: grab; }
+  .joy .stick { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; margin: -30px 0 0 -30px; border-radius: 50%;
+                background: radial-gradient(circle at 40% 32%, #fafafa, #d8d8d6 55%, #9c9c9a); pointer-events: none; transition: transform .12s; }
+  .joy.drag .stick { transition: none; }
+  .joy.pressed .stick { box-shadow: inset 0 0 0 4px #3ddc63; }
+  .mxbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 10px; color: var(--dim); font-size: 11px; }
+  .mxbar input[type=color] { width: 28px; height: 20px; border: 0; padding: 0; background: none; vertical-align: middle; }
+  .mon { font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; flex: 1; min-height: 60px; overflow-y: auto;
+         background: #15171a; border: 1px solid var(--edge); border-radius: 6px; padding: 6px 8px; }
+  .mon .ev { white-space: nowrap; color: var(--dim); } .mon .ev.on { color: var(--text); }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  label.chk { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); cursor: pointer; }
+  .btn { height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid #0d0e10; background: #2c3036; color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+  .help { color: var(--dim); font-size: 11px; margin-top: 10px; }
+
+  /* ---------------- manual test checklist */
+  .snd-head { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-bottom: 8px; font-size: 11px; color: var(--dim); }
+  .snd-ctl { display: inline-flex; align-items: center; gap: 6px; }
+  .snd-ctl input[type=range], .snd-row input[type=range] { width: 90px; accent-color: var(--accent); }
+  .snd-st { margin-left: auto; }
+  .snd-st.warn { color: var(--y); }
+  .snd-parts { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+  .snd-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 3px 6px; border-radius: 5px; background: #1a1c20; font-size: 12px; }
+  .snd-row .who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .snd-row .who b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 400; color: var(--accent); margin-right: 6px; }
+  .snd-row .who small { color: var(--dim); margin-left: 6px; }
+  .snd-row select { background: #23262b; color: var(--text); border: 1px solid var(--edge); border-radius: 5px; font: inherit; font-size: 11px; padding: 2px 4px; }
+  .snd-led { width: 8px; height: 8px; border-radius: 50%; background: #3a3d44; }
+  .snd-led.on { background: var(--g); box-shadow: 0 0 6px var(--g); }
+  .snd-empty { color: var(--dim); font-size: 12px; padding: 6px; }
+  .ck-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; font-size: 11px; color: var(--dim); }
+  .ck-seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 6px; overflow: hidden; }
+  .ck-seg button { all: unset; cursor: pointer; padding: 3px 10px; font-size: 11px; color: var(--dim); }
+  .ck-seg button.on { background: #2c3036; color: var(--text); }
+  .ck-seg button:focus-visible { outline: 2px solid var(--accent); }
+  .ck-bar select { background: #23262b; color: var(--text); border: 1px solid var(--edge); border-radius: 5px; font: inherit; font-size: 11px; padding: 2px 4px; }
+  .ck-prog { font-variant-numeric: tabular-nums; }
+  .ck-saved { margin-left: auto; }
+  .ck-list { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+  .ck-sec { margin-bottom: 8px; }
+  .ck-sec > summary { cursor: pointer; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); padding: 4px 0; }
+  .ck-sec > summary .n { float: right; text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+  .ck-item { border: 1px solid var(--edge); border-radius: 6px; margin: 4px 0; background: #1a1c20; }
+  .ck-item.na { opacity: .4; }
+  .ck-head { display: flex; align-items: center; gap: 8px; padding: 5px 8px; }
+  .ck-title { flex: 1; cursor: pointer; }
+  .ck-other { font-size: 10px; color: var(--dim); }
+  .ck-st { display: inline-flex; gap: 3px; }
+  .ck-st button { all: unset; cursor: pointer; width: 22px; height: 20px; text-align: center; border-radius: 4px; border: 1px solid var(--edge); font-size: 12px; color: var(--dim); }
+  .ck-st button:focus-visible { outline: 2px solid var(--accent); }
+  .ck-st button.pass.on { background: #1f6b35; color: #fff; border-color: #2f9a4d; }
+  .ck-st button.fail.on { background: #7a2a1f; color: #fff; border-color: #b8402e; }
+  .ck-st button.skip.on { background: #4a4d55; color: #fff; }
+  .ck-body { padding: 0 10px 8px 10px; font-size: 12px; }
+  .ck-body ol { margin: 4px 0 6px 18px; padding: 0; }
+  .ck-body .exp { color: var(--dim); margin-bottom: 6px; }
+  .ck-body .exp b { color: var(--text); font-weight: 600; }
+  .ck-body textarea { width: 100%; min-height: 44px; resize: vertical; background: #15171a; color: var(--text); border: 1px solid var(--edge);
+                      border-radius: 5px; font: inherit; font-size: 12px; padding: 5px; }
+  .ck-body .when { font-size: 10px; color: var(--dim); margin-top: 3px; }
+  .help kbd { background: #2c3036; border: 1px solid var(--edge); border-radius: 3px; padding: 0 4px; font-size: 10px; color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1>MIDIbox SEQ V4+ — emulator</h1>
+  <span class="stat"><span id="conn" class="dot"></span><span id="connTxt">connecting…</span></span>
+  <span class="stat">BPM <b id="bpm">–</b></span>
+  <span class="stat"><b id="run">stopped</b></span>
+  <span class="stat">Track <b id="trk">–</b> · Step <b id="stp">–</b></span>
+  <span class="spacer"></span>
+  <label class="switch" id="paintSw" title="Paint: drag along the GP step keys or across the MatriX grid to tap every key you pass — start on an empty key to fill, on a lit one to erase">
+    <input type="checkbox" id="paint" role="switch"> Paint</label>
+  <label class="switch" id="snapSw" title="Snap windows to a 20 px grid while moving and resizing">
+    <input type="checkbox" id="snap" role="switch"> Snap</label>
+  <span id="winToggles"></span>
+  <a class="tog" id="demosLink" href="/editor?tab=set&amp;link=http#demos" target="_blank" title="Demo sets: pick a style, get a whole set and a song in a session of its own (the editor's Set tab, new tab)">Demos ↗</a>
+  <a class="tog" id="editorLink" href="editor/" target="_blank" title="Kits, track settings and more in a browser (opens in a new tab)">Editor ↗</a>
+  <button class="tog on" id="resetLayout" type="button" title="Put every window back to the default arrangement">Reset layout</button>
+</header>
+
+<div class="desk" id="desk">
+  <div class="win aspect" id="win-seq" data-title="SEQ V4+">
+    <div class="faceholder" id="faceholder"><div class="face" id="face"></div></div>
+  </div>
+
+  <div class="win aspect" id="win-mx" data-title="MatriX (BLM 16×16+X)">
+    <div class="mxholder" id="mxholder"><div class="mx" id="mx"></div></div>
+    <div class="mxbar">
+      <span id="mtxInfo" style="flex-basis:100%">mode –</span>
+      <label>Color 1 <input type="color" id="col1" value="#ff0000"></label>
+      <label>Color 2 <input type="color" id="col2" value="#00ff00"></label>
+    </div>
+  </div>
+
+  <div class="win free" id="win-check" data-title="Manual test checklist">
+    <div class="ck-bar">
+      <span class="ck-seg" role="group" aria-label="Testing target">
+        <button type="button" id="ckEmu" class="on">Emulator</button><button type="button" id="ckHw">Hardware</button>
+      </span>
+      <select id="ckFilter" aria-label="Show">
+        <option value="all">all</option><option value="todo">to do</option>
+        <option value="fail">failed</option><option value="pass">passed</option>
+      </select>
+      <span class="ck-prog" id="ckProg">–</span>
+      <span class="ck-saved" id="ckSaved"></span>
+    </div>
+    <div class="ck-list" id="ckList"></div>
+  </div>
+
+  <div class="win free" id="win-sound" data-title="Sound">
+    <div class="snd-head">
+      <label class="switch" id="sndSw"><input type="checkbox" id="sndOn" role="switch"> Sound</label>
+      <label class="snd-ctl">Volume <input type="range" id="sndVol" min="0" max="100" value="80"></label>
+      <label class="snd-ctl">Reverb <input type="range" id="sndVerb" min="0" max="100" value="45"></label>
+      <button class="btn" id="sndTest" type="button">Test</button>
+      <span class="snd-st" id="sndSt"></span>
+    </div>
+    <div class="snd-parts" id="sndParts"></div>
+    <div class="help">
+      Every track that plays gets an instrument by itself: a drum track a kit (each drum by its name or note), a name
+      with pad / bass / arp / lead / keys that sound, a Chord track a pad, an Arpeggiator track a pluck, a CV track
+      (CV1–4) a mono Eurorack-style voice and its channel-16 triggers a kit — otherwise whatever fits what it plays. Pick another instrument or level per track here. CC7 / CC10 / CC74 set a track's
+      volume / pan / filter. Stopping the SEQ silences everything.
+    </div>
+  </div>
+
+  <div class="win free" id="win-midi" data-title="MIDI out">
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="preview"> sound</label>
+      <label class="chk"><input type="checkbox" id="monNotesOnly" checked> notes only</label>
+      <button class="btn" id="monClear" type="button">clear</button>
+    </div>
+    <div class="mon" id="mon"></div>
+    <div class="help">
+      Click = press/release. <kbd>⌥</kbd>-click = <b>latch</b> (hold gestures); click again to release, or it lets go when the page changes (Menu + GP).
+      Encoders: scroll or drag to turn, click to push. Keys: <kbd>Space</kbd> play/stop · <kbd>Esc</kbd> exit ·
+      <kbd>M</kbd> Menu (hold it + click a GP for a page) ·
+      <kbd>←</kbd><kbd>→</kbd> &lt; / &gt; · <kbd>[</kbd><kbd>]</kbd> datawheel · hold <kbd>Shift</kbd> = Matrix SHIFT.
+      <b>Paint</b> (top bar): drag along the GP step keys / MatriX grid to tap each key once (start on an empty key = fill, on a lit one = erase).
+      Windows: drag the title bar, resize from the corner, double-click a title to fit it to the screen width; <b>Snap</b> (top bar) lines windows up on a 20 px grid.
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ------------------------------------------------------------------ desktop: windows
+// Each part of the page is a window: drag the title bar to move, the corner to
+// resize, click to raise, double-click the title to fit the screen width.
+// Device windows (SEQ, MatriX) resize by width and keep their shape; the MIDI
+// window resizes freely. The arrangement is remembered per browser.
+const desk = document.getElementById("desk");
+const LAYOUT_KEY = "seqemu.layout.v1";
+const wins = [...desk.querySelectorAll(".win")];
+const SHORT = { "win-seq": "SEQ", "win-mx": "MatriX", "win-sound": "Sound", "win-midi": "MIDI", "win-check": "Checklist" };
+const MARGIN = 16, TBAR = 29;
+const SNAP_GRID = 20;
+const snapSw = document.getElementById("snap");
+try { snapSw.checked = localStorage.getItem("seqemu.snap") === "1"; } catch (e) {}
+const syncSnap = () => {
+  document.getElementById("snapSw").classList.toggle("on", snapSw.checked);
+  desk.classList.toggle("snapping", snapSw.checked);
+  desk.style.setProperty("--snap-grid", SNAP_GRID + "px");
+};
+snapSw.addEventListener("change", () => { syncSnap(); try { localStorage.setItem("seqemu.snap", snapSw.checked ? "1" : "0"); } catch (e) {} });
+syncSnap();
+const snap = v => snapSw.checked ? Math.round(v / SNAP_GRID) * SNAP_GRID : v;
+let layout = {}, topZ = 10;
+
+function defaultLayout() {
+  const vw = Math.max(480, desk.clientWidth);
+  const seqW = Math.min(vw - 2 * MARGIN, 1820);
+  const seqH = TBAR + 24 + seqW * 545 / 1820;
+  const y2 = MARGIN + seqH + MARGIN;
+  const mxW = Math.min(760, Math.max(320, (vw - 3 * MARGIN) * 0.48));
+  const midiX = MARGIN + mxW + MARGIN;
+  return {
+    "win-seq":  { x: MARGIN, y: MARGIN, w: seqW, z: 3 },
+    "win-mx":   { x: MARGIN, y: y2, w: mxW, z: 2 },
+    "win-sound": { x: midiX, y: y2, w: Math.max(260, vw - midiX - MARGIN), h: 280, z: 4 },
+    "win-midi": { x: midiX, y: y2 + 280 + MARGIN, w: Math.max(260, vw - midiX - MARGIN), h: 300, z: 1 },
+    "win-check": { x: midiX, y: y2 + 580 + 2 * MARGIN, w: Math.max(260, vw - midiX - MARGIN), h: 560, z: 2 },
+  };
+}
+function loadLayout() {
+  const d = defaultLayout();
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") || {}; } catch (e) {}
+  for (const id of Object.keys(d)) layout[id] = Object.assign({}, d[id], saved[id] || {});
+  topZ = Math.max(10, ...Object.values(layout).map(l => l.z || 0));
+}
+function saveLayout() { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch (e) {} }
+
+function clampPos(l) {
+  const dw = desk.clientWidth;
+  l.x = Math.round(Math.max(-(l.w - 80), Math.min(dw - 80, l.x)));
+  l.y = Math.round(Math.max(0, l.y));
+}
+function applyWin(w) {
+  const l = layout[w.id];
+  w.style.left = l.x + "px"; w.style.top = l.y + "px"; w.style.width = l.w + "px";
+  w.style.height = w.classList.contains("free") ? l.h + "px" : "auto";
+  w.style.zIndex = l.z || 1;
+  w.hidden = !!l.hidden;
+  w.classList.toggle("front", (l.z || 0) === topZ);
+  const t = document.getElementById("tog-" + w.id);
+  if (t) { t.classList.toggle("on", !l.hidden); t.setAttribute("aria-pressed", String(!l.hidden)); }
+}
+function fitDesk() {
+  let bottom = 0;
+  for (const w of wins) if (!w.hidden) bottom = Math.max(bottom, w.offsetTop + w.offsetHeight);
+  desk.style.minHeight = Math.max(window.innerHeight - 44, bottom + 40) + "px";
+}
+function raise(w) {
+  if ((layout[w.id].z || 0) === topZ) return;
+  layout[w.id].z = ++topZ;
+  wins.forEach(applyWin);
+  saveLayout();
+}
+
+// a pointer drag on `handle` calling onMove(dx, dy) in page px
+function dragger(handle, onStart, onMove, onEnd) {
+  let sx = 0, sy = 0, on = false;
+  handle.addEventListener("pointerdown", e => {
+    if (e.button !== 0 || e.target.closest("button")) return;
+    e.preventDefault();
+    on = true; sx = e.clientX; sy = e.clientY;
+    handle.setPointerCapture(e.pointerId);
+    desk.classList.add("moving");
+    onStart();
+  });
+  handle.addEventListener("pointermove", e => { if (on) onMove(e.clientX - sx, e.clientY - sy); });
+  const end = () => { if (!on) return; on = false; desk.classList.remove("moving"); onEnd(); };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+}
+
+for (const w of wins) {
+  const body = document.createElement("div"); body.className = "body";
+  while (w.firstChild) body.append(w.firstChild);
+  const bar = document.createElement("div"); bar.className = "tbar";
+  bar.innerHTML = `<span class="ttl"></span><button type="button" class="fit" title="Fit to screen width" aria-label="Fit to screen width">⤢</button>` +
+                  `<button type="button" class="hide" title="Hide (bring back from the toolbar)" aria-label="Hide">✕</button>`;
+  bar.querySelector(".ttl").textContent = w.dataset.title;
+  const grip = document.createElement("div"); grip.className = "grip"; grip.title = "Resize";
+  w.append(bar, body, grip);
+
+  w.addEventListener("pointerdown", () => raise(w), true);
+  let st;
+  dragger(bar, () => { st = { ...layout[w.id] }; },
+          (dx, dy) => { const l = layout[w.id]; l.x = snap(st.x + dx); l.y = snap(st.y + dy); clampPos(l); applyWin(w); },
+          () => { saveLayout(); fitDesk(); });
+  dragger(grip, () => { st = { ...layout[w.id], h: w.offsetHeight }; },
+          (dx, dy) => {
+            const l = layout[w.id];
+            // snap the far edges (not the size), so edges line up across windows
+            l.w = Math.max(240, Math.round(snap(st.x + st.w + dx) - st.x));
+            if (w.classList.contains("free")) l.h = Math.max(160, Math.round(snap(st.y + st.h + dy) - st.y));
+            applyWin(w);
+          },
+          () => { saveLayout(); fitDesk(); });
+  const fitWidth = () => { const l = layout[w.id]; l.x = MARGIN; l.w = desk.clientWidth - 2 * MARGIN; applyWin(w); saveLayout(); fitDesk(); };
+  bar.addEventListener("dblclick", e => { if (!e.target.closest("button")) fitWidth(); });
+  bar.querySelector(".fit").addEventListener("click", fitWidth);
+  bar.querySelector(".hide").addEventListener("click", () => { layout[w.id].hidden = true; applyWin(w); saveLayout(); fitDesk(); });
+  new ResizeObserver(fitDesk).observe(w);
+
+  // toolbar toggle
+  const t = document.createElement("button");
+  t.type = "button"; t.className = "tog"; t.id = "tog-" + w.id; t.textContent = SHORT[w.id] || w.id;
+  t.title = "Show / hide this window";
+  t.addEventListener("click", () => {
+    const l = layout[w.id];
+    l.hidden = !l.hidden;
+    if (!l.hidden) { l.z = ++topZ; clampPos(l); }
+    wins.forEach(applyWin); saveLayout(); fitDesk();
+  });
+  document.getElementById("winToggles").append(t, " ");
+}
+document.getElementById("resetLayout").addEventListener("click", () => {
+  try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {}
+  layout = {}; loadLayout(); wins.forEach(applyWin); fitDesk();
+});
+loadLayout();
+wins.forEach(applyWin);
+requestAnimationFrame(fitDesk);
+window.addEventListener("resize", () => { for (const w of wins) clampPos(layout[w.id]); wins.forEach(applyWin); fitDesk(); });
+
+// ------------------------------------------------------------------ net
+// X-SeqEmu: the server only accepts state changes carrying it (see emu_web.c)
+async function post(path) {
+  try { await fetch(path, { method: "POST", headers: { "X-SeqEmu": "1" } }); } catch (e) { /* offline: ignore */ }
+}
+const pressBtn = (name, down) => post(`/api/button?id=${encodeURIComponent(name)}&down=${down ? 1 : 0}`);
+const turnEnc = (n, d) => { while (d) { const s = Math.max(-3, Math.min(3, d)); post(`/api/enc?n=${n}&d=${s}`); d -= s; } };
+const blm = (el, x, y, down) => post(`/api/blm?el=${el}&x=${x}&y=${y}&down=${down ? 1 : 0}`);
+
+// ------------------------------------------------------------------ faceplate geometry (panel px, measured off the midiphy front)
+const face = document.getElementById("face");
+const W = 1820, H = 545;
+const ENC_L = i => 368 + 79 * i, ENC_R = i => 1132 + 79 * i;   // the 8+8 columns (encoders, keycaps, bottom buttons)
+const Y_ENC = 197, Y_GP = 295, Y_SEL = 415, Y_BOT = 495, Y_BOTLAB = 527;
+
+function add(el, x, y) { el.style.left = x + "px"; el.style.top = y + "px"; face.append(el); return el; }
+function div(cls, text) { const d = document.createElement("div"); d.className = cls; if (text) d.textContent = text; return d; }
+function label(text, x, y, cls = "") { return add(div("lab " + cls, text), x, y); }
+
+for (const [x, y] of [[70, 8], [480, 8], [900, 8], [1320, 8], [1745, 8], [25, 135], [1795, 135], [25, 420], [1795, 420]]) {
+  const s = div("screw"); s.style.left = (x - 6) + "px"; s.style.top = (y - 6) + "px"; face.append(s);
+}
+
+// ------------------------------------------------------------------ controls
+const ctl = {};                 // name -> { el, kind }
+const latched = new Map();   // name -> element of a latched (⌥-clicked) button
+// A latch ends like a held finger lifts on the hardware: once the gesture lands
+// on a new page (Menu + GP shortcut, ...) every latched button is released.
+// Multi-press gestures that stay on the page (hold UTILITY -> row -> GP, hold a
+// step + encoders) keep their latch. latchArm skips the page change the latched
+// button itself causes (e.g. latching EDIT opens EDIT).
+let lastPage = null, latchArm = 0;
+function releaseLatches() {
+  for (const [name, el] of latched) { el.classList.remove("latched", "down"); pressBtn(name, false); }
+  latched.clear();
+}
+let configured = null;
+
+// ------------------------------------------------------------------ Paint (top-bar toggle)
+// A drag that starts on a paintable key (GP step keys, stand-in MatriX grid)
+// taps every key of the same group it passes, once each. The first key decides
+// fill vs erase: start on an unlit key -> only unlit keys get tapped; on a lit
+// key -> only lit ones. So a stroke never knocks out what it crosses.
+const paintSw = document.getElementById("paint");
+try { paintSw.checked = localStorage.getItem("seqemu.paint") === "1"; } catch (e) {}
+const syncPaint = () => document.getElementById("paintSw").classList.toggle("on", paintSw.checked);
+paintSw.addEventListener("change", () => { syncPaint(); try { localStorage.setItem("seqemu.paint", paintSw.checked ? "1" : "0"); } catch (e) {} });
+syncPaint();
+let stroke = null;   // { group, fill, cur, done:Set }
+function paintable(el, group, press, isLit) { el._paint = { group, press, isLit }; }
+function paintStart(el, ev) {
+  if (!paintSw.checked || !el._paint) return false;
+  el.setPointerCapture?.(ev.pointerId);
+  stroke = { group: el._paint.group, fill: !el._paint.isLit(), cur: el, done: new Set([el]) };
+  el._paint.press(true);
+  return true;
+}
+document.addEventListener("pointermove", e => {
+  if (!stroke) return;
+  const hit = document.elementFromPoint(e.clientX, e.clientY);
+  let k = hit; while (k && !k._paint) k = k.parentElement;
+  if (k === stroke.cur) return;
+  if (stroke.cur) stroke.cur._paint.press(false);
+  stroke.cur = null;
+  if (k && k._paint.group === stroke.group && !stroke.done.has(k) && k._paint.isLit() !== stroke.fill) {
+    stroke.done.add(k); stroke.cur = k; k._paint.press(true);
+  }
+});
+const paintEnd = () => { if (!stroke) return false; if (stroke.cur) stroke.cur._paint.press(false); stroke = null; return true; };
+document.addEventListener("pointerup", paintEnd);
+document.addEventListener("pointercancel", paintEnd);
+
+function bindPress(el, name) {
+  let held = false;
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.addEventListener("pointerdown", ev => {
+    if (el.classList.contains("off")) return;
+    ev.preventDefault();
+    if (!ev.altKey && !latched.has(name) && paintStart(el, ev)) return;
+    if (ev.altKey || latched.has(name)) {     // latch toggle for hold gestures
+      if (latched.has(name)) { latched.delete(name); el.classList.remove("latched", "down"); pressBtn(name, false); }
+      else { latched.set(name, el); latchArm = performance.now() + 300; el.classList.add("latched", "down"); pressBtn(name, true); }
+      return;
+    }
+    held = true; el.classList.add("down"); el.setPointerCapture?.(ev.pointerId); pressBtn(name, true);
+  });
+  const up = () => { if (!held) return; held = false; el.classList.remove("down"); pressBtn(name, false); };
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+  el.addEventListener("keydown", e => { if ((e.key === "Enter" || e.key === " ") && !e.repeat) { e.preventDefault(); e.stopPropagation(); el.classList.add("down"); pressBtn(name, true); } });
+  el.addEventListener("keyup", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); el.classList.remove("down"); pressBtn(name, false); } });
+}
+
+// small round button + its printed label (dy = label offset below the button)
+function roundBtn(name, text, x, y, opts = {}) {
+  const b = add(div("rb"), x, y);
+  b.setAttribute("aria-label", opts.aria || text);
+  bindPress(b, name);
+  ctl[name] = { el: b, kind: "rb" };
+  if (opts.svg) { const l = label("", x, y + (opts.dy ?? 30), "icon"); l.innerHTML = opts.svg; }
+  else if (text) label(text, x, y + (opts.dy ?? 30));
+  return b;
+}
+
+const BRACKET = `<svg viewBox="0 0 40 40" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="5.5" stroke-linecap="square">
+  <path d="M5 14V5h9M26 5h9v9M35 26v9h-9M14 35H5v-9"/></g></svg>`;
+function keycap(name, x, y, aria) {
+  const c = add(div("cap"), x, y);
+  c.innerHTML = BRACKET;
+  c.setAttribute("aria-label", aria);
+  bindPress(c, name);
+  ctl[name] = { el: c, kind: "cap" };
+  if (name.startsWith("gp"))
+    paintable(c, "gp", on => { c.classList.toggle("down", on); pressBtn(name, on); },
+              () => c.classList.contains("g") || c.classList.contains("r") || c.classList.contains("y"));
+}
+
+// encoder: scroll / drag = turn, click without dragging = push (the encoder's button)
+function knob(encIndex, x, y, size) {
+  const k = add(div("knob"), x, y);
+  k.style.width = k.style.height = size + "px";
+  const ptr = div("ptr");
+  if (!encIndex) k.append(ptr);   // only the datawheel shows a pointer line
+  k.tabIndex = 0;
+  k.setAttribute("role", "slider");
+  k.setAttribute("aria-label", encIndex ? `GP encoder ${encIndex}` : "datawheel");
+  let rot = 0, dragY = null, moved = false, acc = 0;
+  const step = d => { if (!d) return; rot += d * (size > 80 ? 8 : 15); ptr.style.setProperty("--rot", rot + "deg"); turnEnc(encIndex, d); };
+  k.addEventListener("wheel", e => { e.preventDefault(); acc += -e.deltaY; const n = Math.trunc(acc / 40); if (n) { acc -= n * 40; step(Math.max(-3, Math.min(3, n))); } }, { passive: false });
+  k.addEventListener("pointerdown", e => { e.preventDefault(); dragY = e.clientY; moved = false; k.setPointerCapture(e.pointerId); });
+  k.addEventListener("pointermove", e => {
+    if (dragY === null) return;
+    const n = Math.trunc((dragY - e.clientY) / 8);
+    if (n) { moved = true; dragY -= n * 8; step(Math.max(-3, Math.min(3, n))); }
+  });
+  k.addEventListener("pointerup", () => {
+    if (dragY !== null && !moved) {
+      const name = `enc${encIndex}`;
+      k.classList.add("pushed"); pressBtn(name, true);
+      setTimeout(() => { k.classList.remove("pushed"); pressBtn(name, false); }, 90);
+    }
+    dragY = null;
+  });
+  k.addEventListener("keydown", e => {
+    if (e.key === "ArrowUp" || e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); step(1); }
+    if (e.key === "ArrowDown" || e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); step(-1); }
+  });
+}
+
+// --- main section: encoders, GP keycaps, select row, bottom row
+for (let i = 0; i < 16; i++) {
+  const x = i < 8 ? ENC_L(i) : ENC_R(i - 8);
+  knob(i + 1, x, Y_ENC, 56);
+  keycap(`gp${i + 1}`, x, Y_GP, `GP ${i + 1}`);
+  keycap(`sel${i + 1}`, x, Y_SEL, `select ${i + 1}`);
+}
+// midiphy labels -> firmware functions per hwcfg/lso/MBSEQ_HW.V4 (Shift = SELECT, < = DOWN, > = UP)
+const BOTTOM_L = [["copy", "Copy"], ["paste", "Paste"], ["clear", "Clear"], ["move", "Move"], ["scroll", "Scroll"], ["fast", "Fast"], ["all", "All"], ["select", "Shift"]];
+const BOTTOM_R = [["down", "<"], ["up", ">"], ["exit", "Exit"], ["menu", "Menu"], ["edit", "Edit"], ["pattern", "Pattern"], ["song", "Song"], ["utility", "Utility"]];
+BOTTOM_L.forEach(([n, t], i) => roundBtn(n, t, ENC_L(i), Y_BOT, { dy: Y_BOTLAB - Y_BOT }));
+BOTTOM_R.forEach(([n, t], i) => roundBtn(n, t, ENC_R(i), Y_BOT, { dy: Y_BOTLAB - Y_BOT }));
+
+// --- left cluster: datawheel ringed by the select-mode buttons
+knob(0, 168, 293, 128);
+roundBtn("track_sel", "Track", 90, 213, { dy: 26 });
+roundBtn("par_layer_sel", "Param.", 140, 183, { dy: 26 });
+roundBtn("trg_layer_sel", "Trigger", 200, 183, { dy: 26 });
+roundBtn("ins_sel", "Instr.", 250, 213, { dy: 26 });
+roundBtn("step_view", "Step", 60, 265, { dy: 26 });
+roundBtn("mute", "Mute", 280, 265, { dy: 26 });
+roundBtn("bookmark", "Bookm.", 60, 323, { dy: 26 });
+roundBtn("phrase", "Phrase", 280, 323, { dy: 26 });
+label("Layer", 170, 157);
+for (const [x, side] of [[133, "borderRight"], [190, "borderLeft"]]) {
+  const b = div("bracket"); Object.assign(b.style, { left: x + "px", top: "157px", width: "17px", height: "6px", borderBottom: "none", [side]: "none" }); face.append(b);
+}
+label("Select Mode", 170, 375);
+for (const [x, side] of [[62, "borderRight"], [224, "borderLeft"]]) {
+  const b = div("bracket"); Object.assign(b.style, { left: x + "px", top: "368px", width: "54px", height: "7px", borderTop: "none", [side]: "none" }); face.append(b);
+}
+
+[["solo", "Solo"], ["metronome", "Metr."], ["loop", "Loop"], ["record", "Rec."], ["live", "Live"]]
+  .forEach(([n, t], i) => roundBtn(n, t, 60 + 55 * i, Y_SEL, { dy: 30 }));
+// transport symbols as SVG (font glyphs for these vary too much between systems)
+const ico = d => `<svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true"><path fill="#3a3c40" d="${d}"/></svg>`;
+[["rew", "rewind", "M10 1v10L3 6zM18 1v10l-7-5z"], ["fwd", "forward", "M4 1v10l7-5zM12 1v10l7-5z"], ["stop", "stop", "M6 1h10v10H6z"],
+ ["play", "play", "M7 1v10l9-5z"], ["pause", "pause", "M6 1h3.5v10H6zM12.5 1H16v10h-3.5z"]]
+  .forEach(([n, a, d], i) => roundBtn(n, a, 60 + 55 * i, Y_BOT, { dy: 28, svg: ico(d), aria: a }));
+
+const beat = add(div("beat"), 1025, Y_BOT);
+add(div("logo", "midiphy"), 1025, Y_BOTLAB);
+add(div("brand", "MIDIbox SEQ v4+"), 1752, 330);
+
+// ------------------------------------------------------------------ OLEDs + TPD
+// Each OLED: 2x40 chars drawn pixel by pixel. ASCII from the firmware's own
+// glyph table (served by /api/config), codes 0..7 from that display's CGRAM.
+const COLS = 40, PX = 4, CELL_W = 6 * PX, CELL_H = 9 * PX, PADX = 3 * PX, PADY = 5 * PX;
+const oleds = [330, 1090].map(x => {
+  const c = document.createElement("canvas");
+  c.className = "oled";
+  c.width = COLS * CELL_W + PADX * 2; c.height = 2 * CELL_H + PADY * 2;
+  c.style.left = x + "px"; c.style.width = "632px";
+  c.style.top = (89 - (632 * c.height / c.width) / 2) + "px";
+  face.append(c);
+  return c.getContext("2d");
+});
+let font = null, lastLcdKey = "";
+function drawLcds(lines, cgram) {
+  const key = JSON.stringify(lines) + JSON.stringify(cgram) + (font ? 1 : 0);
+  if (key === lastLcdKey) return;
+  lastLcdKey = key;
+  const css = getComputedStyle(document.documentElement);
+  const on = css.getPropertyValue("--oled-on").trim(), off = css.getPropertyValue("--oled-off").trim(), bg = css.getPropertyValue("--oled-bg").trim();
+  for (let dev = 0; dev < 2; dev++) {
+    const ctx = oleds[dev];
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    for (let r = 0; r < 2; r++) for (let c = 0; c < COLS; c++) {
+      const code = lines[r][dev * COLS + c] & 0x7f;
+      const x0 = PADX + c * CELL_W, y0 = PADY + r * CELL_H;
+      for (let py = 0; py < 8; py++) for (let px = 0; px < 5; px++) {
+        const lit = code < 8 ? (cgram[dev][code * 8 + py] >> (4 - px)) & 1 : font ? (font[code * 6 + 1 + px] >> py) & 1 : 0;
+        ctx.fillStyle = lit ? on : off;
+        ctx.fillRect(x0 + px * PX, y0 + py * PX, PX - 1, PX - 1);
+      }
+    }
+  }
+}
+
+// TPD: 16 x 8 LEDs, sampled by the emulator from the multiplexed DOUT lines
+const tpdCanvas = document.createElement("canvas");
+tpdCanvas.className = "tpd";
+tpdCanvas.width = 320; tpdCanvas.height = 160;
+Object.assign(tpdCanvas.style, { left: "90px", top: "50px", width: "160px", height: "80px" });
+face.append(tpdCanvas);
+const tctx = tpdCanvas.getContext("2d");
+let lastTpd = "";
+function drawTpd(t) {
+  const key = t.g.join() + "|" + t.r.join();
+  if (key === lastTpd) return;
+  lastTpd = key;
+  const css = getComputedStyle(document.documentElement);
+  tctx.fillStyle = "#2b2e33"; tctx.fillRect(0, 0, 320, 160);
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 16; x++) {
+    const g = (t.g[y] >> x) & 1, r = (t.r[y] >> x) & 1;
+    tctx.fillStyle = css.getPropertyValue(g ? "--tpd-on" : r ? "--tpd-red" : "--tpd-off").trim();
+    tctx.beginPath(); tctx.arc(10 + x * 20, 10 + y * 20, 6.5, 0, Math.PI * 2); tctx.fill();
+  }
+}
+
+// ------------------------------------------------------------------ scale the faceplate to the window
+const holder = document.getElementById("faceholder");
+function fit() {
+  const s = holder.clientWidth / W;
+  face.style.transform = `scale(${s})`;
+  holder.style.height = (H * s) + "px";
+}
+new ResizeObserver(fit).observe(holder);
+fit();
+
+// ------------------------------------------------------------------ MatriX
+// Geometry in device px off the midiphy photo. Like the MatriX's legacy-BLM mode
+// (matrix_seq.c), BLM colour bit "red" shows as Color 1 and "green" as Color 2
+// (defaults red / green, both = additive mix) — changeable below, as in its setup.
+const mx = document.getElementById("mx");
+const MX_W = 1180, MX_H = 1015;
+const KX = j => 129 + 55.7 * j, KY = i => 47 + 55.6 * i;        // grid columns / rows
+const XC_X = 46, XR_Y = 962;                                       // extra column x, extra row y
+function mxAdd(el, x, y) { el.style.left = x + "px"; el.style.top = y + "px"; mx.append(el); return el; }
+function mxLab(text, x, y, cls = "") { const d = div("mlab " + cls, text); return mxAdd(d, x, y); }
+function frame(x, y, w, h) { const f = div("frame"); Object.assign(f.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" }); mx.append(f); }
+frame(18, 18, 58, 892); frame(100, 18, 891, 892); frame(18, 934, 58, 56); frame(100, 934, 891, 56);
+
+const keys = [];      // [y][x]: x 0 = extra column, 1..16 grid; y 16 = extra row (x 0 = SHIFT)
+let shiftOn = false;
+function mxKey(el, x, y, px, py) {
+  const k = mxAdd(div("key"), px, py);
+  let held = false;
+  if (el === 0)
+    paintable(k, "mx", on => { k.classList.toggle("pressed", on); blm(0, x, y, on); }, () => k.classList.contains("lit"));
+  k.addEventListener("pointerdown", e => { e.preventDefault(); if (paintStart(k, e)) return; held = true; k.classList.add("pressed"); k.setPointerCapture(e.pointerId); blm(el, x, y, true); });
+  const up = () => { if (!held) return; held = false; k.classList.remove("pressed"); blm(el, x, y, false); };
+  k.addEventListener("pointerup", up); k.addEventListener("pointercancel", up);
+  return k;
+}
+for (let y = 0; y < 16; y++) {
+  keys[y] = [mxKey(2, 0, y, XC_X, KY(y))];
+  for (let x = 0; x < 16; x++) keys[y][x + 1] = mxKey(0, x, y, KX(x), KY(y));
+  mxLab(String(y + 1), 88, KY(y));
+}
+const shiftKey = mxAdd(div("key"), XC_X, XR_Y);
+shiftKey.title = "SHIFT (click to latch, or hold the Shift key)";
+shiftKey.addEventListener("pointerdown", e => { e.preventDefault(); setShift(!shiftOn); });
+keys[16] = [shiftKey];
+for (let x = 0; x < 16; x++) { keys[16][x + 1] = mxKey(1, x, 0, KX(x), XR_Y); mxLab("ABCDEFGHIJKLMNOP"[x], KX(x), 921); }
+mxLab("Shift", XC_X, 921);
+function setShift(on) { if (realMatrix || on === shiftOn) return; shiftOn = on; shiftKey.classList.toggle("held", on); blm(3, 0, 0, on); }
+
+// right strip: logo, OLED, faders, the MatriX's buttons A B ‹ ✓ + the joystick
+// (they reach the SEQ as on the hardware); ≡ and ↔ act on the MatriX itself
+mxLab("midi·phy", 1086, 65, "mlogo1"); mxLab("MatriX", 1086, 95, "mlogo2"); mxLab("Mechanical Grid", 1086, 120, "mlogo3");
+const moled = document.createElement("canvas");
+moled.className = "moled"; moled.width = 128; moled.height = 128;
+Object.assign(moled.style, { left: "1037px", top: "168px", width: "100px", height: "100px", imageRendering: "pixelated" });
+mx.append(moled);
+const mctx = moled.getContext("2d");
+let oledFlash = null, oledFlashUntil = 0;
+function drawMOled() {
+  mctx.fillStyle = "#000"; mctx.fillRect(0, 0, 128, 128);
+  mctx.fillStyle = "#e8f4ff"; mctx.font = "bold 14px ui-monospace, Menlo, monospace"; mctx.textAlign = "center"; mctx.textBaseline = "top";
+  mctx.fillText("1: Legacy BLM", 64, 4);                 // renderScreenMainSEQ
+  if (oledFlash && performance.now() < oledFlashUntil) { mctx.font = "bold 24px ui-monospace, Menlo, monospace"; mctx.fillText(oledFlash, 64, 54); }
+}
+drawMOled();
+
+// faders: MatriX sends fader n as a CC on chn n (1-4 = 0..3, Y = 4, X = 5)
+const faderVal = [0, 0, 0, 0, 0, 0];
+function fader(n, label, x, y, len, vertical) {
+  const f = div("fader " + (vertical ? "v" : "h"));
+  Object.assign(f.style, vertical ? { left: (x - 3) + "px", top: y + "px", height: len + "px" } : { left: x + "px", top: (y - 3) + "px", width: len + "px" });
+  const c = div("fcap"); f.append(c); mx.append(f);
+  const place = v => { const t = v / 127; if (vertical) c.style.top = ((1 - t) * (len - 9)) + "px"; else c.style.left = (t * (len - 9)) + "px"; };
+  place(0);
+  const setFromPointer = e => {
+    const r = f.getBoundingClientRect();
+    const t = vertical ? 1 - (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width;
+    const v = Math.max(0, Math.min(127, Math.round(t * 127)));
+    if (v === faderVal[n]) return;
+    faderVal[n] = v; place(v);
+    post(`/api/fader?n=${n}&v=${v}`);
+    oledFlash = `CC ${v}`; oledFlashUntil = performance.now() + 1000; drawMOled();
+  };
+  let drag = false;
+  f.addEventListener("pointerdown", e => { e.preventDefault(); drag = true; f.setPointerCapture(e.pointerId); setFromPointer(e); });
+  f.addEventListener("pointermove", e => { if (drag) setFromPointer(e); });
+  f.addEventListener("pointerup", () => drag = false);
+  f.title = `fader ${label}`;
+  mxLab(label, x + (vertical ? 13 : len / 2), vertical ? y + len / 2 : y + 13);
+}
+fader(0, "1", 1045, 407, 115, true); fader(1, "2", 1128, 407, 115, true);
+fader(2, "3", 1045, 560, 112, true); fader(3, "4", 1128, 560, 112, true);
+fader(4, "Y", 1029, 919, 112, false); fader(5, "X", 1029, 961, 112, false);
+setInterval(drawMOled, 250);
+// the MatriX's own buttons: A B ‹ ✓ and the stick press reach the SEQ (BLM SysEx
+// 0x10 on the hardware, /api/panel here). ≡ (menu) and ↔ (port) act on the
+// MatriX itself, so they stay inert on the stand-in — run matrixemu for them.
+const panelBtn = (b, down) => post(`/api/panel?b=${b}&down=${down ? 1 : 0}`);
+for (const [x, y, t, id, tip] of [
+    [1046, 715, "‹", 2, "‹ = EXIT on the SEQ (CAPTURE: cancel a grab; HELP: leave)"],
+    [1129, 715, "✓", 3, "✓ = play / stop (CAPTURE: commit the armed grab)"],
+    [1046, 880, "A", 0, "A: next par layer · RACK = plane flip · PLAY = loop x2 with notes"],
+    [1129, 880, "B", 1, "B: next trg layer · RACK = row on/off · PLAY = loop x2 empty (SHIFT+B = /2)"]]) {
+  const b = mxAdd(div("mbtn live"), x, y); b.title = tip;
+  b.addEventListener("pointerdown", e => { e.preventDefault(); b.classList.add("down"); b.setPointerCapture(e.pointerId); panelBtn(id, true); });
+  const up = () => { if (b.classList.contains("down")) { b.classList.remove("down"); panelBtn(id, false); } };
+  b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up);
+  mxLab(t, x, y + 20);
+}
+mxAdd(div("mbtn"), 1087, 705).title = "≡ opens the MatriX's own menu — not on the stand-in (run matrixemu)";
+mxLab("≡", 1087, 725);
+mxAdd(div("mbtn led"), 1087, 890).title = "↔ Port A/B is the MatriX's own — not on the stand-in";
+// joystick: drag = X / Y (the MatriX sends them as faders 6 / 7; springs back),
+// click without moving = press (home / follow)
+const joy = mxAdd(div("joy"), 1087, 797);
+const stick = div("stick"); joy.append(stick);
+joy.title = "joystick: drag = scroll / page (PLAY: SHIFT = keyboard shape, FULL: bend / mod), click = press (home)";
+let jdrag = null, jmoved = false, jlast = [64, 64];
+const JR = 30;
+function joySend(dx, dy) {
+  // the MatriX's convention: X right = a CC below 64, Y up = a CC above 64
+  const vx = Math.max(0, Math.min(127, Math.round(64 - (dx / JR) * 63)));
+  const vy = Math.max(0, Math.min(127, Math.round(64 - (dy / JR) * 63)));
+  if (vx !== jlast[0]) { jlast[0] = vx; post(`/api/fader?n=6&v=${vx}`); }
+  if (vy !== jlast[1]) { jlast[1] = vy; post(`/api/fader?n=7&v=${vy}`); }
+}
+function joySet(dx, dy) {
+  const m = Math.hypot(dx, dy), k = m > JR ? JR / m : 1;
+  dx *= k; dy *= k;
+  stick.style.transform = `translate(${dx}px, ${dy}px)`;
+  joySend(dx, dy);
+}
+joy.addEventListener("pointerdown", e => { e.preventDefault(); jdrag = { x: e.clientX, y: e.clientY }; jmoved = false; joy.classList.add("drag"); joy.setPointerCapture(e.pointerId); });
+joy.addEventListener("pointermove", e => {
+  if (!jdrag) return;
+  const s = mx.getBoundingClientRect().width / MX_W;
+  const dx = (e.clientX - jdrag.x) / s, dy = (e.clientY - jdrag.y) / s;
+  if (Math.hypot(dx, dy) > 3) jmoved = true;
+  if (jmoved) joySet(dx, dy);
+});
+joy.addEventListener("pointerup", () => {
+  joy.classList.remove("drag");
+  if (jdrag && !jmoved) {           // click = stick press
+    joy.classList.add("pressed"); panelBtn(4, true);
+    setTimeout(() => { joy.classList.remove("pressed"); panelBtn(4, false); }, 120);
+  } else joySet(0, 0);               // spring back
+  jdrag = null;
+});
+joy.addEventListener("pointercancel", () => { joy.classList.remove("drag"); joySet(0, 0); jdrag = null; });
+
+const mxHolder = document.getElementById("mxholder");
+function fitMx() { const sc = mxHolder.clientWidth / MX_W; mx.style.transform = `scale(${sc})`; mxHolder.style.height = (MX_H * sc) + "px"; }
+new ResizeObserver(fitMx).observe(mxHolder); fitMx();
+
+// colours (persisted per browser — a convenience, like the MatriX's own setup)
+const col = { 1: "#ff0000", 2: "#00ff00" };
+for (const n of [1, 2]) {
+  const inp = document.getElementById("col" + n);
+  try { const v = localStorage.getItem("mxcol" + n); if (v) { col[n] = v; inp.value = v; } } catch (e) {}
+  inp.addEventListener("input", () => { col[n] = inp.value; lastMx = ""; try { localStorage.setItem("mxcol" + n, inp.value); } catch (e) {} });
+}
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+function mix(g, r) {                       // additive, clamped (renderKeysMainSEQ)
+  if (!g && !r) return null;
+  const a = r ? hex(col[1]) : [0, 0, 0], b = g ? hex(col[2]) : [0, 0, 0];
+  return `rgb(${Math.min(255, a[0] + b[0])},${Math.min(255, a[1] + b[1])},${Math.min(255, a[2] + b[2])})`;
+}
+function setKey(k, c) { if (c) { k.classList.add("lit"); k.style.setProperty("--kc", c); } else k.classList.remove("lit"); }
+const MODES = ["GRID", "TRACKS", "PATTERNS", "KEYBOARD", "303", "RACK", "CAPTURE"];
+const ledClass = (g, r) => g && r ? "y" : g ? "g" : r ? "r" : "";
+let lastMx = "";
+function drawMatrix(b) {
+  const key = JSON.stringify(b);
+  if (key === lastMx) return;
+  lastMx = key;
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) setKey(keys[y][x + 1], mix((b.g[y] >> x) & 1, (b.r[y] >> x) & 1));
+    setKey(keys[y][0], mix((b.xcg >> y) & 1, (b.xcr >> y) & 1));
+  }
+  for (let x = 0; x < 16; x++) setKey(keys[16][x + 1], mix((b.xrg >> x) & 1, (b.xrr >> x) & 1));
+  document.getElementById("mtxInfo").textContent =
+    `mode ${MODES[b.mode] ?? b.mode}` + (b.mode === 5 ? " — columns = tracks, rows = rack rows · tap = focus, double-tap = on/off · faders 1-4/Y/X = the dials over GP1-6"
+                                                     : " — SHIFT + left column row 10 = RACK");
+}
+
+// ------------------------------------------------------------------ MIDI monitor + sound
+const NOTE = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const portName = p => (p & 0xfc) === 0x80 ? `CV${(p & 3) + 1}` : p >= 0x20 ? `OUT${(p & 0xf) + 1}` : p >= 0x10 ? `USB${(p & 0xf) + 1}` : `P${p}`;
+const mon = document.getElementById("mon");
+// Sound: hear what the SEQ plays with zero setup — a small multitimbral WebAudio synth.
+// Each MIDI-out event names the track that played it (the emulator tags its log from the
+// scheduler's tap; live keys and stop note-offs come untagged and fall back to the track on that
+// port + channel). A track's instrument comes from /api/tracks: a drum track gets a synthesized
+// kit (each drum by its name, else its GM note), a name with pad / bass / arp / lead / keys that
+// sound, a Chord track a pad, an Arpeggiator track a pluck; anything else is placed by what it
+// plays (low = bass, chords = pad, else lead). Notes are SCHEDULED at their emulator timestamps
+// plus a jitter buffer, not played when a poll delivers them: the page polls every ~40 ms, so a
+// short note's on + off often arrive together and poll jitter would smear the timing.
+const SND_LATENCY = 0.12;                 // s of jitter buffer
+const SND_INSTS = ["kit", "bass", "pad", "pluck", "lead", "keys", "mono"];
+const SND_KEY = "seqemu.sound.";
+const sndStore = {
+  get(k, d) { try { const v = localStorage.getItem(SND_KEY + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(SND_KEY + k, JSON.stringify(v)); } catch (e) {} },
+};
+const SND = {
+  ctx: null, on: sndStore.get("on", true), vol: sndStore.get("vol", 80), verbAmt: sndStore.get("verb", 45),
+  tracks: [], tracksAt: 0, parts: new Map(), byVoice: new Map(), tOffset: null, bpm: 120, running: false,
+  visible: 0, dirtyList: true,
+};
+const mtof = n => 440 * Math.pow(2, (n - 69) / 12);
+
+// ---- the audio graph: parts -> bus -> compressor -> master; sends -> reverb / tempo delay
+function sndStart() {
+  if (SND.ctx) { if (SND.ctx.state === "suspended") SND.ctx.resume(); return; }
+  const ctx = SND.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  SND.master = ctx.createGain();
+  SND.comp = ctx.createDynamicsCompressor();
+  SND.comp.threshold.value = -16; SND.comp.ratio.value = 4; SND.comp.attack.value = 0.004; SND.comp.release.value = 0.2;
+  SND.bus = ctx.createGain();
+  SND.bus.connect(SND.comp).connect(SND.master).connect(ctx.destination);
+  // reverb: a generated stereo tail
+  const len = Math.floor(ctx.sampleRate * 2.6), ir = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < len; i++) { const t = i / ctx.sampleRate; d[i] = (Math.random() * 2 - 1) * Math.exp(-3.4 * t) * (t < 0.012 ? t / 0.012 : 1); }
+  }
+  SND.verbIn = ctx.createGain();
+  const conv = ctx.createConvolver(); conv.buffer = ir;
+  SND.verbOut = ctx.createGain();
+  SND.verbIn.connect(conv).connect(SND.verbOut).connect(SND.comp);
+  // delay: dotted 8th at the SEQ's tempo, filtered feedback
+  SND.dlyIn = ctx.createGain();
+  SND.dly = ctx.createDelay(2);
+  const fb = ctx.createGain(); fb.gain.value = 0.38;
+  const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 2600;
+  const dOut = ctx.createGain(); dOut.gain.value = 0.55;
+  SND.dlyIn.connect(SND.dly); SND.dly.connect(lp).connect(fb).connect(SND.dly); SND.dly.connect(dOut).connect(SND.comp);
+  // a second of white noise for the drums
+  SND.noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+  const nd = SND.noise.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  sndLevels();
+  sndTempo(SND.bpm);
+  sndStatus();
+}
+function sndLevels() {
+  if (!SND.ctx) return;
+  const t = SND.ctx.currentTime;
+  SND.master.gain.setTargetAtTime(SND.on ? Math.pow(SND.vol / 100, 2) * 0.9 : 0, t, 0.03);
+  SND.verbOut.gain.setTargetAtTime((SND.verbAmt / 100) * 0.9, t, 0.05);
+}
+function sndTempo(bpm) {
+  SND.bpm = bpm || 120;
+  if (SND.dly) SND.dly.delayTime.setTargetAtTime(Math.min(1.9, 0.75 * 60 / SND.bpm), SND.ctx.currentTime, 0.05);
+}
+function sndTimeOf(tMs) {
+  const t = tMs / 1000, now = SND.ctx.currentTime;
+  if (SND.tOffset === null || t + SND.tOffset < now) SND.tOffset = now + SND_LATENCY - t; // (re)anchor
+  return t + SND.tOffset;
+}
+
+// ---- tracks: which instrument each one gets
+const DRUM_BY_NAME = [[/^(BD|BASSD|KICK|KIK|KK|BDRM)/, "kick"], [/^(SD|SN|SNR|SNARE)/, "snare"], [/^(CP|CLP|CLAP|HC)/, "clap"],
+  [/^(OH|HHO|OHH|OPEN|OPHH)/, "ohh"], [/^(CH|HH|HHC|CHH|HAT|CLHH)/, "chh"], [/^(LT|LTOM|LOT)/, "tomL"], [/^(MT|MTOM|MDT)/, "tomM"],
+  [/^(HT|HTOM|HIT)/, "tomH"], [/^(RS|RIM|RM)/, "rim"], [/^(CY|CR|CRSH|CRASH|RD|RIDE|CYM)/, "cym"], [/^(CB|COW|BELL)/, "cow"],
+  [/^(SH|SHK|MAR|TAMB|TB|PERC|PC|CONG|BONG)/, "shaker"], [/^TOM/, "tomM"]];
+const DRUM_BY_GM = { 35: "kick", 36: "kick", 37: "rim", 38: "snare", 39: "clap", 40: "snare", 41: "tomL", 42: "chh", 43: "tomL", 44: "chh",
+  45: "tomM", 46: "ohh", 47: "tomM", 48: "tomH", 49: "cym", 50: "tomH", 51: "cym", 52: "cym", 53: "cym", 54: "shaker", 55: "cym", 56: "cow",
+  57: "cym", 58: "shaker", 59: "cym", 60: "tomH", 61: "tomM", 62: "cow", 63: "tomH", 64: "tomL", 69: "shaker", 70: "shaker", 75: "rim", 76: "cow", 77: "cow" };
+const DRUM_ORDER = ["kick", "snare", "chh", "ohh", "clap", "tomL", "tomM", "tomH", "rim", "cym", "cow", "shaker"];
+async function sndTracks(force) {
+  if (!force && performance.now() - SND.tracksAt < 3000) return;
+  SND.tracksAt = performance.now();
+  try {
+    const r = await fetch("/api/tracks", { cache: "no-store" });
+    if (r.ok) { SND.tracks = await r.json(); for (const p of SND.parts.values()) p.label = null; SND.dirtyList = true; }
+  } catch (e) { /* older emulator: port + channel only */ }
+}
+function sndTrackName(tr) { return (tr && tr.name || "").replace(/\s+/g, " ").trim(); }
+function sndAuto(p) {
+  const tr = p.track != null ? SND.tracks[p.track] : null;
+  const cv = (p.port & 0xfc) === 0x80;                     // CV1..4: notes + gates on the AOUTs, ch16 = trigger outs
+  if (cv && p.chn === 15) return "kit";
+  if (tr) {
+    if (tr.mode === 3) return "kit";
+    const n = sndTrackName(tr).toLowerCase();
+    if (/\b(bd|kick|drums?|perc|hats?|snare|kit|909|808)\b/.test(n)) return "kit";
+    if (/bass|\bsub\b/.test(n)) return "bass";
+    if (/pad|chord|harm|string|choir|organ/.test(n)) return "pad";
+    if (/arp|pluck|\bseq\b|bell/.test(n)) return "pluck";
+    if (/keys|piano|\bep\b|rhodes/.test(n)) return "keys";
+    if (/lead|mel|line|acid|synth|solo/.test(n)) return "lead";
+    if (cv) return "mono";
+    if (tr.mode === 1) return "pad";
+    if (tr.play === 3) return "pluck";
+  }
+  if (cv) return "mono";
+  if (p.locked) return p.locked;
+  const s = p.stats;
+  let guess = "lead";
+  if (s.n >= 4) guess = s.maxPoly >= 3 ? "pad" : s.sum / s.n < 50 ? "bass" : "lead";
+  if (s.n >= 24) p.locked = guess;                         // settles once it has heard enough
+  return guess;
+}
+function sndDrum(p, note) {
+  const tr = p.track != null ? SND.tracks[p.track] : null;
+  if (tr && tr.drums) {
+    const i = tr.drums.findIndex(d => d.note === note);
+    if (i >= 0) {
+      const nm = tr.drums[i].name.replace(/\s+/g, "").toUpperCase();
+      for (const [re, v] of DRUM_BY_NAME) if (re.test(nm)) return v;
+      return DRUM_BY_GM[note] || DRUM_ORDER[i % DRUM_ORDER.length];
+    }
+  }
+  return DRUM_BY_GM[note] || DRUM_ORDER[note % 12];
+}
+// the track an untagged event belongs to: the one on that port + channel (port 0 = default)
+function sndTrackFor(port, chn) {
+  const hit = SND.tracks.map((tr, i) => ({ tr, i })).filter(({ tr }) => tr.chn === chn && (tr.port === port || tr.port === 0));
+  if (!hit.length) return null;
+  const vis = hit.find(h => h.i === SND.visible);
+  return (vis || hit.find(h => !h.tr.muted) || hit[0]).i;
+}
+
+// ---- parts: one channel strip per track (or per port + channel when no track is known)
+function sndPart(id, track, port, chn) {
+  let p = SND.parts.get(id);
+  if (!p) {
+    const saved = sndStore.get("part." + id, {});
+    p = { id, track, port, chn, inst: saved.inst || "auto", level: saved.level ?? 100, voices: new Map(), mono: null,
+          stats: { n: 0, sum: 0, poly: 0, maxPoly: 0 }, cc7: 1, cutoff: 1, bend: 0, act: 0, label: null };
+    SND.parts.set(id, p);
+    SND.dirtyList = true;
+  }
+  if (!p.in && SND.ctx) {
+    const c = SND.ctx;
+    p.in = c.createGain(); p.vol = c.createGain(); p.pan = c.createStereoPanner();
+    p.sendR = c.createGain(); p.sendD = c.createGain();
+    p.in.connect(p.vol).connect(p.pan).connect(SND.bus);
+    p.pan.connect(p.sendR).connect(SND.verbIn);
+    p.pan.connect(p.sendD).connect(SND.dlyIn);
+    sndPartLevel(p);
+  }
+  return p;
+}
+function sndInstOf(p) { return p.inst === "auto" ? sndAuto(p) : p.inst; }
+function sndPartLevel(p) {
+  if (!p.in) return;
+  const inst = sndInstOf(p), I = SYN[inst] || SYN.lead, t = SND.ctx.currentTime;
+  p.vol.gain.setTargetAtTime(inst === "off" ? 0 : I.level * p.cc7 * (p.level / 100), t, 0.02);
+  p.sendR.gain.setTargetAtTime(I.verb, t, 0.05);
+  p.sendD.gain.setTargetAtTime(I.dly, t, 0.05);
+}
+
+// ---- drums
+function sndNode(type, f, q) { const n = SND.ctx.createBiquadFilter(); n.type = type; n.frequency.value = f; if (q != null) n.Q.value = q; return n; }
+function sndEnv(g, at, peak, decay) {
+  g.gain.setValueAtTime(0.0001, at);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), at + 0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + decay);
+}
+function sndNoise(at, dur) { const s = SND.ctx.createBufferSource(); s.buffer = SND.noise; s.start(at, Math.random() * 0.4); s.stop(at + dur + 0.05); return s; }
+function sndOsc(type, f, at, dur) { const o = SND.ctx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, at); o.start(at); o.stop(at + dur + 0.05); return o; }
+function sndHit(p, src, filters, peak, decay, at) {
+  const g = SND.ctx.createGain();
+  let n = src;
+  for (const f of filters) n = n.connect(f);
+  n.connect(g).connect(p.in);
+  sndEnv(g, at, peak, decay);
+  return g;
+}
+const DRUMS = {
+  kick(p, at, v) {
+    const o = sndOsc("sine", 150, at, 0.5);
+    o.frequency.exponentialRampToValueAtTime(44, at + 0.1);
+    sndHit(p, o, [], v * 1.1, 0.45, at);
+    sndHit(p, sndNoise(at, 0.01), [sndNode("highpass", 2500)], v * 0.25, 0.012, at);
+  },
+  snare(p, at, v) {
+    sndHit(p, sndNoise(at, 0.22), [sndNode("highpass", 1100), sndNode("peaking", 3500, 1)], v * 0.55, 0.19, at);
+    const o = sndOsc("triangle", 190, at, 0.12); o.frequency.exponentialRampToValueAtTime(150, at + 0.08);
+    sndHit(p, o, [], v * 0.4, 0.09, at);
+  },
+  clap(p, at, v) {
+    const g = SND.ctx.createGain();
+    sndNoise(at, 0.25).connect(sndNode("bandpass", 1150, 1.1)).connect(g).connect(p.in);
+    g.gain.setValueAtTime(0.0001, at);
+    for (const d of [0, 0.011, 0.022]) { g.gain.setValueAtTime(v * 0.55, at + d); g.gain.exponentialRampToValueAtTime(v * 0.08, at + d + 0.009); }
+    g.gain.setValueAtTime(v * 0.45, at + 0.033);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + 0.22);
+  },
+  chh(p, at, v) {
+    sndHit(p, sndNoise(at, 0.06), [sndNode("highpass", 7800)], v * 0.32, 0.05, at);
+    if (p.ohh) { p.ohh.gain.cancelScheduledValues(at); p.ohh.gain.setTargetAtTime(0.0001, at, 0.008); p.ohh = null; }   // choke
+  },
+  ohh(p, at, v) { p.ohh = sndHit(p, sndNoise(at, 0.45), [sndNode("highpass", 7000)], v * 0.28, 0.4, at); },
+  tomL(p, at, v) { DRUMS.tom(p, at, v, 92); }, tomM(p, at, v) { DRUMS.tom(p, at, v, 132); }, tomH(p, at, v) { DRUMS.tom(p, at, v, 180); },
+  tom(p, at, v, f) { const o = sndOsc("sine", f, at, 0.45); o.frequency.exponentialRampToValueAtTime(f * 0.62, at + 0.3); sndHit(p, o, [], v * 0.8, 0.38, at); },
+  rim(p, at, v) { sndHit(p, sndOsc("triangle", 1650, at, 0.05), [], v * 0.45, 0.03, at); sndHit(p, sndNoise(at, 0.02), [sndNode("highpass", 3000)], v * 0.2, 0.012, at); },
+  cym(p, at, v) { sndHit(p, sndNoise(at, 1.6), [sndNode("highpass", 5500), sndNode("bandpass", 9000, 0.5)], v * 0.24, 1.4, at); },
+  cow(p, at, v) {
+    const g = SND.ctx.createGain(), bp = sndNode("bandpass", 2600, 2.5);
+    for (const f of [545, 815]) sndOsc("square", f, at, 0.35).connect(bp);
+    bp.connect(g).connect(p.in); sndEnv(g, at, v * 0.3, 0.28);
+  },
+  shaker(p, at, v) { sndHit(p, sndNoise(at, 0.1), [sndNode("bandpass", 6500, 1.8)], v * 0.3, 0.075, at); },
+};
+
+// ---- melodic instruments: make() starts a voice, the voice's g fades on release
+const SYN = {
+  kit:   { level: 0.9, verb: 0.08, dly: 0 },
+  off:   { level: 0, verb: 0, dly: 0 },
+  pad:   { level: 0.3, verb: 0.5, dly: 0.12, rel: 0.9, make(p, f, v, at) {
+    const flt = sndNode("lowpass", (700 + 1700 * v) * p.cutoff, 0.7), g = SND.ctx.createGain();
+    const os = [-8, 8].map(c => { const o = SND.ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = f; o.detune.value = c + p.bend * 100; o.connect(flt); o.start(at); return o; });
+    flt.connect(g).connect(p.in);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.55 * v, at + 0.32);
+    return { os, g, flt, det: [-8, 8] };
+  } },
+  bass:  { level: 0.62, verb: 0.03, dly: 0, mono: true, rel: 0.07, glide: 0.045, make(p, f, v, at) {
+    const flt = sndNode("lowpass", 200, 7), g = SND.ctx.createGain();
+    const a = SND.ctx.createOscillator(); a.type = "sawtooth"; a.frequency.value = f;
+    const b = SND.ctx.createOscillator(); b.type = "square"; b.frequency.value = f / 2;
+    const sub = SND.ctx.createGain(); sub.gain.value = 0.45;
+    a.connect(flt); b.connect(sub).connect(flt); flt.connect(g).connect(p.in);
+    const peak = (240 + 2600 * v) * p.cutoff;
+    flt.frequency.setValueAtTime(peak, at); flt.frequency.setTargetAtTime(170 * p.cutoff, at + 0.01, 0.09);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.75 * v, at + 0.004);
+    a.start(at); b.start(at);
+    return { os: [a, b], g, flt, det: [0, 0], ratio: [1, 0.5] };
+  } },
+  pluck: { level: 0.36, verb: 0.25, dly: 0.38, rel: 0.12, make(p, f, v, at) {
+    const flt = sndNode("lowpass", (900 + 4600 * v) * p.cutoff, 3.5), g = SND.ctx.createGain();
+    const o = SND.ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = f; o.detune.value = p.bend * 100;
+    o.connect(flt).connect(g).connect(p.in);
+    flt.frequency.setTargetAtTime(330 * p.cutoff, at + 0.005, 0.09);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.7 * v, at + 0.002); g.gain.setTargetAtTime(0.0001, at + 0.01, 0.16);
+    o.start(at);
+    return { os: [o], g, flt, det: [0] };
+  } },
+  lead:  { level: 0.32, verb: 0.24, dly: 0.2, mono: true, rel: 0.16, glide: 0.03, make(p, f, v, at) {
+    const flt = sndNode("lowpass", 2600 * p.cutoff, 1.8), g = SND.ctx.createGain();
+    const os = [["sawtooth", 0], ["square", 6]].map(([type, c]) => { const o = SND.ctx.createOscillator(); o.type = type; o.frequency.value = f; o.detune.value = c + p.bend * 100; o.connect(flt); o.start(at); return o; });
+    const lfo = SND.ctx.createOscillator(), dep = SND.ctx.createGain();
+    lfo.frequency.value = 5.3; dep.gain.setValueAtTime(0, at); dep.gain.linearRampToValueAtTime(7, at + 0.35);
+    lfo.connect(dep); for (const o of os) dep.connect(o.detune);
+    lfo.start(at);
+    flt.connect(g).connect(p.in);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.6 * v, at + 0.012);
+    return { os: [...os, lfo], g, flt, det: [0, 6], ratio: [1, 1] };
+  } },
+  mono:  { level: 0.4, verb: 0.14, dly: 0.12, mono: true, rel: 0.05, glide: 0.025, make(p, f, v, at) {
+    const flt = sndNode("lowpass", 300, 9), g = SND.ctx.createGain();
+    const os = [["sawtooth", -4], ["square", 4]].map(([type, c]) => { const o = SND.ctx.createOscillator(); o.type = type; o.frequency.value = f; o.detune.value = c + p.bend * 100; o.connect(flt); o.start(at); return o; });
+    const peak = (500 + 4200 * v) * p.cutoff;
+    flt.frequency.setValueAtTime(peak, at); flt.frequency.setTargetAtTime(380 * p.cutoff, at + 0.004, 0.12);
+    flt.connect(g).connect(p.in);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.7, at + 0.003);   // a gate: no velocity on the VCA
+    return { os, g, flt, det: [-4, 4], ratio: [1, 1] };
+  } },
+  keys:  { level: 0.42, verb: 0.3, dly: 0.12, rel: 0.35, make(p, f, v, at) {
+    const car = SND.ctx.createOscillator(), mod = SND.ctx.createOscillator(), idx = SND.ctx.createGain(), g = SND.ctx.createGain();
+    car.frequency.value = f; mod.frequency.value = f; car.detune.value = p.bend * 100;
+    idx.gain.setValueAtTime(f * 2.8 * v, at); idx.gain.setTargetAtTime(f * 0.35, at + 0.01, 0.35);
+    mod.connect(idx).connect(car.frequency);
+    car.connect(g).connect(p.in);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.6 * v, at + 0.003); g.gain.setTargetAtTime(0.18 * v, at + 0.01, 0.6);
+    car.start(at); mod.start(at);
+    return { os: [car, mod], g, det: [0] };
+  } },
+};
+function sndRelease(voice, at, rel) {
+  if (voice.gone) return;
+  voice.gone = true;
+  at = Math.max(at, voice.start + 0.005);
+  const g = voice.g.gain;
+  if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(at); else g.cancelScheduledValues(at);
+  g.setTargetAtTime(0, at, rel / 3);
+  for (const o of voice.os) try { o.stop(at + rel * 2 + 0.05); } catch (e) {}
+}
+function sndAllOff(p) {
+  const parts = p ? [p] : [...SND.parts.values()];
+  if (!SND.ctx) return;
+  const at = SND.ctx.currentTime;
+  for (const q of parts) {
+    for (const v of q.voices.values()) sndRelease(v, at, 0.08);
+    q.voices.clear();
+    if (q.mono) { sndRelease(q.mono.voice, at, 0.08); q.mono = null; }
+    if (q.ohh) { q.ohh.gain.cancelScheduledValues(at); q.ohh.gain.setTargetAtTime(0.0001, at, 0.01); q.ohh = null; }
+    q.stats.poly = 0;
+  }
+  SND.byVoice.clear();
+}
+
+// ---- events from the MIDI-out log: [t_ms, port, b0, b1, b2, track+1 | 0]
+function sndEvent(ev) {
+  if (!SND.on || !SND.ctx || SND.ctx.state !== "running") { SND.tOffset = null; return; }
+  const [tMs, port, b0, b1, b2, trk] = ev, type = b0 & 0xf0, chn = b0 & 15;
+  const vkey = `${port}:${chn}:${b1}`;
+  const isOff = type === 0x80 || (type === 0x90 && b2 === 0);
+  if (isOff && !trk && SND.byVoice.has(vkey)) return sndNoteOff(SND.byVoice.get(vkey), vkey, b1, sndTimeOf(tMs));
+  let track = trk ? trk - 1 : sndTrackFor(port, chn);
+  if (track == null && !SND.tracks.length) sndTracks(true);
+  const id = track != null ? "t" + (track + 1) : `p${port}c${chn}`;
+  const p = sndPart(id, track, port, chn);
+  if (track != null && p.track !== track) { p.track = track; p.label = null; }
+  const at = sndTimeOf(tMs);
+  if (type === 0x90 && b2 > 0) return sndNoteOn(p, vkey, b1, b2, at);
+  if (isOff) return sndNoteOff(p, vkey, b1, at);
+  if (type === 0xb0) {
+    if (b1 === 7) { p.cc7 = Math.pow(b2 / 127, 2); sndPartLevel(p); }
+    else if (b1 === 10) p.pan.pan.setTargetAtTime((b2 - 64) / 64, at, 0.02);
+    else if (b1 === 74) p.cutoff = 0.25 + 1.5 * b2 / 127;
+    else if (b1 === 120 || b1 === 123) sndAllOff(p);
+  } else if (type === 0xe0) {
+    p.bend = (((b2 << 7) | b1) - 8192) / 8192 * 2;          // ±2 semitones
+    const all = [...p.voices.values(), ...(p.mono ? [p.mono.voice] : [])];
+    for (const v of all) v.os.forEach((o, i) => { if (v.det && i < v.det.length) o.detune.setTargetAtTime((v.det[i] || 0) + p.bend * 100, at, 0.01); });
+  }
+}
+function sndNoteOn(p, vkey, note, vel, at) {
+  const inst = sndInstOf(p), v = Math.pow(vel / 127, 1.1);
+  p.act = performance.now();
+  p.stats.n++; p.stats.sum += note; p.stats.poly++; p.stats.maxPoly = Math.max(p.stats.maxPoly, p.stats.poly);
+  if (p.stats.n === 4 || p.stats.n === 24) { sndPartLevel(p); SND.dirtyList = true; }
+  if (inst === "off") return;
+  if (inst === "kit") { (DRUMS[sndDrum(p, note)] || DRUMS.rim)(p, at, v); return; }
+  const I = SYN[inst], f = mtof(note);
+  if (I.mono) {
+    if (p.mono && p.mono.held.length && !p.mono.voice.gone) {          // legato: slide (the SEQ's Gld)
+      p.mono.held.push(note);
+      const vc = p.mono.voice;
+      vc.os.forEach((o, i) => { if (vc.ratio && i < vc.ratio.length) o.frequency.setTargetAtTime(f * vc.ratio[i], at, I.glide); });
+      SND.byVoice.set(vkey, p);
+      return;
+    }
+    if (p.mono) sndRelease(p.mono.voice, at, 0.02);
+    const voice = I.make(p, f, v, at); voice.start = at;
+    p.mono = { voice, held: [note] };
+    for (const o of voice.os) o.stop(at + 60);                     // safety: never drone if an off is lost
+  } else {
+    const old = p.voices.get(vkey);
+    if (old) sndRelease(old, at, 0.02);
+    if (p.voices.size >= 12) { const [k, oldest] = p.voices.entries().next().value; sndRelease(oldest, at, 0.05); p.voices.delete(k); }
+    const voice = I.make(p, f, v, at); voice.start = at;
+    for (const o of voice.os) o.stop(at + 60);
+    p.voices.set(vkey, voice);
+  }
+  SND.byVoice.set(vkey, p);
+}
+function sndNoteOff(p, vkey, note, at) {
+  p.stats.poly = Math.max(0, p.stats.poly - 1);
+  SND.byVoice.delete(vkey);
+  const inst = sndInstOf(p), I = SYN[inst] || SYN.lead;
+  if (p.mono) {
+    const m = p.mono, i = m.held.lastIndexOf(note);
+    if (i >= 0) m.held.splice(i, 1);
+    if (!m.held.length) { sndRelease(m.voice, at, I.rel || 0.1); p.mono = null; }
+    else if (i === m.held.length) {                                // released the sounding note: back to the last held one
+      const f = mtof(m.held[m.held.length - 1]);
+      m.voice.os.forEach((o, k) => { if (m.voice.ratio && k < m.voice.ratio.length) o.frequency.setTargetAtTime(f * m.voice.ratio[k], at, I.glide || 0.03); });
+    }
+    return;
+  }
+  const voice = p.voices.get(vkey);
+  if (voice) { sndRelease(voice, at, I.rel || 0.2); p.voices.delete(vkey); }
+}
+
+// ---- the Sound window
+const sndOnEl = document.getElementById("sndOn"), prevEl = document.getElementById("preview");
+function sndStatus() {
+  const st = document.getElementById("sndSt");
+  const ready = SND.ctx && SND.ctx.state === "running";
+  st.textContent = !SND.on ? "off" : ready ? "" : "click anywhere to start the sound";
+  st.classList.toggle("warn", SND.on && !ready);
+  document.getElementById("sndSw").classList.toggle("on", SND.on);
+}
+function sndSetOn(on) {
+  SND.on = on; sndStore.set("on", on);
+  sndOnEl.checked = prevEl.checked = on;
+  if (on) sndStart(); else sndAllOff();
+  sndLevels(); sndStatus();
+}
+function sndPartLabel(p) {
+  if (p.label) return p.label;
+  const tr = p.track != null ? SND.tracks[p.track] : null;
+  const where = tr ? `${portName(tr.port || p.port)} ch${tr.chn + 1}` : `${portName(p.port)} ch${p.chn + 1}`;
+  const name = tr ? (tr.mode === 3 ? "drums" : sndTrackName(tr)) : "";
+  return (p.label = { who: p.track != null ? `T${p.track + 1}` : "—", name, where });
+}
+function sndRenderList() {
+  SND.dirtyList = false;
+  const box = document.getElementById("sndParts");
+  const parts = [...SND.parts.values()].filter(p => !p.id.startsWith("test")).sort((a, b) => (a.track ?? 99) - (b.track ?? 99) || a.id.localeCompare(b.id));
+  if (!parts.length) { box.innerHTML = `<div class="snd-empty">Press PLAY: every track that plays shows up here with its instrument.</div>`; return; }
+  box.innerHTML = parts.map(p => {
+    const L = sndPartLabel(p), auto = sndAuto(p);
+    const opts = [["auto", `auto (${auto})`], ...SND_INSTS.map(i => [i, i]), ["off", "off"]]
+      .map(([v, l]) => `<option value="${v}"${p.inst === v ? " selected" : ""}>${l}</option>`).join("");
+    return `<div class="snd-row" data-part="${p.id}"><span class="snd-led" data-led="${p.id}"></span>` +
+      `<span class="who"><b>${L.who}</b>${(L.name || "").replace(/[&<>"]/g, "")}<small>${L.where}</small></span>` +
+      `<select data-inst="${p.id}" aria-label="Instrument for ${L.who}">${opts}</select>` +
+      `<input type="range" min="0" max="150" value="${p.level}" data-level="${p.id}" aria-label="Level for ${L.who}" title="Level"></div>`;
+  }).join("");
+}
+function sndTick() {
+  if (SND.dirtyList) sndRenderList();
+  const now = performance.now();
+  for (const el of document.querySelectorAll("[data-led]")) {
+    const p = SND.parts.get(el.dataset.led);
+    el.classList.toggle("on", !!p && now - p.act < 150);
+  }
+  requestAnimationFrame(sndTick);
+}
+document.getElementById("sndParts").addEventListener("change", e => {
+  const id = e.target.dataset.inst || e.target.dataset.level, p = SND.parts.get(id);
+  if (!p) return;
+  if (e.target.dataset.inst) { sndAllOff(p); p.inst = e.target.value; p.locked = null; }
+  else p.level = +e.target.value;
+  sndStore.set("part." + id, { inst: p.inst, level: p.level });
+  sndPartLevel(p);
+  SND.dirtyList = true;
+});
+document.getElementById("sndParts").addEventListener("input", e => {
+  const p = SND.parts.get(e.target.dataset.level);
+  if (p) { p.level = +e.target.value; sndPartLevel(p); }
+});
+sndOnEl.addEventListener("change", () => sndSetOn(sndOnEl.checked));
+prevEl.addEventListener("change", () => sndSetOn(prevEl.checked));
+document.getElementById("sndVol").value = SND.vol;
+document.getElementById("sndVerb").value = SND.verbAmt;
+document.getElementById("sndVol").addEventListener("input", e => { SND.vol = +e.target.value; sndStore.set("vol", SND.vol); sndLevels(); });
+document.getElementById("sndVerb").addEventListener("input", e => { SND.verbAmt = +e.target.value; sndStore.set("verb", SND.verbAmt); sndLevels(); });
+document.getElementById("sndTest").addEventListener("click", () => {
+  sndSetOn(true);
+  const kit = sndPart("test-kit", null, 0, 0), pad = sndPart("test-pad", null, 0, 0), at = SND.ctx.currentTime + 0.05;
+  kit.inst = "kit"; pad.inst = "pad"; sndPartLevel(kit); sndPartLevel(pad);
+  DRUMS.kick(kit, at, 0.9); DRUMS.chh(kit, at + 0.25, 0.7); DRUMS.snare(kit, at + 0.5, 0.8); DRUMS.ohh(kit, at + 0.75, 0.6);
+  for (const n of [57, 60, 64, 67]) { const v = SYN.pad.make(pad, mtof(n), 0.7, at + 1); v.start = at + 1; sndRelease(v, at + 2.2, 0.9); }
+});
+// browsers start audio only from a click or key: the first one anywhere does it
+for (const evt of ["pointerdown", "keydown"]) document.addEventListener(evt, () => { if (SND.on) { sndStart(); setTimeout(sndStatus, 50); } }, true);
+sndOnEl.checked = prevEl.checked = SND.on;
+sndStatus();
+requestAnimationFrame(sndTick);
+function logMidi(ev) {
+  const [t, port, b0, b1, b2] = ev, type = b0 & 0xf0, ch = (b0 & 15) + 1;
+  const isNote = type === 0x90 || type === 0x80;
+  if (document.getElementById("monNotesOnly").checked && !isNote) return;
+  let txt;
+  if (isNote) txt = `${type === 0x90 && b2 ? "ON " : "off"} ${NOTE[b1 % 12]}${Math.floor(b1 / 12) - 2}`.padEnd(9) + ` vel ${String(b2).padStart(3)}`;
+  else if (type === 0xb0) txt = `CC  ${String(b1).padStart(3)} = ${b2}`;
+  else if (type === 0xe0) txt = `PB  ${(b2 << 7 | b1) - 8192}`;
+  else txt = `${b0.toString(16)} ${b1} ${b2}`;
+  const d = document.createElement("div");
+  d.className = "ev" + (type === 0x90 && b2 ? " on" : "");
+  d.textContent = `${(t / 1000).toFixed(3).padStart(9)}  ${portName(port).padEnd(5)} ch${String(ch).padEnd(3)}${txt}`;
+  mon.append(d);
+  while (mon.childElementCount > 300) mon.firstChild.remove();
+  mon.scrollTop = mon.scrollHeight;
+}
+document.getElementById("monClear").addEventListener("click", () => mon.replaceChildren());
+
+// ------------------------------------------------------------------ poll loop
+let since = 0, running = false;
+function setConn(ok) {
+  document.getElementById("conn").className = "dot " + (ok ? "ok" : "bad");
+  document.getElementById("connTxt").textContent = ok ? "connected" : "offline — is seqemu running?";
+}
+function applyLeds(s) {
+  for (const [name, { el, kind }] of Object.entries(ctl)) {
+    if (kind === "cap") {
+      const m = /^(gp|sel)(\d+)$/.exec(name), [c1, c2] = s[m[1]], bit = 1 << (+m[2] - 1);
+      const c = ledClass(c1 & bit, c2 & bit);
+      el.classList.remove("g", "r", "y"); if (c) el.classList.add(c);
+    } else {
+      el.classList.toggle("lit", !!s.leds[name]);
+    }
+    if (configured) el.classList.toggle("off", !configured.has(name));
+  }
+  beat.classList.toggle("lit", !!s.leds.beat);
+}
+async function poll() {
+  try {
+    const r = await fetch(`/api/state?since=${since}`, { cache: "no-store" });
+    const s = await r.json();
+    setConn(true);
+    drawLcds(s.lcd, s.cgram);
+    if (s.tpd) { tpdCanvas.hidden = !s.tpd.on; if (s.tpd.on) drawTpd(s.tpd); }
+    applyLeds(s);
+    if (!realMatrix) drawMatrix(s.blm);
+    running = !!s.running;
+    if (s.page !== lastPage) {
+      if (lastPage !== null && latched.size && performance.now() > latchArm) releaseLatches();
+      lastPage = s.page;
+    }
+    document.getElementById("bpm").textContent = s.bpm.toFixed(1);
+    document.getElementById("run").textContent = s.running ? "PLAYING" : "stopped";
+    document.getElementById("trk").textContent = `G${(s.track >> 2) + 1}T${(s.track & 3) + 1}`;
+    document.getElementById("stp").textContent = s.step + 1;
+    if (SND.running && !s.running) sndAllOff();       // STOP: silence everything still sounding
+    SND.running = !!s.running; SND.visible = s.track;
+    if (s.bpm && Math.abs(s.bpm - SND.bpm) > 0.05) sndTempo(s.bpm);
+    if (SND.on) sndTracks();
+    for (const ev of s.midi) { logMidi(ev); sndEvent(ev); }
+    since = s.midi_last;
+  } catch (e) { setConn(false); }
+  setTimeout(poll, 40);
+}
+let realMatrix = false;
+fetch("/api/config").then(r => r.json()).then(c => {
+  configured = new Set(c.buttons); font = c.font; lastLcdKey = "";
+  if (c.matrix) useRealMatrix(c.matrix);
+}).catch(() => {});
+
+// --matrix: the real MatriX firmware runs in its own emulator (matrixemu, cabled
+// to DIN 4) and serves its own panel — embed that instead of the stand-in
+function useRealMatrix(url) {
+  realMatrix = true;
+  const win = document.getElementById("win-mx");
+  const sec = win.querySelector(".body");
+  win.querySelector(".ttl").textContent = "MatriX — real firmware (matrixemu, DIN 4)";
+  document.getElementById("mxholder").hidden = true;
+  sec.querySelector(".mxbar").hidden = true;
+  const f = document.createElement("iframe");
+  f.src = url; f.title = "MatriX";
+  Object.assign(f.style, { width: "100%", aspectRatio: "1180 / 1125", border: "0", display: "block", background: "transparent" });
+  sec.append(f);
+}
+poll();
+
+// ------------------------------------------------------------------ manual test checklist
+// Items: doc/testing/manual-checklist.json (served by seqemu). Results per item
+// and per TARGET (emu / hw: the same list serves the hardware session): status
+// pass / fail / skip + a note + when, saved by seqemu to doc/testing/
+// manual-results.json (debounced). If the save can't reach the emulator, they
+// are kept in this browser and saved on the next successful write.
+const ck = { items: null, res: { version: 1, items: {} }, target: "emu", filter: "all", saveTimer: null };
+try { ck.target = localStorage.getItem("seqemu.ck.target") || "emu"; ck.filter = localStorage.getItem("seqemu.ck.filter") || "all"; } catch (e) {}
+const ckEl = id => document.getElementById(id);
+const ckEsc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function ckR(id, tgt = ck.target) { return (ck.res.items[id] || {})[tgt] || {}; }
+function ckSet(id, patch) {
+  const it = ck.res.items[id] = ck.res.items[id] || {};
+  it[ck.target] = Object.assign({}, it[ck.target] || {}, patch, { t: new Date().toISOString() });
+  ckSave();
+}
+function ckSave() {
+  ckEl("ckSaved").textContent = "saving…";
+  clearTimeout(ck.saveTimer);
+  ck.saveTimer = setTimeout(async () => {
+    const body = JSON.stringify(ck.res, null, 1);
+    try { localStorage.setItem("seqemu.ck.results", body); } catch (e) {}
+    try {
+      const r = await fetch("/api/checklist/results", { method: "POST", headers: { "X-SeqEmu": "1", "Content-Type": "application/json" }, body });
+      if (!r.ok) throw new Error(r.status);
+      ckEl("ckSaved").textContent = "saved to doc/testing/manual-results.json";
+      try { localStorage.removeItem("seqemu.ck.results"); } catch (e) {}
+    } catch (e) { ckEl("ckSaved").textContent = "not saved to the file (kept in this browser)"; }
+  }, 600);
+}
+function ckApplies(item) { return (item.targets || ["emu", "hw"]).includes(ck.target); }
+function ckRender() {
+  if (!ck.items) return;
+  ckEl("ckEmu").classList.toggle("on", ck.target === "emu");
+  ckEl("ckHw").classList.toggle("on", ck.target === "hw");
+  ckEl("ckFilter").value = ck.filter;
+  const list = ckEl("ckList");
+  const open = new Set([...list.querySelectorAll(".ck-item[data-open]")].map(e => e.dataset.id));
+  list.replaceChildren();
+  let total = 0, done = 0, fail = 0;
+  for (const sec of ck.items.sections) {
+    const det = document.createElement("details"); det.className = "ck-sec"; det.open = true;
+    const sum = document.createElement("summary");
+    let sTot = 0, sDone = 0;
+    const body = document.createElement("div");
+    for (const item of sec.items) {
+      const ap = ckApplies(item), r = ckR(item.id);
+      if (ap) { total++; sTot++; if (r.s) { done++; sDone++; } if (r.s === "fail") fail++; }
+      const show = ck.filter === "all" || (ap && ((ck.filter === "todo" && !r.s) || r.s === ck.filter));
+      if (!show) continue;
+      const el = document.createElement("div");
+      el.className = "ck-item" + (ap ? "" : " na"); el.dataset.id = item.id;
+      const other = ck.target === "emu" ? "hw" : "emu", ro = ckR(item.id, other);
+      el.innerHTML = `<div class="ck-head">
+          <span class="ck-st">${ap ? ["pass", "fail", "skip"].map(st => `<button type="button" class="${st}${r.s === st ? " on" : ""}" data-st="${st}" title="${st}" aria-label="${st}">${{ pass: "✓", fail: "✗", skip: "–" }[st]}</button>`).join("") : ""}</span>
+          <span class="ck-title" tabindex="0" role="button" aria-expanded="false">${ckEsc(item.title)}</span>
+          <span class="ck-other">${ap ? "" : "n/a here · "}${ro.s ? `${other}: ${ro.s}` : ""}</span>
+        </div>`;
+      const b = document.createElement("div"); b.className = "ck-body";
+      b.innerHTML = `<ol>${(item.steps || []).map(x => `<li>${ckEsc(x)}</li>`).join("")}</ol>
+        <div class="exp"><b>Expect:</b> ${ckEsc(item.expect || "")}</div>
+        ${ap ? `<textarea placeholder="notes (${ck.target === "emu" ? "emulator" : "hardware"})">${ckEsc(r.note || "")}</textarea>
+        <div class="when">${r.t ? "last update " + new Date(r.t).toLocaleString() : ""}</div>` : ""}`;
+      b.hidden = !open.has(item.id);
+      if (!b.hidden) el.dataset.open = "1";
+      el.append(b);
+      const title = el.querySelector(".ck-title");
+      const toggle = () => { b.hidden = !b.hidden; if (b.hidden) delete el.dataset.open; else el.dataset.open = "1"; title.setAttribute("aria-expanded", String(!b.hidden)); };
+      title.addEventListener("click", toggle);
+      title.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+      el.querySelectorAll(".ck-st button").forEach(btn => btn.addEventListener("click", () => {
+        const st = btn.dataset.st;
+        ckSet(item.id, { s: ckR(item.id).s === st ? "" : st });
+        if (st === "fail" && b.hidden) toggle();          // a failure wants a note
+        ckRender();
+      }));
+      const ta = b.querySelector("textarea");
+      if (ta) ta.addEventListener("input", () => ckSet(item.id, { note: ta.value }));
+      body.append(el);
+    }
+    sum.innerHTML = `${ckEsc(sec.title)}<span class="n">${sDone}/${sTot}</span>`;
+    det.append(sum, body);
+    if (body.childElementCount) list.append(det);
+  }
+  ckEl("ckProg").textContent = `${ck.target === "emu" ? "Emulator" : "Hardware"}: ${done}/${total} done${fail ? ` · ${fail} failed` : ""}`;
+}
+ckEl("ckEmu").addEventListener("click", () => { ck.target = "emu"; try { localStorage.setItem("seqemu.ck.target", "emu"); } catch (e) {} ckRender(); });
+ckEl("ckHw").addEventListener("click", () => { ck.target = "hw"; try { localStorage.setItem("seqemu.ck.target", "hw"); } catch (e) {} ckRender(); });
+ckEl("ckFilter").addEventListener("change", e => { ck.filter = e.target.value; try { localStorage.setItem("seqemu.ck.filter", ck.filter); } catch (e2) {} ckRender(); });
+(async () => {
+  try {
+    ck.items = await (await fetch("/api/checklist", { cache: "no-store" })).json();
+    const saved = await (await fetch("/api/checklist/results", { cache: "no-store" })).json();
+    ck.res = (saved && saved.items) ? saved : { version: 1, items: {} };
+    let pending = null;
+    try { pending = JSON.parse(localStorage.getItem("seqemu.ck.results") || "null"); } catch (e) {}
+    if (pending && pending.items) { ck.res = pending; ckSave(); }   // an unsaved session from this browser
+  } catch (e) { ckEl("ckList").textContent = "Checklist unavailable (doc/testing/manual-checklist.json)"; }
+  ckRender();
+})();
+
+// Demos opens the editor talking to this emulator over /api/sysex (no Web MIDI). In the browser
+// build (wasm/: its shim tags the page, its build rewrites the Editor link) the editor finds the
+// SEQ in this tab through window.opener - so neither link is noopener.
+if (document.querySelector("script[data-device]"))
+  document.getElementById("demosLink").href = document.getElementById("editorLink").getAttribute("href") + "?tab=set#demos";
+
+// ------------------------------------------------------------------ keyboard
+const tapKey = name => { pressBtn(name, true); setTimeout(() => pressBtn(name, false), 60); };
+// M holds Menu for as long as the key is down (hold M + click a GP = the page shortcut)
+let menuKey = false;
+const menuHold = down => { if (menuKey === down) return; menuKey = down; ctl.menu?.el.classList.toggle("down", down); pressBtn("menu", down); };
+const isMenuKey = e => (e.key || "").toLowerCase() === "m" && !e.metaKey && !e.ctrlKey && !e.altKey;
+document.addEventListener("keydown", e => {
+  if (e.target.closest && e.target.closest("input, textarea, select, button, [role=button], .knob")) return;
+  if (e.key === "Shift") { setShift(true); return; }
+  if (e.repeat) return;
+  if (isMenuKey(e)) { menuHold(true); return; }
+  if (e.key === " ") { e.preventDefault(); tapKey(running ? "stop" : "play"); }
+  else if (e.key === "Escape") tapKey("exit");
+  else if (e.key === "ArrowLeft") { e.preventDefault(); tapKey("down"); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); tapKey("up"); }
+  else if (e.key === "[") turnEnc(0, -1);
+  else if (e.key === "]") turnEnc(0, 1);
+});
+document.addEventListener("keyup", e => { if (e.key === "Shift") setShift(false); if ((e.key || "").toLowerCase() === "m") menuHold(false); });
+window.addEventListener("blur", () => { setShift(false); menuHold(false); });
+</script>
+</body>
+</html>

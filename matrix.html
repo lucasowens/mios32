@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head><script src="shim.js" data-device="mx"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MatriX emu</title>
+<style>
+  :root { --bg: #15161a; --dim: #8a9099; --text: #d8dbe0; --g: #3ddc63; --r: #ff5a3c; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+               font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .bar { display: flex; gap: 12px; align-items: center; padding: 0 2px 8px; color: var(--dim); font-size: 11px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #444; margin-right: 5px; vertical-align: middle; }
+  .dot.ok { background: var(--g); } .dot.bad { background: var(--r); }
+  .holder { width: 100%; position: relative; }
+  /* device px measured off the midiphy MatriX photo (1180 x 1015), scaled to fit */
+  .mx { position: absolute; left: 0; top: 0; width: 1180px; height: 1015px; transform-origin: 0 0; user-select: none;
+        background: linear-gradient(180deg, #f2f1ec, #e9e8e2 70%, #dfddd6); border: 1px solid #d0cec7; border-radius: 6px;
+        box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  .frame { position: absolute; border: 2px solid #9a9a96; border-radius: 3px; background: #b9b8b2; }
+  .key { position: absolute; width: 50px; height: 50px; transform: translate(-50%, -50%); border-radius: 4px; cursor: pointer; touch-action: none;
+         background: linear-gradient(180deg, #fbfbf9, #e7e6e1); box-shadow: 0 2px 0 #a9a8a2, 0 3px 5px rgba(0,0,0,.18); }
+  .key::after { content: ""; position: absolute; inset: 11px; border-radius: 5px; background: #cfcfcc; box-shadow: inset 0 1px 3px rgba(0,0,0,.25); }
+  /* --kc: the lens, --kg: its glow, --kt: the keycap tint (all from ledLook) */
+  .key.lit::after { background: var(--kc); box-shadow: 0 0 10px 3px var(--kg), inset 0 0 6px rgba(255,255,255,.6); }
+  .key.lit { background: radial-gradient(circle, var(--kt) 0%, #f4f4f1 75%); }
+  .key.down { transform: translate(-50%, calc(-50% + 2px)); box-shadow: 0 0 0 #a9a8a2, 0 1px 2px rgba(0,0,0,.2); }
+  .key.held { outline: 3px solid #e0a020; outline-offset: 2px; }
+  .lab { position: absolute; transform: translate(-50%, -50%); color: #6a6b6e; font-size: 11px; pointer-events: none; white-space: nowrap; }
+  .logo1 { font-size: 15px; color: #333; } .logo2 { font-size: 32px; color: #222; letter-spacing: .5px; } .logo3 { font-size: 13px; color: #444; }
+  canvas.oled { position: absolute; background: #000; border: 3px solid #111; border-radius: 2px; image-rendering: pixelated; }
+  .fader { position: absolute; background: #1b1b1c; border-radius: 3px; cursor: pointer; touch-action: none; }
+  .fader .fcap { position: absolute; background: linear-gradient(180deg, #fafafa, #cfcfcf); border: 1px solid #777; border-radius: 2px;
+                 box-shadow: 0 1px 3px rgba(0,0,0,.5); pointer-events: none; }
+  .fader.v { width: 6px; } .fader.v .fcap { left: -6px; width: 16px; height: 9px; }
+  .fader.h { height: 6px; } .fader.h .fcap { top: -6px; width: 9px; height: 16px; }
+  .sw { position: absolute; width: 24px; height: 24px; transform: translate(-50%, -50%); border-radius: 50%; cursor: pointer; touch-action: none;
+        background: radial-gradient(circle at 40% 35%, #8a8a88, #3c3c3b 70%); border: 1px solid #222; box-shadow: 0 2px 3px rgba(0,0,0,.35); }
+  .sw.lit { background: radial-gradient(circle at 40% 35%, #fff6d8, #ffb43c 70%); box-shadow: 0 0 10px 2px rgba(255,180,60,.8); }
+  .sw.litg { background: radial-gradient(circle at 40% 35%, #d8ffd8, #36c24a 70%); box-shadow: 0 0 10px 2px rgba(60,220,90,.8); }
+  .sw.down { box-shadow: inset 0 2px 5px rgba(0,0,0,.6); }
+  .sw.held { outline: 3px solid #e0a020; outline-offset: 2px; }
+  .joy { position: absolute; width: 78px; height: 78px; transform: translate(-50%, -50%); border-radius: 50%; background: #1d1d1d; touch-action: none; cursor: grab; }
+  .joy .stick { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; margin: -30px 0 0 -30px; border-radius: 50%;
+                background: radial-gradient(circle at 40% 32%, #fafafa, #d8d8d6 55%, #9c9c9a); pointer-events: none; transition: transform .12s; }
+  .joy.drag .stick { transition: none; }
+  .joy.pressed .stick { box-shadow: inset 0 0 0 4px #3ddc63; }
+  .help { color: var(--dim); font-size: 11px; padding-top: 8px; }
+  .help kbd { background: #2c3036; border: 1px solid #3a3d44; border-radius: 3px; padding: 0 4px; font-size: 10px; color: var(--text); }
+  .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--dim); user-select: none; font-size: 11px; }
+  .switch input { appearance: none; width: 30px; height: 16px; border-radius: 8px; background: #3a3d44; position: relative; margin: 0; cursor: pointer; transition: background .15s; }
+  .switch input::after { content: ""; position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #cfd3d9; transition: left .15s; }
+  .switch input:checked { background: var(--g); }
+  .switch input:checked::after { left: 16px; }
+  .switch input:focus-visible { outline: 2px solid #6ab0ff; outline-offset: 2px; }
+  .switch.on { color: var(--text); }
+  .sens { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); user-select: none; }
+  .sens input { width: 90px; accent-color: var(--g); }
+</style>
+</head>
+<body>
+<div class="bar"><span><span id="conn" class="dot"></span><span id="connTxt">connecting…</span></span>
+  <span>real MatriX firmware · Port A ⇄ SEQ DIN 4</span>
+  <label class="switch" id="paintSw" title="Drag across the 16x16 grid to tap every key you pass: start on an empty key to fill, on a lit key to erase">
+    <input type="checkbox" id="paint" role="switch"> Paint</label>
+  <label class="sens" title="Joystick sensitivity: how far you drag for full deflection (left = fine, a long drag; right = twitchy, a short one)">
+    Stick <input type="range" id="stickSens" min="1" max="10" step="1" value="5"></label></div>
+<div class="holder" id="holder"><div class="mx" id="mx"></div></div>
+<div class="help">Click = press/release. <kbd>⌥</kbd>-click = <b>latch</b> (hold gestures); click again to release. Paint on: drag across the grid to tap each key once (start on an empty key = fill, on a lit key = erase). Faders: drag. Joystick: drag (springs back), click = press; <b>Stick</b> sets how far you drag for full throw.
+  ≡ opens the MatriX menu, ↔ switches Port A/B. With the SEQ: ‹ = EXIT, ✓ = play/stop, A/B = plane flip / row on-off in RACK (next par / trg layer elsewhere), stick press = home. Hold <b>Shift</b> = the MatriX SHIFT key.</div>
+<script>
+"use strict";
+async function post(path) {
+  try { await fetch(path, { method: "POST", headers: { "X-SeqEmu": "1" } }); } catch (e) {}
+}
+const mx = document.getElementById("mx");
+const W = 1180, H = 1015;
+const KX = j => 129 + 55.7 * j, KY = i => 47 + 55.6 * i;
+const div = (cls, text) => { const d = document.createElement("div"); d.className = cls; if (text) d.textContent = text; return d; };
+const add = (el, x, y) => { el.style.left = x + "px"; el.style.top = y + "px"; mx.append(el); return el; };
+const lab = (t, x, y, cls = "") => add(div("lab " + cls, t), x, y);
+function frame(x, y, w, h) { const f = div("frame"); Object.assign(f.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" }); mx.append(f); }
+frame(18, 18, 58, 892); frame(100, 18, 891, 892); frame(18, 934, 58, 56); frame(100, 934, 891, 56);
+
+// ---- keys: x 0 = extra column, 1..16 grid; y 16 = extra row; (0,16) = SHIFT
+const keys = [];
+const latched = new Set();
+// Paint (toggle): a drag that starts on the 16x16 grid taps every grid key it
+// passes, once each. The first key decides fill vs erase: start on an unlit key
+// and only unlit keys get tapped, start on a lit one and only lit keys do —
+// so a stroke never knocks out the notes it crosses. Extra row/column never paint.
+const paintSw = document.getElementById("paint");
+try { paintSw.checked = localStorage.getItem("mxemu.paint") === "1"; } catch (e) {}
+const syncPaint = () => document.getElementById("paintSw").classList.toggle("on", paintSw.checked);
+paintSw.addEventListener("change", () => { syncPaint(); try { localStorage.setItem("mxemu.paint", paintSw.checked ? "1" : "0"); } catch (e) {} });
+syncPaint();
+const keyDown = (k, on) => { k.classList.toggle("down", on); post(`/api/key?x=${k.dataset.x}&y=${k.dataset.y}&down=${on ? 1 : 0}`); };
+const isGrid = k => +k.dataset.x >= 1 && +k.dataset.y <= 15;
+let stroke = null;   // { fill, cur, done:Set }
+
+function key(x, y, px, py) {
+  const k = add(div("key"), px, py);
+  k.dataset.x = x; k.dataset.y = y;
+  const id = `${x},${y}`;
+  let held = false;
+  k.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    if (e.altKey || latched.has(id)) {
+      if (latched.has(id)) { latched.delete(id); k.classList.remove("held", "down"); post(`/api/key?x=${x}&y=${y}&down=0`); }
+      else { latched.add(id); k.classList.add("held", "down"); post(`/api/key?x=${x}&y=${y}&down=1`); }
+      return;
+    }
+    k.setPointerCapture(e.pointerId);
+    if (paintSw.checked && isGrid(k)) {
+      stroke = { fill: !k.classList.contains("lit"), cur: k, done: new Set([k]) };
+      keyDown(k, true);
+      return;
+    }
+    held = true; keyDown(k, true);
+  });
+  k.addEventListener("pointermove", e => {
+    if (!stroke) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const k2 = el && el.closest(".key");
+    if (k2 === stroke.cur) return;
+    if (stroke.cur) keyDown(stroke.cur, false);       // leaving a key = its release
+    stroke.cur = null;
+    if (k2 && isGrid(k2) && !stroke.done.has(k2) && k2.classList.contains("lit") !== stroke.fill) {
+      stroke.done.add(k2); stroke.cur = k2; keyDown(k2, true);
+    }
+  });
+  const up = () => {
+    if (stroke) { if (stroke.cur) keyDown(stroke.cur, false); stroke = null; return; }
+    if (!held) return; held = false; keyDown(k, false);
+  };
+  k.addEventListener("pointerup", up); k.addEventListener("pointercancel", up);
+  return k;
+}
+for (let y = 0; y < 16; y++) {
+  keys[y] = [key(0, y, 46, KY(y))];
+  for (let x = 1; x <= 16; x++) keys[y][x] = key(x, y, KX(x - 1), KY(y));
+  lab(String(y + 1), 88, KY(y));
+}
+keys[16] = [key(0, 16, 46, 962)];
+for (let x = 1; x <= 16; x++) { keys[16][x] = key(x, 16, KX(x - 1), 962); lab("ABCDEFGHIJKLMNOP"[x - 1], KX(x - 1), 921); }
+lab("Shift", 46, 921);
+
+// ---- right strip
+lab("midi·phy", 1086, 65, "logo1"); lab("MatriX", 1086, 95, "logo2"); lab("Mechanical Grid", 1086, 120, "logo3");
+const oled = document.createElement("canvas");
+oled.className = "oled"; oled.width = 128; oled.height = 128;
+Object.assign(oled.style, { left: "1033px", top: "164px", width: "108px", height: "108px" });
+mx.append(oled);
+const octx = oled.getContext("2d");
+const oimg = octx.createImageData(128, 128);
+
+let pins = null;
+const ain = (pin, v) => post(`/api/ain?pin=${pin}&v=${Math.max(0, Math.min(4095, Math.round(v)))}`);
+function fader(name, label, x, y, len, vertical) {
+  const f = div("fader " + (vertical ? "v" : "h"));
+  Object.assign(f.style, vertical ? { left: (x - 3) + "px", top: y + "px", height: len + "px" } : { left: x + "px", top: (y - 3) + "px", width: len + "px" });
+  const c = div("fcap"); f.append(c); mx.append(f);
+  const place = t => { if (vertical) c.style.top = ((1 - t) * (len - 9)) + "px"; else c.style.left = (t * (len - 9)) + "px"; };
+  place(0.5);
+  let drag = false;
+  const set = e => {
+    if (!pins) return;
+    const r = f.getBoundingClientRect();
+    let t = vertical ? 1 - (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width;
+    t = Math.max(0, Math.min(1, t));
+    place(t); ain(pins[name], t * 4095);
+  };
+  f.addEventListener("pointerdown", e => { e.preventDefault(); drag = true; f.setPointerCapture(e.pointerId); set(e); });
+  f.addEventListener("pointermove", e => { if (drag) set(e); });
+  f.addEventListener("pointerup", () => drag = false);
+  f.title = "fader " + label;
+  lab(label, x + (vertical ? 13 : len / 2), vertical ? y + len / 2 : y + 13);
+}
+fader("f1", "1", 1045, 407, 115, true); fader("f2", "2", 1128, 407, 115, true);
+fader("f3", "3", 1045, 560, 112, true); fader("f4", "4", 1128, 560, 112, true);
+fader("fy", "Y", 1029, 919, 112, false); fader("fx", "X", 1029, 961, 112, false);
+
+// panel switches (DIN pins) + their LEDs
+const sws = {};
+function sw(id, x, y, text, title) {
+  const b = add(div("sw"), x, y);
+  b.title = title;
+  let held = false;
+  b.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    if (e.altKey || latched.has(id)) {
+      if (latched.has(id)) { latched.delete(id); b.classList.remove("held", "down"); post(`/api/sw?id=${id}&down=0`); }
+      else { latched.add(id); b.classList.add("held", "down"); post(`/api/sw?id=${id}&down=1`); }
+      return;
+    }
+    held = true; b.classList.add("down"); b.setPointerCapture(e.pointerId); post(`/api/sw?id=${id}&down=1`);
+  });
+  const up = () => { if (!held) return; held = false; b.classList.remove("down"); post(`/api/sw?id=${id}&down=0`); };
+  b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up);
+  if (text) lab(text, x, y + 21);
+  sws[id] = b;
+}
+sw("back", 1046, 715, "‹", "Back"); sw("menu", 1087, 705, "≡", "Menu"); sw("ok", 1129, 715, "✓", "OK");
+sw("a", 1046, 880, "A", "A"); sw("b", 1129, 880, "B", "B"); sw("toggle", 1087, 890, "↔", "Port A/B toggle");
+
+// joystick: drag = X/Y (springs back to centre), click without moving = press
+const joy = add(div("joy"), 1087, 797);
+const stick = div("stick"); joy.append(stick);
+let jdrag = null, jmoved = false;
+const JR = 30;
+// sensitivity: full deflection after a drag of JR*(11-s) faceplate units (s=10 = the
+// old 1:1 throw), shaped by a soft curve so small moves stay fine near centre
+const stickSens = document.getElementById("stickSens");
+try { const v = localStorage.getItem("mxemu.stick"); if (v) stickSens.value = v; } catch (e) {}
+stickSens.addEventListener("input", () => { try { localStorage.setItem("mxemu.stick", stickSens.value); } catch (e) {} });
+const JCURVE = 1.6;
+function joyDrag(dx, dy) {
+  const m = Math.hypot(dx, dy);
+  if (!m) return joySet(0, 0);
+  const n = Math.min(1, m / (JR * (11 - +stickSens.value)));
+  const k = JR * Math.pow(n, JCURVE) / m;
+  joySet(dx * k, dy * k);
+}
+function joySet(dx, dy) {
+  const m = Math.hypot(dx, dy), k = m > JR ? JR / m : 1;
+  dx *= k; dy *= k;
+  stick.style.transform = `translate(${dx}px, ${dy}px)`;
+  // MatriX convention (from LoopA: tapping the extra column's TOP row sets the
+  // window's Y to -4096, the bottom +3584): +X = right, +Y = DOWN
+  // full throw must reach the ADC's real ends (0 / 4095): one count short (1) lands
+  // a column short in the MatriX's position display after its dead zone
+  if (pins) { ain(pins.jx, 2048 + (dx / JR) * 2048); ain(pins.jy, 2048 + (dy / JR) * 2048); }
+}
+joy.addEventListener("pointerdown", e => { e.preventDefault(); jdrag = { x: e.clientX, y: e.clientY }; jmoved = false; joy.classList.add("drag"); joy.setPointerCapture(e.pointerId); });
+joy.addEventListener("pointermove", e => {
+  if (!jdrag) return;
+  const s = mx.getBoundingClientRect().width / W;
+  const dx = (e.clientX - jdrag.x) / s, dy = (e.clientY - jdrag.y) / s;
+  if (Math.hypot(dx, dy) > 3) jmoved = true;
+  if (jmoved) joyDrag(dx, dy);
+});
+joy.addEventListener("pointerup", () => {
+  joy.classList.remove("drag");
+  if (jdrag && !jmoved) {           // click = joystick press
+    joy.classList.add("pressed"); post("/api/sw?id=joy&down=1");
+    setTimeout(() => { joy.classList.remove("pressed"); post("/api/sw?id=joy&down=0"); }, 120);
+  } else joySet(0, 0);               // spring back
+  jdrag = null;
+});
+joy.title = "joystick (drag; click = press)";
+
+// ---- scale to the window
+const holder = document.getElementById("holder");
+function fit() { const s = holder.clientWidth / W; mx.style.transform = `scale(${s})`; holder.style.height = (H * s) + "px"; }
+new ResizeObserver(fit).observe(holder); fit();
+
+// ---- poll
+// A WS2812 value is linear light (PWM duty). On the real unit a dim LED is
+// still its colour, just fainter light; drawn as a plain rgb() it becomes a
+// dark colour instead (maroon, not dim red), which is how low menu Brightness
+// turned the grid near-black. So an LED is drawn as LIGHT OVER THE KEY: the
+// hue from the channel ratios at full strength, and the intensity (the
+// brightest channel) as how strongly it covers the unlit lens and glows -
+// both sRGB-encoded, the way the eye takes linear light.
+const srgb = v => v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+const mix = (a, b, t) => a.map((v, i) => Math.round(v * t + b[i] * (1 - t)));
+const LENS = [207, 207, 204], CAP = [255, 255, 255];   // #cfcfcc unlit lens, white keycap
+function ledLook(r, g, b) {
+  const m = Math.max(r, g, b) / 255;
+  const hue = [r, g, b].map(v => Math.round(255 * srgb(v / 255 / m)));
+  const a = srgb(m);
+  return { kc: `rgb(${mix(hue, LENS, a)})`, kg: `rgba(${hue},${a.toFixed(3)})`, kt: `rgb(${mix(hue, CAP, 0.28 * a)})` };
+}
+let lastKeys = "", oledVer = -1, oledBusy = false;
+function drawKeys(hex) {
+  if (hex === lastKeys) return;
+  lastKeys = hex;
+  for (let y = 0; y < 17; y++) for (let x = 0; x < 17; x++) {
+    const k = keys[y][x]; if (!k) continue;
+    const i = (y * 17 + x) * 6;
+    const r = parseInt(hex.substr(i, 2), 16), g = parseInt(hex.substr(i + 2, 2), 16), b = parseInt(hex.substr(i + 4, 2), 16);
+    if (r + g + b > 3) {
+      const l = ledLook(r, g, b);
+      k.classList.add("lit");
+      k.style.setProperty("--kc", l.kc); k.style.setProperty("--kg", l.kg); k.style.setProperty("--kt", l.kt);
+    } else k.classList.remove("lit");
+  }
+}
+async function fetchOled() {
+  if (oledBusy) return;
+  oledBusy = true;
+  try {
+    const buf = new Uint8Array(await (await fetch("/api/oled", { cache: "no-store" })).arrayBuffer());
+    // the panel is scanned bottom-up: buffer row 0 is the BOTTOM line
+    for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+      const i = ((127 - y) * 128 + x) * 3, j = (y * 128 + x) * 4;
+      oimg.data[j] = Math.min(255, buf[i] * 4); oimg.data[j + 1] = Math.min(255, buf[i + 1] * 4);
+      oimg.data[j + 2] = Math.min(255, buf[i + 2] * 4); oimg.data[j + 3] = 255;
+    }
+    octx.putImageData(oimg, 0, 0);
+  } catch (e) {}
+  oledBusy = false;
+}
+function setConn(ok) {
+  document.getElementById("conn").className = "dot " + (ok ? "ok" : "bad");
+  document.getElementById("connTxt").textContent = ok ? "connected" : "offline — is matrixemu running?";
+}
+let lastOledFetch = 0;
+async function poll() {
+  try {
+    const s = await (await fetch("/api/state", { cache: "no-store" })).json();
+    setConn(true);
+    pins = s.pins;
+    drawKeys(s.keys);
+    for (const id of ["back", "menu", "ok", "a", "b"]) sws[id].classList.toggle("lit", !!s.leds[id]);
+    sws.toggle.classList.toggle("litg", !!s.leds.ta); sws.toggle.classList.toggle("lit", !s.leds.ta && !!s.leds.tb);
+    const now = performance.now();
+    if (s.oled !== oledVer && now - lastOledFetch > 60) { oledVer = s.oled; lastOledFetch = now; fetchOled(); }
+  } catch (e) { setConn(false); }
+  setTimeout(poll, 40);
+}
+poll();
+
+// keyboard Shift = the MatriX SHIFT key (0,16)
+let shiftKb = false;
+document.addEventListener("keydown", e => { if (e.key === "Shift" && !shiftKb) { shiftKb = true; keys[16][0].classList.add("down"); post("/api/key?x=0&y=16&down=1"); } });
+document.addEventListener("keyup", e => { if (e.key === "Shift" && shiftKb) { shiftKb = false; keys[16][0].classList.remove("down"); post("/api/key?x=0&y=16&down=0"); } });
+window.addEventListener("blur", () => { if (shiftKb) { shiftKb = false; keys[16][0].classList.remove("down"); post("/api/key?x=0&y=16&down=0"); } });
+</script>
+</body>
+</html>
